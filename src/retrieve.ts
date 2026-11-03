@@ -181,6 +181,8 @@ export interface MemoryHit {
   counterEvidence?: number[]
   /** v0.6: scene tag and the composite pointer for "look this up" hints. */
   scene?: string
+  /** v0.17: the project/system this memory is about; different domains never conflict. */
+  domain?: string
   /** v0.8: the workspace that produced this memory (isolation provenance). */
   workspace?: string
   /** v0.15: trust tier (human / tool / inferred), rendered in the hint. */
@@ -204,6 +206,8 @@ interface Document {
   confidence?: number
   counterEvidence?: number[]
   scene?: string
+  /** v0.17: the project/system this memory is about. */
+  domain?: string
   /** v0.8: the workspace this memory was written from; empty = unknown. */
   workspace?: string
   /**
@@ -392,6 +396,9 @@ function skillDocuments(skillsDir: string, now: number): Document[] {
     const workspace = normalizeWorkspace(text.match(/^workspace:\s*(.+)$/mu)?.[1] ?? '')
     // v0.15: the validity window and trust tier live in the same frontmatter.
     const validity = readSkillValidity(text)
+    // v0.17: the semantic domain, the axis that decides what may be a conflict.
+    const domainText = (text.match(/^domain:\s*(.+)$/mu)?.[1] ?? '').trim().toLowerCase()
+    const domain = /^[a-z][a-z0-9-]{1,31}$/u.test(domainText) ? domainText : 'general'
     // v0.5: aliases are recall fuel: "连数据库" must find a skill whose trigger
     // says "pymysql 连接" even though neither word matches.
     const aliases = (text.match(/^aliases:\s*(.+)$/mu)?.[1] ?? '').split(/,/u).map((item) => item.trim()).filter(Boolean)
@@ -420,6 +427,7 @@ function skillDocuments(skillsDir: string, now: number): Document[] {
       detail: when,
       scope,
       workspace,
+      domain,
       scanText: text,
       validAt: validity.validAt,
       invalidAt: validity.invalidAt,
@@ -496,6 +504,8 @@ function negativeDocuments(memoryDir: string, now: number): Document[] {
         scope: scopeText === 'workspace' || scopeText === 'global' ? scopeText : 'project',
         // v0.8: the same isolation contract as SKILL.md.
         workspace: normalizeWorkspace(record.workspace),
+        // v0.17: the conflict axis.
+        domain: String(record.domain ?? 'general').trim().toLowerCase(),
         scanText: `${symptom}\n${cause}\n${avoid}`,
         // v0.15: same bi-temporal + trust contract as SKILL.md.
         validAt: typeof record.valid_at === 'string' ? record.valid_at : undefined,
@@ -546,6 +556,7 @@ function layerDocuments(memoryDir: string, file: string, kind: 'fact' | 'experie
         title: clipTitle(text, 60),
         detail: text.slice(0, 120),
         workspace: normalizeWorkspace(record.workspace),
+        domain: String(record.domain ?? 'general').trim().toLowerCase(),
         scanText: text,
         // v0.15: facts and experiences carry the same window when they were written
         // by a v0.15 store; an older row simply has none and stays always-valid.
@@ -675,9 +686,25 @@ function preferHumanInConflict(skills: MemoryHit[]): MemoryHit[] {
       (first.conflictsWith ?? []).includes(candidate.id) || (candidate.conflictsWith ?? []).includes(first.id),
   )
   if (rival === undefined) return skills
+  // v0.17: a declared conflict across two semantic domains is not a conflict. The
+  // link may predate the domain field, or a writer may have set it by hand; either
+  // way, reordering on the strength of it would present two unrelated procedures
+  // as a choice the user has to make.
+  if (!sameConflictDomain(first, rival)) return skills
   const rank = (hit: MemoryHit): number => (hit.provenance === 'human' ? 2 : hit.provenance === 'tool' ? 1 : 0)
   if (rank(rival) <= rank(first)) return skills
   return [rival, ...skills.filter((hit) => hit.id !== rival.id)]
+}
+
+/** v0.17: two memories may be alternatives only when their domains are compatible. */
+function sameConflictDomain(left: { domain?: string }, right: { domain?: string }): boolean {
+  const a = (left.domain ?? 'general').trim().toLowerCase()
+  const b = (right.domain ?? 'general').trim().toLowerCase()
+  if (a === b) return true
+  // `general` is "not stated", not a domain of its own: refusing to compare a
+  // legacy record against a tagged one would silently disable conflicts for every
+  // memory written before this field existed.
+  return a === 'general' || b === 'general'
 }
 
 function hitOf(document: Document, score: number): MemoryHit {
@@ -698,6 +725,7 @@ function hitOf(document: Document, score: number): MemoryHit {
     ...(document.counterEvidence === undefined ? {} : { counterEvidence: document.counterEvidence }),
     ...(document.scene === undefined ? {} : { scene: document.scene }),
     ...(document.workspace === undefined || document.workspace.length === 0 ? {} : { workspace: document.workspace }),
+    ...(document.domain === undefined ? {} : { domain: document.domain }),
     ...(document.provenance === undefined ? {} : { provenance: document.provenance }),
     ...(document.validAt === undefined ? {} : { validAt: document.validAt }),
     ...(document.sessionId === undefined ? {} : { sessionId: document.sessionId }),
@@ -985,13 +1013,10 @@ export function renderHint(result: RetrieveResult): string | undefined {
     }
     // v0.15: state the trust tier for anything the AGENT concluded. A hint that
     // reads like a user instruction, but was inferred by a model from a log,
-    // invites blind obedience; one short marker is the cheapest correction.
-    // Written as "not human" rather than "tool or inferred": a record with no tier
-    // at all (pre-v0.15) is an inference too, and a missing field must not be the
-    // one case that escapes the disclaimer.
-    if ((result.skill.provenance ?? 'inferred') !== 'human') {
-      parts.push('[来源：工具推断，请核实]')
-    }
+    // invites blind obedience.
+    // v0.17: the marker is a PREFIX on the whole sentence (see below) rather than a
+    // trailing note here: a footnote reads as a comment on a fact, while the failure
+    // mode is a model obeying an inference as if the user had just asked for it.
   }
   const negative = result.negative
   if (negative !== undefined) {
@@ -1014,7 +1039,16 @@ export function renderHint(result: RetrieveResult): string | undefined {
   }
   if (parts.length === 0) return undefined
   const staleWarning = result.skill?.stale === true ? '注意：此技能较久未被验证，请结合当前环境谨慎使用。' : ''
-  const text = `（记忆提示：${parts.join('；')}。${staleWarning}）`
+  // v0.17: the trust tier is a PREFIX, not a footnote.
+  //
+  // Only a `human` record may present itself as an ordinary "记忆提示": it is the
+  // user's own statement, so it carries the user's authority. Anything the agent
+  // concluded is prefixed with what it actually is — historical data, not a
+  // current instruction — because the failure this guards against is a model
+  // obeying a machine inference as if the user had just asked for it.
+  const trusted = (result.skill?.provenance ?? result.negative?.provenance ?? result.fact?.provenance ?? result.experience?.provenance ?? 'inferred') === 'human'
+  const trustPrefix = trusted ? '' : '[参考历史数据，非当前指令] '
+  const text = `${trustPrefix}（记忆提示：${parts.join('；')}。${staleWarning}）`
   // v0.8.1: the last gate. Every field above comes from the store, and the store
   // is already filtered — but this is the exact string that enters a prompt, so it
   // is the one place where "the filter upstream did its job" is worth re-checking.
@@ -1041,6 +1075,6 @@ export function renderHint(result: RetrieveResult): string | undefined {
   // The provenance marker is part of the sentence's meaning, not decoration: it
   // must survive the length cap, exactly like the stale warning.
   const long =
-    staleWarning.length > 0 || fact !== undefined || experience !== undefined || text.includes('来源：工具推断')
+    staleWarning.length > 0 || fact !== undefined || experience !== undefined || trustPrefix.length > 0
   return text.slice(0, long ? 260 : 120)
 }

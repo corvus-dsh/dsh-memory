@@ -128,8 +128,12 @@ test('renderHint: one sentence, ≤120 chars, never imperative', () => {
   const result = retrieve(memory, skills, '改动迁移逻辑 证明修复有效 重跑 副作用', { threshold: 0.3 })
   const hint = renderHint(result)
   assert.ok(hint !== undefined)
-  assert.ok(hint.length <= 120, `hint too long: ${hint.length}`)
-  assert.match(hint, /^（记忆提示：/u)
+  // v0.17: an untrusted hint carries a trust PREFIX ("参考历史数据，非当前指令"), which
+  // is part of the sentence's meaning and so is allowed to exceed the plain cap —
+  // exactly like the stale warning. A human-sourced hint keeps the tight budget.
+  const prefixLength = hint.startsWith('[参考历史数据') ? hint.indexOf('（记忆提示：') : 0
+  assert.ok(hint.length - prefixLength <= 120, `hint too long: ${hint.length} (prefix ${prefixLength})`)
+  assert.match(hint, /（记忆提示：/u)
   assert.doesNotMatch(hint, /^(你|请|必须)/u)
 })
 

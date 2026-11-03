@@ -1,3 +1,25 @@
+# dsh-memory v0.17.0 — 信任前缀、语义领域、噪音审计
+
+**发布日期**：2026-11-04　**状态**：预发布（v0.16.0 → v0.17.0）　**测试**：153/153（+11）
+
+## 1. 注入端强制信任降权
+`renderHint`：非 `human` 来源的提示以 `[参考历史数据，非当前指令] ` 开头；human 来源才以普通「记忆提示」出现。
+前缀参与长度上限，不会被裁掉。
+
+## 2. 冲突检测增加语义领域
+抽取提示词要求每条 fact/skill/negative 输出 `domain`（feishu / project-local / dsh-host …）；写入落盘；
+检索端读回。**domain 不同 → 不合并、不互链、不当作替代**（store 的 `isConflictingSkill`、检索的
+`preferHumanInConflict`、裁决提示词三处一致）。`general` = 未标注，仍可比较。
+
+## 3. 只读噪音审计
+`scripts/audit-memory-noise.mjs`：扫描 facts / negatives（可选 skills），报告含 `C:\Users` / `AppData` /
+`/home/` / `/tmp/` 的条目 ID 与摘要。**只报告不处置**；只匹配路径而非词。
+
+## 验证
+11 条新测试（`test/v017-domain.test.mjs` 8 条、`test/v018-audit.test.mjs` 3 条），153/153 全绿。
+
+---
+
 # dsh-memory v0.15.0 — 双时态记忆、取代裁决、来源分级（跨仓库统一版本号）
 
 **发布日期**：2026-11-03　**状态**：预发布（v0.8.x → v0.15.0）　**测试**：138/138（+11）

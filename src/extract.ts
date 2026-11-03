@@ -41,6 +41,21 @@ export interface EvidenceRef {
 /** v0.6: scene is the isolation axis: database / ui / plugin-dev / … */
 export type MemoryScene = string
 
+/**
+ * v0.17 semantic domain — which PROJECT OR SYSTEM a memory is about
+ * (feishu / project-local / dsh-host / …).
+ *
+ * Why a second axis next to `scene`: `scene` routes retrieval by technology
+ * ("this is a database question"), which is the wrong question for conflict
+ * detection. Two procedures can share a technology and a trigger and still be
+ * about different systems — "缓存" in a Feishu client and "缓存" in this repo's
+ * own build are not two ways of doing one thing, and linking them as
+ * alternatives made the hint ask the user to choose between unrelated methods.
+ * Different domains are therefore never alternatives, never merged, never
+ * cross-linked.
+ */
+export type MemoryDomain = string
+
 export interface ExtractedFact {
   /** What happened, in one observable sentence. */
   text: string
@@ -48,6 +63,8 @@ export interface ExtractedFact {
   seq: number
   /** v0.6: the domain this observation belongs to. */
   scene: MemoryScene
+  /** v0.17: the project/system this is about. Absent/unknown = `general`. */
+  domain?: MemoryDomain
 }
 
 export interface ExtractedExperience {
@@ -93,6 +110,8 @@ export interface ExtractedSkill {
   scope: MemoryScope
   /** v0.6: the scene that gates retrieval. */
   scene: MemoryScene
+  /** v0.17: the project/system this is about; a different domain never conflicts. */
+  domain?: MemoryDomain
   /** v0.5: 2-3 alternate phrasings a future session might search with. */
   aliases: string[]
   /** v0.7: operational (a tool did something) vs observational (a tool read). */
@@ -127,6 +146,8 @@ export interface ExtractedNegative {
   scope: MemoryScope
   /** v0.6: scene gate. */
   scene: MemoryScene
+  /** v0.17: the project/system this is about. */
+  domain?: MemoryDomain
   /** v0.15: same bi-temporal + trust fields as skills. */
   provenance?: MemoryProvenance
   validAt?: string
@@ -155,6 +176,9 @@ export const EXTRACT_SYSTEM_PROMPT = [
   'HARD RULES:',
   '1. Never invent evidence. Every entry cites seqs listed in the episode; an entry with an unlisted seq is discarded. The runner re-opens the cited seq in the real session log and drops any skill whose evidence does not show the operation actually succeeding.',
   '1b. Every entry (fact, experience, negative, skill) carries a `scene`: a short latin tag naming the domain, e.g. database, ui, plugin-dev, testing, session-ops, docs. The tag vocabulary is NOT a fixed list: reuse an existing tag when the memory clearly belongs to it, otherwise invent a short latin tag for the domain. Retrieval classifies the query into the same vocabulary, so a mislabelled scene hides the memory.',
+  // v0.17: the conflict axis. Without it, every procedure that shares a
+  // technology looks like an alternative to every other one.
+  '1c. Every entry also carries a `domain`: the PROJECT OR SYSTEM it is about, as a short latin tag — for example `feishu` (a Feishu/Lark client), `project-local` (this repository\'s own code and build), `dsh-host` (the DSH harness itself), `postgres-migration`. `scene` says WHICH TECHNOLOGY; `domain` says WHICH SYSTEM. Two memories with different domains are NEVER alternatives for each other, never "the newer way to do the same thing", and never a conflict — they are about different things. Reuse an existing domain tag whenever the entry clearly belongs to it.',
   '2. A skill is a PROCEDURE, not a slogan. It needs at least 2 execution steps and at least 1 verification criterion. "样本必须超过阈值" alone is a REFUSAL, not a skill.',
   '2b. If the session BUILT a reusable artifact (a client, ORM, wrapper, migration, protocol), one of the two skills MUST be that artifact\'s core technique: driver/setup, connection and transaction shape, and the pitfall that shaped it. Process lessons may take the other slot. Do not reduce such a session to process lessons ("test in rounds") when the method itself is the reusable asset.',
   '3. A skill must state WHEN it applies, concretely enough that a fresh session can decide yes or no.',
@@ -207,6 +231,12 @@ const SCENE = /^[a-z][a-z0-9-]{1,23}$/
 export function asProvenance(value: unknown): MemoryProvenance | undefined {
   const text = typeof value === 'string' ? value.trim().toLowerCase() : ''
   return text === 'human' || text === 'tool' || text === 'inferred' ? (text as MemoryProvenance) : undefined
+}
+
+/** v0.17: a domain is a short latin tag; anything else degrades to `general`. */
+export function asDomain(value: unknown): MemoryDomain {
+  const text = typeof value === 'string' ? value.trim().toLowerCase() : ''
+  return /^[a-z][a-z0-9-]{1,31}$/u.test(text) ? text : 'general'
 }
 
 /** v0.6: scene must be a simple latin tag; anything else degrades to `general`. */
@@ -292,7 +322,7 @@ export function sanitizeExtraction(raw: unknown, episode: Episode): ExtractionRe
       dropped.push(`${label}: fact has no valid seq pointer`)
       continue
     }
-    facts.push({ text: text.slice(0, 240), seq, scene: asScene(item.scene) })
+    facts.push({ text: text.slice(0, 240), seq, scene: asScene(item.scene), domain: asDomain(item.domain) })
   }
 
   const rawExperiences = Array.isArray((raw as any).experiences) ? (raw as any).experiences : []
@@ -310,7 +340,7 @@ export function sanitizeExtraction(raw: unknown, episode: Episode): ExtractionRe
       dropped.push(`${label}: experience has no valid seq pointer`)
       continue
     }
-    experiences.push({ text: text.slice(0, 240), seq, scene: asScene(item.scene) })
+    experiences.push({ text: text.slice(0, 240), seq, scene: asScene(item.scene), domain: asDomain(item.domain) })
   }
 
   const rawSkills = Array.isArray((raw as any).skills) ? (raw as any).skills : []
@@ -363,6 +393,7 @@ export function sanitizeExtraction(raw: unknown, episode: Episode): ExtractionRe
       scope: asScope(item.scope),
       scene: asScene(item.scene),
       aliases: asTextList(item.aliases ?? item.alias, 3),
+      domain: asDomain(item.domain),
       // v0.15: a HINT from the model, overridden by the runner's evidence-derived
       // tier. The model is not the authority on how much its own output is trusted.
       ...(asProvenance(item.provenance) === undefined ? {} : { provenance: asProvenance(item.provenance) }),
@@ -393,6 +424,7 @@ export function sanitizeExtraction(raw: unknown, episode: Episode): ExtractionRe
       avoid: avoid.slice(0, 200),
       scope: asScope(item.scope),
       scene: asScene(item.scene),
+      domain: asDomain(item.domain),
       ...(asProvenance(item.provenance) === undefined ? {} : { provenance: asProvenance(item.provenance) }),
       evidence,
     })

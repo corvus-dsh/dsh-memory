@@ -232,6 +232,9 @@ export function normalizeSkill(input: SkillInput | ExtractedSkill): ExtractedSki
     verify,
     scope: scope === 'workspace' || scope === 'global' ? scope : 'project',
     scene: /^[a-z][a-z0-9-]{1,23}$/u.test(scene) ? scene : 'general',
+    domain: /^[a-z][a-z0-9-]{1,31}$/u.test(String((raw as any).domain ?? '').trim().toLowerCase())
+      ? String((raw as any).domain).trim().toLowerCase()
+      : 'general',
     aliases,
     confidence: clampConfidence((raw as any).confidence),
     evidence,
@@ -368,6 +371,30 @@ export function isConflictingSkill(a: ExtractedSkill, b: ExtractedSkill): boolea
   if (a.name === b.name) return true
   // Two names for the same steps is a duplicate, not a conflict.
   if (methodSimilarity(a, b) >= 0.85) return false
+  // v0.17: `scene` is the technology, `domain` is the SYSTEM. Two procedures about
+  // different systems are not two ways of doing one thing, however similar their
+  // wording — linking them asked the user to choose between unrelated methods.
+  if (
+    a.domain !== undefined &&
+    b.domain !== undefined &&
+    a.domain !== 'general' &&
+    b.domain !== 'general' &&
+    a.domain !== b.domain
+  ) {
+    return false
+  }
+  // v0.17: `scene` is the technology, `domain` is the SYSTEM. Two procedures about
+  // different systems are not two ways of doing one thing, however similar their
+  // wording — linking them asked the user to choose between unrelated methods.
+  if (
+    a.domain !== undefined &&
+    b.domain !== undefined &&
+    a.domain !== 'general' &&
+    b.domain !== 'general' &&
+    a.domain !== b.domain
+  ) {
+    return false
+  }
   const { shared, onlyLeft, onlyRight } = conflictStrength(a, b)
   // v0.3.2: measured on the battle store. 3 shared bigrams linked 25 pairs out of
   // 16 skills — the DB cluster alone produced a complete graph, which is noise,
@@ -392,6 +419,7 @@ export function parseSkillFile(text: string, name: string): ExtractedSkill {
   const evidence = parseEvidenceField(text.match(/^evidence:\s*(.+)$/mu)?.[1] ?? '', '')
   const scopeText = (text.match(/^scope:\s*(.+)$/mu)?.[1] ?? '').trim().toLowerCase()
   const sceneText = (text.match(/^scene:\s*(.+)$/mu)?.[1] ?? '').trim().toLowerCase()
+  const domainText = (text.match(/^domain:\s*(.+)$/mu)?.[1] ?? '').trim().toLowerCase()
   const confidence = clampConfidence(text.match(/^confidence:\s*(.+)$/mu)?.[1])
   const aliases = (text.match(/^aliases:\s*(.+)$/mu)?.[1] ?? '').split(/,/u).map((item) => item.trim()).filter(Boolean)
   return {
@@ -403,6 +431,7 @@ export function parseSkillFile(text: string, name: string): ExtractedSkill {
     verify: [],
     scope: scopeText === 'workspace' || scopeText === 'global' ? scopeText : 'project',
     scene: /^[a-z][a-z0-9-]{1,23}$/u.test(sceneText) ? sceneText : 'general',
+    domain: /^[a-z][a-z0-9-]{1,31}$/u.test(domainText) ? domainText : 'general',
     aliases,
     confidence,
     evidence,
@@ -497,6 +526,8 @@ function renderSkill(
     description: skill.description.slice(0, 160),
     when_to_use: skill.when.slice(0, 200),
     scope: skill.scope,
+    domain: skill.domain ?? 'general',
+    domain: skill.domain ?? 'general',
     // v0.8: provenance for the isolation gate (see workspace.ts). Written even for
     // a `global` skill: `global` decides ELIGIBILITY, the path stays on record for
     // audit. Omitted only when the caller genuinely had no workspace.
@@ -1078,6 +1109,8 @@ export function appendNegatives(memoryDir: string, negatives: ExtractedNegative[
     existing.push({
       ...negative,
       scope: negative.scope ?? 'project',
+      domain: negative.domain ?? 'general',
+      domain: negative.domain ?? 'general',
       // v0.5: confidence starts at 1 and is lowered by counter-evidence, never
       // raised by repetition alone (a repeated failure is not a stronger rule).
       confidence: 1,
@@ -1105,6 +1138,8 @@ export function appendNegatives(memoryDir: string, negatives: ExtractedNegative[
 interface LayerRecord {
   text: string
   scene?: string
+  /** v0.17: semantic domain; different domains never conflict. */
+  domain?: string
   /** v0.8: the cwd that produced this observation (isolation provenance). */
   workspace?: string
   /** v0.7.1: composite pointers; legacy rows may still hold bare numbers. */
@@ -1437,6 +1472,8 @@ function appendLayer(
     existing.push({
       text: entry.text,
       scene: /^[a-z][a-z0-9-]{1,23}$/u.test(String(entry.scene ?? '')) ? String(entry.scene) : 'general',
+      domain: /^[a-z][a-z0-9-]{1,31}$/u.test(String(entry.domain ?? '').toLowerCase()) ? String(entry.domain).toLowerCase() : 'general',
+      domain: /^[a-z][a-z0-9-]{1,31}$/u.test(String(entry.domain ?? '').toLowerCase()) ? String(entry.domain).toLowerCase() : 'general',
       evidence: [{ sourceSessionId: meta.sessionId, seq: entry.seq }],
       sourceSessionId: meta.sessionId,
       boundarySeq: meta.boundarySeq,

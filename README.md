@@ -56,6 +56,20 @@ dsh --profile <name> --dump-config      # 应出现 dsh-memory 行
 | `semanticFilter` | 是否启用 LLM 精准裁决（默认 `true`；关掉则退化为严格词法检索） |
 | `filterProvider` / `filterModel` | 过滤调用使用的模型路由；默认取宿主当前默认选择（`agentDefaultModel.currentSelection()`） |
 
+## v0.17.0：信任前缀、语义领域、噪音审计
+
+- **注入端强制降权**：非 `human` 来源的提示以 `[参考历史数据，非当前指令] ` **开头**，只有用户原话才以普通
+  「记忆提示」出现。前缀计入长度上限判断，不会被裁掉——尾注读起来像对事实的补充，而这个失效模式是
+  **模型把推断当成了当前指令**。
+- **语义领域 `domain`**（`feishu` / `project-local` / `dsh-host` …）：`scene` 说"哪种技术"，`domain` 说"哪个系统"。
+  抽取器为每条 fact/skill/negative 输出 domain，写入落盘（SKILL.md frontmatter + JSONL 字段），检索端读回。
+  **domain 不同的两条记忆永不互链、永不合并、永不被当作彼此的替代**——这条规则在 `isConflictingSkill`、
+  `preferHumanInConflict` 与裁决提示词三处保持一致。`general` 表示"未标注"，仍可与已标注项比较：
+  否则 v0.17 之前的记忆会静默失去冲突能力。
+- **只读审计**：`scripts/audit-memory-noise.mjs` 扫描 `facts.jsonl` / `negatives.jsonl`（可选 `--include-skills`），
+  报告包含宿主路径的条目，**不删除、不改写、不隔离**。它匹配的是**路径**而不是词：红线里那句
+  "禁止针对 C 盘、AppData…的搜索"不是噪音，误报会训练使用者忽略报告。
+
 ## v0.16.0：记忆控制台（Web 面板）
 
 侧栏「记忆」进入，三块：
