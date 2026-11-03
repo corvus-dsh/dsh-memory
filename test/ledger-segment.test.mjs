@@ -9,14 +9,23 @@ import { segmentSession } from '../lib/segment.js'
 
 test('ledger: missing files mean "no ledgers", never an error', () => {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-mem-ledger-'))
-  assert.deepEqual(readLedgers(dir), { retired: [], transferred: {} })
+  const snapshot = readLedgers(dir)
+  assert.deepEqual(snapshot.retired, [])
+  assert.deepEqual(snapshot.transferred, {})
+  assert.equal(snapshot.deferred, false)
+  assert.deepEqual(snapshot.skipped, [])
+  // v0.18: epoch 0 = absent, and an absent ledger is not a defect.
+  assert.deepEqual(snapshot.epoch, { retired: 0, transferred: 0 })
 })
 
 test('ledger: corrupt json and wrong shapes are tolerated', () => {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-mem-ledger2-'))
   writeFileSync(join(dir, '.retired.json'), '{not json', 'utf8')
   writeFileSync(join(dir, '.transferred.json'), '[1,2,3]', 'utf8')
-  assert.deepEqual(readLedgers(dir), { retired: [], transferred: {} })
+  const snapshot = readLedgers(dir)
+  assert.deepEqual(snapshot.retired, [])
+  assert.deepEqual(snapshot.transferred, {})
+  assert.equal(snapshot.deferred, false)
 })
 
 test('ledger: retired ids are de-duplicated, transfers keep newSessionId', () => {

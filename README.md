@@ -56,6 +56,20 @@ dsh --profile <name> --dump-config      # 应出现 dsh-memory 行
 | `semanticFilter` | 是否启用 LLM 精准裁决（默认 `true`；关掉则退化为严格词法检索） |
 | `filterProvider` / `filterModel` | 过滤调用使用的模型路由；默认取宿主当前默认选择（`agentDefaultModel.currentSelection()`） |
 
+## v0.18.0：台账 epoch、加载时拒读、以及"不再猜最新会话"
+
+- **台账 epoch（共有防线）**：`.retired.json` / `.transferred.json` 现在是 `{epoch, at, pid, payload}` 信封。
+  读取端四种结局：无信封 = epoch 1（v0.17 旧形状，**继续读**）、`epoch == 2` 信任、`epoch > 2` **拒读并等下一次重试**、
+  缺 payload **拒读**。两个插件分开发布，共享的只有一个文件格式；"读到半条记录就据此生成技能"比"晚一轮再生成"更糟，
+  所以拒读是设计而不是降级。
+- **拒读是可见的**：harvest 报告新增 `ledger: { epoch, supportedEpoch, skipped, deferred }`；
+  `memory_stats` 也返回同一份摘要，控制台因此能回答"为什么这次没有抽取"，而不是显示一份空台账（看起来像"没有会话"）。
+- **不猜来源**：`memory_migrate_evidence` 在台账被拒时**不再默认取"最新会话"**——那正是会把证据盖到错误来源上的
+  时刻；它返回原因并等下一次完整写入，或要求显式传 `sessionId`。
+- **加载时扫描（复核）**：`scanThreat` 不只在写入时跑——`retrieve.ts` 读取 SKILL.md/负知识时先扫一遍
+  （`isThreatDocument`），`renderHint` 作为最后一道闸门再扫一遍，命中即**扣留注入**。已有测试守住
+  （`test/v081-threat.test.mjs`：磁盘上已投毒的 SKILL.md 永不被检索、`renderHint` 是最后一道闸门）。
+
 ## v0.17.0：信任前缀、语义领域、噪音审计
 
 - **注入端强制降权**：非 `human` 来源的提示以 `[参考历史数据，非当前指令] ` **开头**，只有用户原话才以普通

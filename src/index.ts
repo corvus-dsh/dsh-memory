@@ -14,7 +14,7 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 
-import { readLedgers } from './ledger.js'
+import { readLedgers, describeLedgerSkips, SUPPORTED_LEDGER_EPOCH } from './ledger.js'
 import { resolveModelTarget, segmentSession } from './segment.js'
 import { extractEpisode } from './extract.js'
 import type { EvidenceRef, ExtractionResult } from './extract.js'
@@ -262,6 +262,17 @@ export interface HarvestReport {
   warnings: string[]
   suggestionsQueued: number
   stats: ReturnType<typeof stats>
+  /**
+   * v0.18: the epoch each ledger file was read at, and the files that had to be
+   * REFUSED this round. `deferred: true` means a retry is owed — the harvest that
+   * returns it mined only the ledgers it could trust.
+   */
+  ledger: {
+    epoch: { retired: number; transferred: number }
+    supportedEpoch: number
+    skipped: Array<{ file: string; epoch: number; reason: string }>
+    deferred: boolean
+  }
 }
 
 /**
@@ -379,6 +390,12 @@ export async function harvest(ctx: ContextLike, config: MemoryConfig): Promise<H
   const ledgers = readLedgers(resolved.graftDataDir)
   const processed = readProcessed(resolved.memoryDir)
   const seen = new Set([...processed].map((key) => key.split(':')[0]))
+  // v0.18: a refused ledger is announced, not silently treated as empty. The
+  // harvest still runs over the files it COULD trust, and the next round retries
+  // the refused one — never "read half a record and generate a skill from it".
+  if (ledgers.deferred) {
+    warnings.push(`handoff ledger deferred: ${describeLedgerSkips(ledgers)}`)
+  }
   const queue = ledgers.retired.filter((id) => !seen.has(id)).slice(0, resolved.harvestLimit)
   let queued = 0
 
@@ -542,6 +559,12 @@ export async function harvest(ctx: ContextLike, config: MemoryConfig): Promise<H
     warnings,
     suggestionsQueued: queued,
     stats: stats(resolved.memoryDir, resolved.skillsDir),
+    ledger: {
+      epoch: ledgers.epoch,
+      supportedEpoch: SUPPORTED_LEDGER_EPOCH,
+      skipped: ledgers.skipped.map((skip) => ({ file: skip.file, epoch: skip.epoch, reason: skip.reason })),
+      deferred: ledgers.deferred,
+    },
   }
 }
 
@@ -709,6 +732,17 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
       extractor: resolved.extractor,
       autoApprove: resolved.autoApprove,
       llmAvailable,
+      // v0.18: so the console can say WHY nothing was harvested after a version
+      // change instead of showing an empty ledger that looks like "no sessions".
+      ledger: (() => {
+        const snapshot = readLedgers(resolved.graftDataDir)
+        return {
+          epoch: snapshot.epoch,
+          supportedEpoch: SUPPORTED_LEDGER_EPOCH,
+          deferred: snapshot.deferred,
+          skipped: snapshot.skipped,
+        }
+      })(),
     }),
   })
 
@@ -723,6 +757,16 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
       let sessionId = String(args.sessionId ?? '').trim()
       if (sessionId.length === 0) {
         const ledgers = readLedgers(resolved.graftDataDir)
+        // v0.18: "the newest session in the ledger" is a GUESS, and a refused
+        // ledger is exactly when guessing would stamp evidence onto the wrong
+        // source. Skip, say why, and let the caller retry with an explicit id.
+        if (ledgers.deferred) {
+          return {
+            error:
+              `handoff ledger is not trustworthy this round, so the newest session is not guessed: ` +
+              `${describeLedgerSkips(ledgers)}. Retry after the next complete write, or pass sessionId explicitly.`,
+          }
+        }
         const stamped = Object.values(ledgers.transferred)
           .map((record) => ({ id: record.newSessionId, at: Number(record.at ?? 0) }))
           .sort((left, right) => right.at - left.at)
@@ -1015,6 +1059,20 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
       },
       scenes,
       skills,
+      // v0.18: the panel answers "why has nothing been harvested?" — a refused
+      // ledger shows up here instead of looking like an empty one.
+      ledger: (() => {
+        const snapshot = readLedgers(resolved.graftDataDir)
+        return {
+          graftDataDir: resolved.graftDataDir,
+          epoch: snapshot.epoch,
+          supportedEpoch: SUPPORTED_LEDGER_EPOCH,
+          deferred: snapshot.deferred,
+          skipped: snapshot.skipped,
+          retired: snapshot.retired.length,
+          transferred: Object.keys(snapshot.transferred).length,
+        }
+      })(),
       generatedAt: new Date().toISOString(),
     }
   }

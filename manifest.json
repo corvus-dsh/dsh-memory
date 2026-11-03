@@ -1,6 +1,6 @@
 {
   "name": "dsh-memory",
-  "version": "0.17.0",
+  "version": "0.18.0",
   "description": "Capability memory for DSH: mine finished sessions into four cognitive layers (facts with seq pointers, experiences, negative paths, structured SKILL.md skills), and filter lexical retrieval with a cheap LLM relevance pass. Reads the handoff ledger as a file contract; imports nothing from the slicing plugin.",
   "entry": "lib/index.js",
   "activate": "activate(ctx, config)",
@@ -25,6 +25,7 @@
   },
   "notes": [
     "Decoupling contract: reads .retired.json / .transferred.json from the slicing plugin's dataDir. No code import in either direction.",
+    "v0.18.0: those ledgers are read as epoch envelopes. A newer writer's epoch, or an envelope with no payload, is REFUSED (reported as ledger.deferred) instead of being half-understood.",
     "Skills are written as structured SKILL.md (frontmatter with when_to_use + 执行步骤 + 验证标准) into the DSH skill directory, so the next generation picks them up with no plugin installed.",
     "v0.2.0: four-layer extraction (fact/experience/negative/skill) and a stage-2 LLM relevance filter that may only drop candidates."
   ]

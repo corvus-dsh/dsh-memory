@@ -238,6 +238,22 @@ window.__ModuleLoader__.load({
                 h('tbody', { key: 'tb' }, shown.map(skillRow)),
               ]),
         ]),
+        h('div', { key: 'ledger', className: 'mc-card' }, [
+          h('h3', { key: 'h', className: 'mc-h' }, '台账状态（交接来源）'),
+          state === null || state.ledger === undefined
+            ? h('p', { key: 's', className: 'mc-sub' }, '正在读取…')
+            : [
+                h('p', { key: 'e', className: 'mc-sub', style: { margin: '0 0 6px' } },
+                  `epoch retired ${state.ledger.epoch.retired} / transferred ${state.ledger.epoch.transferred}` +
+                    `（本读取端支持到 ${state.ledger.supportedEpoch}）· 已退休 ${state.ledger.retired} · 已转移 ${state.ledger.transferred}`),
+                state.ledger.deferred
+                  ? h('p', { key: 'd', className: 'mc-sub', style: { color: '#b45309', margin: 0 } },
+                      `本台账本轮被拒读，等待下一次完整写入（不猜测、不从半条记录抽取）：` +
+                        state.ledger.skipped.map((skip) => `${skip.file}:${skip.reason}`).join('、'))
+                  : h('p', { key: 'd', className: 'mc-sub', style: { margin: 0 } }, '台账可读，抽取按最后一次完整写入进行。'),
+                h('p', { key: 'p', className: 'mc-hint', style: { margin: '4px 0 0' } }, state.ledger.graftDataDir),
+              ],
+        ]),
         h('div', { key: 'clear', className: 'mc-card' }, [
           h('h3', { key: 'h', className: 'mc-h' }, '数据清理（调试用）'),
           h('p', { key: 's', className: 'mc-sub' }, '把当前工作区的记忆移入隔离目录（不删除；global 与其它工作区保留）。'),
