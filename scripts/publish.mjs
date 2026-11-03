@@ -67,7 +67,7 @@ if (!VERSION || VERSION.includes('REPLACE')) fail('package.json 缺少可用 ver
 if (!existsSync(join(ROOT, 'LICENSE'))) fail('LICENSE 不存在')
 
 const token = process.env.GITHUB_TOKEN ?? ''
-if (!token && !DRY) fail('缺少 GITHUB_TOKEN。设置后重试：$env:GITHUB_TOKEN="github_pat_..."（PowerShell）')
+if (!token && !DRY) fail('缺少 GITHUB_TOKEN。设置后重试：$env:GITHUB_TOKEN="<your-token>"（PowerShell）')
 
 const owner = process.env.GITHUB_OWNER ?? ''
 const repo = process.env.GITHUB_REPO ?? pkg.name
