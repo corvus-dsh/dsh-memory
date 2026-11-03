@@ -58,6 +58,9 @@ dsh --profile <name> --dump-config      # 应出现 dsh-memory 行
 
 ## 已验证能力（v0.15.0 实战验收，2026-11-03）
 
+> 上一版本致命问题的取证与修复全过程见 **[POSTMORTEM-2026-11-03.md](POSTMORTEM-2026-11-03.md)**
+> （跨工作区注入、只写在写入闸门的防注入、缺少失效机制、推断与用户原话等权，以及实战验收记录）。
+
 在**真实记忆库**（`~/.agents/skills` + profile 的 `data/dsh-memory`）上跑的一次完整剧本，用的是插件加载的同一份
 `lib/` 代码：
 
