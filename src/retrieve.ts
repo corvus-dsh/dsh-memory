@@ -31,6 +31,8 @@ export interface MemoryHit {
   score: number
   when?: string
   detail?: string
+  /** v0.3: mutually exclusive alternatives recorded at write time. */
+  conflictsWith?: string[]
 }
 
 interface Document {
@@ -39,6 +41,7 @@ interface Document {
   title: string
   when?: string
   detail?: string
+  conflictsWith?: string[]
   tokens: Set<string>
   ageDays: number
   importance: number
@@ -131,12 +134,16 @@ function skillDocuments(skillsDir: string, now: number): Document[] {
     const sources = Number(text.match(/^sources:\s*(\d+)$/mu)?.[1] ?? '1')
     const updated = text.match(/^updated:\s*(.+)$/mu)?.[1] ?? text.match(/^created:\s*(.+)$/mu)?.[1]
     const heading = text.match(/^#\s+(.+)$/mu)?.[1] ?? name
+    const conflictsWith = (text.match(/^conflicts_with:\s*(.+)$/mu)?.[1] ?? '')
+      .split(/[,\s]+/u)
+      .filter((value) => value.length > 0)
     out.push({
       kind: 'skill',
       id: name,
       title: clipTitle(heading.trim(), 60),
       when,
       detail: when,
+      ...(conflictsWith.length === 0 ? {} : { conflictsWith }),
       tokens: new Set(tokenize(`${name} ${heading} ${when} ${text.replace(/^---[\s\S]*?---/u, '')}`)),
       ageDays: ageDaysOf(updated, now),
       importance: 1 + Math.min(0.5, 0.15 * Math.log(1 + Math.max(1, sources) - 1) + (sources > 1 ? 0.1 : 0)),
@@ -226,6 +233,7 @@ function hitOf(document: Document, score: number): MemoryHit {
     score: Number(score.toFixed(3)),
     ...(document.when === undefined ? {} : { when: document.when }),
     ...(document.detail === undefined ? {} : { detail: document.detail }),
+    ...(document.conflictsWith === undefined ? {} : { conflictsWith: document.conflictsWith }),
   }
 }
 
@@ -383,7 +391,18 @@ export function renderHint(result: RetrieveResult): string | undefined {
     const titles = [result.skill.title, ...(result.alternatives ?? []).map((hit) => hit.title)].slice(0, 2).map((title) =>
       clipTitle(title, 30),
     )
-    parts.push(titles.length > 1 ? `这类任务上次「${titles.join('」「')}」有效` : `这类任务上次「${titles[0]}」有效`)
+    const conflicts = result.skill.conflictsWith ?? []
+    if (conflicts.length > 0) {
+      // v0.3: two mutually exclusive methods must not read as "both worked".
+      // The hint's job here is to make the fork visible, not to pick a side.
+      const names = conflicts
+        .slice(0, 2)
+        .map((name) => result.alternatives?.find((hit) => hit.id === name)?.title ?? name)
+        .map((title) => clipTitle(title, 18))
+      parts.push(`这类任务上次有两套互斥做法（${names.join(' / ')}），先确认用哪一套`)
+    } else {
+      parts.push(titles.length > 1 ? `这类任务上次「${titles.join('」「')}」有效` : `这类任务上次「${titles[0]}」有效`)
+    }
   }
   const negative = result.negative
   if (negative !== undefined) parts.push(`另有一次「${negative.title}」翻车，先核对再重跑`)

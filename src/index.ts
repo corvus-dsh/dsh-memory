@@ -25,6 +25,7 @@ import {
   appendFacts,
   appendNegatives,
   defaultSkillsDir,
+  findConflicts,
   markProcessed,
   processedKey,
   readProcessed,
@@ -239,9 +240,15 @@ export async function harvest(ctx: ContextLike, config: MemoryConfig): Promise<H
       const written: Array<{ name: string; status: string }> = []
       for (const skill of extraction.skills) {
         // Gates ①/②/③: an existing skill wins the name, so the merge lands in it.
+        //
+        // v0.3 exception: a similar TRIGGER with a DIFFERENT METHOD is not the
+        // same skill. Merging there would overwrite one of two mutually exclusive
+        // procedures; the alternative is recorded as a conflict instead.
         const candidate = findSkillCandidate(resolved.skillsDir, skill.when)
-        const target = candidate === undefined ? skill : { ...skill, name: candidate.name }
-        if (candidate !== undefined || resolved.autoApprove) {
+        const conflicts = findConflicts(resolved.skillsDir, skill)
+        const mergeInto = candidate !== undefined && !conflicts.some((conflict) => conflict.name === candidate.name)
+        const target = mergeInto ? { ...skill, name: candidate!.name } : skill
+        if (mergeInto || resolved.autoApprove) {
           written.push({ name: target.name, status: writeSkill(resolved.skillsDir, target, meta) })
         } else {
           queueSuggestion(resolved.memoryDir, 'skill', skill, meta)
