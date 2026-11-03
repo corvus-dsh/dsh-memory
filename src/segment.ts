@@ -1,0 +1,177 @@
+/**
+ * Turn a finished session log into an *episode*: the small, evidence-carrying
+ * digest an extraction call can read.
+ *
+ * WHY NOT THE WHOLE LOG
+ *
+ * A finished session can be 15k events / 9 MB. Feeding it to a model to "find
+ * skills" is both expensive and lossy in the wrong direction: the model drowns
+ * in tool output and summarises the noise. What matters for capability memory is
+ * (a) what the assistant concluded, (b) what failed and how, (c) which tools were
+ * involved. Everything else stays in the log, reachable by seq — that is the
+ * "facts are retrievable, capability is persisted" split.
+ */
+
+export interface SegmentError {
+  tool?: string
+  text: string
+  seq?: number
+}
+
+export interface Episode {
+  sessionId: string
+  boundarySeq: number
+  turns: number
+  /** The assistant's own conclusions, newest last, each carrying its seq. */
+  conclusions: Array<{ text: string; seq: number }>
+  errors: SegmentError[]
+  toolNames: string[]
+  /** Every seq quoted above — the evidence set an extractor must cite. */
+  evidence: number[]
+}
+
+/**
+ * Sources that are NOT the user speaking and never carry capability lessons.
+ * Same discipline as the graft plugin's `isHumanAuthored` (hard constraint 8):
+ * an injected instruction must never become an extracted "skill".
+ */
+const INJECTED_KIND = /^(?:runtime-context|time-context|skill-catalog|system-prompt|user-approval|model-selection|agent-message|subagent-settled|plugin:)/u
+
+function textOf(message: unknown): string {
+  if (message === null || typeof message !== 'object') return ''
+  const content = (message as { content?: unknown }).content
+  if (!Array.isArray(content)) return ''
+  const parts: string[] = []
+  for (const block of content) {
+    if (block !== null && typeof block === 'object' && (block as any).type === 'text' && typeof (block as any).text === 'string') {
+      parts.push((block as any).text)
+    }
+  }
+  return parts.join('\n').trim()
+}
+
+/** The last paragraph of an assistant message — its conclusion, not its reasoning. */
+function conclusionOf(text: string): string {
+  const paragraphs = text
+    .split(/\n{2,}/u)
+    .map((paragraph) => paragraph.replace(/\s+/gu, ' ').trim())
+    .filter((paragraph) => paragraph.length >= 20 && !/^[-*]\s/u.test(paragraph))
+  const last = paragraphs.at(-1) ?? ''
+  if (last.length > 0) return last.slice(0, 400)
+  const firstLine = text.split(/\r?\n/u).map((line) => line.trim()).find((line) => line.length > 0) ?? ''
+  return firstLine.slice(0, 400)
+}
+
+export function segmentSession(sessionId: string, log: { events?: unknown[] }): Episode {
+  const events = Array.isArray(log.events) ? log.events : []
+  const callNames = new Map<string, string>()
+  const conclusions: Array<{ text: string; seq: number }> = []
+  const errors: SegmentError[] = []
+  const toolNames = new Set<string>()
+  let turns = 0
+  let boundarySeq = 0
+
+  for (const raw of events) {
+    if (raw === null || typeof raw !== 'object') continue
+    const event = raw as { type?: string; seq?: number; data?: any }
+    const seq = Number(event.seq ?? 0)
+    boundarySeq = Math.max(boundarySeq, seq)
+    if (event.type === 'turn/start') turns += 1
+    if (event.type === 'tool/call') {
+      const name = typeof event.data?.name === 'string' ? event.data.name : ''
+      const callId = typeof event.data?.callId === 'string' ? event.data.callId : ''
+      if (name.length > 0) toolNames.add(name)
+      if (callId.length > 0 && name.length > 0) callNames.set(callId, name)
+      continue
+    }
+    if (event.type === 'tool/result') {
+      const message = event.data?.message
+      const isError = message?.isError === true || event.data?.error !== undefined
+      if (!isError) continue
+      const callId = message?.source?.callId ?? message?.toolCallId
+      const tool = typeof callId === 'string' ? callNames.get(callId) : undefined
+      const text = textOf(message).split(/\r?\n/u).map((line) => line.trim()).find((line) => line.length > 0) ?? ''
+      if (text.length === 0) continue
+      errors.push({ ...(tool === undefined ? {} : { tool }), text: text.slice(0, 240), seq })
+      continue
+    }
+    if (event.type === 'assistant/message') {
+      const text = textOf(event.data?.message)
+      if (text.length > 0) conclusions.push({ text: conclusionOf(text), seq })
+      continue
+    }
+    if (event.type === 'user/message') {
+      const kind = event.data?.source?.kind
+      if (typeof kind === 'string' && INJECTED_KIND.test(kind)) continue
+      // The user's own words are not mined for skills in M1; the goal of the
+      // session is already in its log and reachable by seq.
+      continue
+    }
+  }
+
+  const keptConclusions = conclusions.slice(-40)
+  const keptErrors = errors.slice(-10)
+  const evidence = [...new Set([...keptConclusions.map((item) => item.seq), ...keptErrors.map((item) => item.seq ?? 0)])].filter(
+    (seq) => seq > 0,
+  )
+
+  return {
+    sessionId,
+    boundarySeq,
+    turns,
+    conclusions: keptConclusions,
+    errors: keptErrors,
+    toolNames: [...toolNames].slice(0, 20),
+    evidence,
+  }
+}
+
+/** A compact transcript for the extraction prompt (bounded, seq-labelled). */
+export function renderEpisode(episode: Episode): string {
+  const lines: string[] = [
+    `session: ${episode.sessionId}`,
+    `turns: ${episode.turns}`,
+    `tools used: ${episode.toolNames.join(', ') || '(none)'}`,
+    '',
+    'ASSISTANT CONCLUSIONS (newest last, with seq):',
+    ...episode.conclusions.map((item) => `- [seq ${item.seq}] ${item.text}`),
+  ]
+  if (episode.errors.length > 0) {
+    lines.push('', 'FAILURES (tool, first line, seq):')
+    for (const error of episode.errors) {
+      lines.push(`- [seq ${error.seq ?? '?'}] ${error.tool ?? 'tool'}: ${error.text}`)
+    }
+  }
+  return lines.join('\n')
+}
+/**
+ * The provider/model this session actually ran on.
+ *
+ * Measured live: calling `llm.stream()` without a provider fails with
+ * `no adapter registered for provider "undefined"` — the host does not infer a
+ * default from the calling plugin. The log always records the answer
+ * (`request/context`, `model/selection`, or the session header), so read it.
+ */
+export interface ModelTarget {
+  provider?: string
+  model?: string
+}
+
+export function resolveModelTarget(log: { session?: unknown; events?: unknown[] }): ModelTarget {
+  const events = Array.isArray(log.events) ? log.events : []
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index] as { type?: string; data?: any } | undefined
+    if (event === undefined) continue
+    if (event.type === 'request/context' || event.type === 'model/selection') {
+      const provider = event.data?.provider
+      const model = event.data?.model
+      if (typeof provider === 'string' && provider.length > 0) {
+        return { provider, ...(typeof model === 'string' && model.length > 0 ? { model } : {}) }
+      }
+    }
+  }
+  const session = (log.session ?? {}) as Record<string, unknown>
+  const provider = typeof session.provider === 'string' ? session.provider : undefined
+  const model = typeof session.model === 'string' ? session.model : undefined
+  return { ...(provider === undefined ? {} : { provider }), ...(model === undefined ? {} : { model }) }
+}

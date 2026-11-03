@@ -1,0 +1,21 @@
+# dsh-memory bundle patch: inserts the host row into the profile's plugin roster.
+# Install with `dsh plugin --profile <name> add <path-or-git-url>`; the bundle
+# patch is applied automatically, so do NOT insert this row again in the profile
+# patch (duplicate ids crash the loader).
+- insert:
+    - id: dsh-memory
+      name: 'dsh-memory'
+      config:
+        # Where the slicing plugin keeps .retired.json / .transferred.json.
+        # Read-only: dsh-memory never imports that plugin, it only reads the files.
+        graftDataDir: ''
+        # Where skills are written. Empty = ~/.agents/skills (the dir DSH's own
+        # skill loader already scans).
+        skillsDir: ''
+        # Local store for negatives.jsonl / processed.json / index.json.
+        memoryDir: ''
+        # One harvest call handles at most this many retired sessions.
+        harvestLimit: 3
+        # 'llm' extracts with the host model; 'off' disables extraction (ledger
+        # scan only, useful for verifying the wiring before spending tokens).
+        extractor: 'llm'

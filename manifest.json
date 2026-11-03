@@ -1,0 +1,31 @@
+{
+  "name": "dsh-memory",
+  "version": "0.1.0",
+  "description": "Capability memory for DSH: mine finished sessions for reusable skills (SKILL.md) and negative paths (negatives.jsonl). Reads the handoff ledger as a file contract; imports nothing from the slicing plugin.",
+  "entry": "lib/index.js",
+  "activate": "activate(ctx, config)",
+  "permissions": [
+    "session:read"
+  ],
+  "services": [
+    "sessionQuery",
+    "llm",
+    "tools"
+  ],
+  "hooks": [],
+  "tools": [
+    "memory_harvest",
+    "memory_stats",
+    "memory_search",
+    "memory_forget"
+  ],
+  "engines": {
+    "dsh": ">=0.2.1-rc.5",
+    "node": ">=20"
+  },
+  "notes": [
+    "Decoupling contract: reads .retired.json / .transferred.json from the slicing plugin's dataDir. No code import in either direction.",
+    "Skills are written as SKILL.md into the DSH skill directory, so the next generation picks them up with no plugin installed.",
+    "M1 scope: harvest + extract CLI. Retrieval-at-pre-step and the flywheel scoring are M3/M4."
+  ]
+}
