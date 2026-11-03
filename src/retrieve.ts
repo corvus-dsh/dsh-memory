@@ -1,17 +1,27 @@
 /**
- * Local retrieval: IDF × freshness × importance, no network, no vectors.
+ * dsh-memory retrieval: lexical recall, then an optional LLM relevance filter.
  *
- * The shape is copied from what works in the ecosystem (`dsh-fish-memory`): a
- * memory is worth recalling when the words that matched it are DISTINCTIVE
- * (IDF), when it is still fresh (30-day half-life), and when it has earned
- * importance (it was confirmed by more than one session).
+ * THE TWO-STAGE SHAPE
  *
- * A hit is a HINT, never an instruction: the caller renders one sentence and the
- * model may ignore it.
+ * Stage 1 (always, offline): IDF × freshness × importance. Cheap, explainable,
+ * and it decides *what might be relevant*. It cannot decide *what is relevant*:
+ * measured live, a prompt about a commit-digest bug surfaced
+ * `divergent-rebuild-probe` at the same time as the skill that actually applied,
+ * because both share the words "prepare/commit/字段". Lexical scoring has no way
+ * to know one of them is the wrong topic.
+ *
+ * Stage 2 (only when >1 candidate clears the threshold): one short model call
+ * that answers "which of these truly apply?" and returns ids. It can only DROP
+ * candidates, never add one: every returned id is validated against the stage-1
+ * list, so a hallucinated or injected name is discarded. If the call fails, the
+ * lexical top-1 stands — the filter may improve a hint, never break it.
  */
 
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
+
+import { selectApplicableSkills } from './filter.js'
+import type { LlmLike } from './extract.js'
 
 export interface MemoryHit {
   kind: 'skill' | 'negative'
@@ -32,6 +42,12 @@ interface Document {
   tokens: Set<string>
   ageDays: number
   importance: number
+}
+
+interface Scored {
+  document: Document
+  coverage: number
+  score: number
 }
 
 const CJK = /[\u4e00-\u9fff]/u
@@ -89,6 +105,11 @@ function freshness(days: number): number {
   return 0.5 + 0.5 * Math.exp(-days / 30)
 }
 
+/** Frontmatter trigger: `when_to_use` (v0.2.0) or legacy `when`. */
+function triggerOf(text: string): string {
+  return text.match(/^when_to_use:\s*(.+)$/mu)?.[1] ?? text.match(/^when:\s*(.+)$/mu)?.[1] ?? ''
+}
+
 function skillDocuments(skillsDir: string, now: number): Document[] {
   let names: string[] = []
   try {
@@ -106,7 +127,7 @@ function skillDocuments(skillsDir: string, now: number): Document[] {
     } catch {
       continue
     }
-    const when = text.match(/^when:\s*(.+)$/mu)?.[1] ?? ''
+    const when = triggerOf(text)
     const sources = Number(text.match(/^sources:\s*(\d+)$/mu)?.[1] ?? '1')
     const updated = text.match(/^updated:\s*(.+)$/mu)?.[1] ?? text.match(/^created:\s*(.+)$/mu)?.[1]
     const heading = text.match(/^#\s+(.+)$/mu)?.[1] ?? name
@@ -158,24 +179,11 @@ function negativeDocuments(memoryDir: string, now: number): Document[] {
   return out
 }
 
-export interface RetrieveResult {
-  skill?: MemoryHit
-  negative?: MemoryHit
-  /** Coverage of the best hit before freshness/importance, for debugging. */
-  debug: { terms: number; matched: number }
-}
-
-export function retrieve(
-  memoryDir: string,
-  skillsDir: string,
-  query: string,
-  options: { threshold?: number; now?: number } = {},
-): RetrieveResult {
-  const now = options.now ?? Date.now()
-  const threshold = options.threshold ?? 0.55
+/** Stage 1: score every stored document against the query. */
+function scoreDocuments(memoryDir: string, skillsDir: string, query: string, now: number): { terms: string[]; scored: Scored[] } {
   const terms = tokenize(query)
   const documents = [...skillDocuments(skillsDir, now), ...negativeDocuments(memoryDir, now)]
-  if (terms.length === 0 || documents.length === 0) return { debug: { terms: terms.length, matched: 0 } }
+  if (terms.length === 0 || documents.length === 0) return { terms, scored: [] }
 
   const df = new Map<string, number>()
   for (const term of terms) {
@@ -188,9 +196,7 @@ export function retrieve(
   // A query made only of high-frequency words has nothing distinctive to match on.
   // Weighting alone cannot catch it: both numerator and denominator shrink, so
   // coverage stays 1.0. Detect it explicitly and recall nothing.
-  if ([...df.keys()].every((term) => STOPWORDS.has(term))) {
-    return { debug: { terms: terms.length, matched: 0 } }
-  }
+  if ([...df.keys()].every((term) => STOPWORDS.has(term))) return { terms, scored: [] }
   // Top-8 denominator: a long prompt must not dilute its own best signal.
   // Measured live: a delegated subagent's multi-paragraph prompt scored below the
   // threshold even though it contained `SOURCE_DRIFT`, `graft_commit` and `边界 seq`,
@@ -209,31 +215,177 @@ export function retrieve(
     return { document, coverage, score }
   })
   scored.sort((a, b) => b.score - a.score)
+  return { terms, scored }
+}
+
+function hitOf(document: Document, score: number): MemoryHit {
+  return {
+    kind: document.kind,
+    id: document.id,
+    title: document.title,
+    score: Number(score.toFixed(3)),
+    ...(document.when === undefined ? {} : { when: document.when }),
+    ...(document.detail === undefined ? {} : { detail: document.detail }),
+  }
+}
+
+export interface CandidateOptions {
+  threshold?: number
+  now?: number
+  kind?: 'skill' | 'negative'
+  limit?: number
+}
+
+/** Stage 1 as a list: every document above the threshold, best first. */
+export function retrieveCandidates(
+  memoryDir: string,
+  skillsDir: string,
+  query: string,
+  options: CandidateOptions = {},
+): MemoryHit[] {
+  const now = options.now ?? Date.now()
+  const threshold = options.threshold ?? 0.55
+  const limit = Math.max(1, Math.min(20, options.limit ?? 4))
+  const { scored } = scoreDocuments(memoryDir, skillsDir, query, now)
+  const out: MemoryHit[] = []
+  for (const item of scored) {
+    if (options.kind !== undefined && item.document.kind !== options.kind) continue
+    if (item.score < threshold) continue
+    out.push(hitOf(item.document, item.score))
+    if (out.length >= limit) break
+  }
+  return out
+}
+
+export interface RetrieveResult {
+  skill?: MemoryHit
+  negative?: MemoryHit
+  /** Further skill candidates that cleared the threshold, best first (max 2). */
+  alternatives?: MemoryHit[]
+  /** Stage-2 diagnostics. Present only on `retrieveWithFilter` results. */
+  filter?: FilterTrace
+  /** Coverage of the best hit before freshness/importance, for debugging. */
+  debug: { terms: number; matched: number }
+}
+
+/** Why the LLM stage ran, or did not — a silent fallback is a bug, not a decision. */
+export interface FilterTrace {
+  attempted: boolean
+  applied: boolean
+  kept?: string[]
+  reason?: string
+}
+
+export function retrieve(
+  memoryDir: string,
+  skillsDir: string,
+  query: string,
+  options: { threshold?: number; now?: number } = {},
+): RetrieveResult {
+  const now = options.now ?? Date.now()
+  const threshold = options.threshold ?? 0.55
+  const { terms, scored } = scoreDocuments(memoryDir, skillsDir, query, now)
+  if (scored.length === 0) return { debug: { terms: terms.length, matched: 0 } }
 
   const best = scored[0]
   const debug = { terms: terms.length, matched: Math.round(best.coverage * terms.length) }
-  const pick = (kind: 'skill' | 'negative'): MemoryHit | undefined => {
-    const hit = scored.find((candidate) => candidate.document.kind === kind && candidate.score >= threshold)
-    if (hit === undefined) return undefined
+  const above = (kind: 'skill' | 'negative'): Scored[] => scored.filter((item) => item.document.kind === kind && item.score >= threshold)
+  const skills = above('skill')
+  const negatives = above('negative')
+  return {
+    ...(skills.length === 0 ? {} : { skill: hitOf(skills[0].document, skills[0].score) }),
+    ...(negatives.length === 0 ? {} : { negative: hitOf(negatives[0].document, negatives[0].score) }),
+    ...(skills.length <= 1 ? {} : { alternatives: skills.slice(1, 3).map((item) => hitOf(item.document, item.score)) }),
+    debug,
+  }
+}
+
+export interface FilterOptions {
+  llm?: LlmLike
+  threshold?: number
+  now?: number
+  timeoutMs?: number
+  provider?: string
+  model?: string
+}
+
+/**
+ * Stage 2 retrieval: lexical candidates, narrowed by one model call.
+ *
+ * Only skills are filtered. A negative path is a warning about a failure that
+ * happened; keeping one extra warning costs a clause, dropping a real one costs
+ * a repeated incident, so negatives stay lexical.
+ */
+export async function retrieveWithFilter(
+  memoryDir: string,
+  skillsDir: string,
+  query: string,
+  options: FilterOptions = {},
+): Promise<RetrieveResult> {
+  const lexical = retrieve(memoryDir, skillsDir, query, {
+    ...(options.threshold === undefined ? {} : { threshold: options.threshold }),
+    ...(options.now === undefined ? {} : { now: options.now }),
+  })
+  const candidates = retrieveCandidates(memoryDir, skillsDir, query, {
+    ...(options.threshold === undefined ? {} : { threshold: options.threshold }),
+    ...(options.now === undefined ? {} : { now: options.now }),
+    kind: 'skill',
+    limit: 4,
+  })
+  // 0 or 1 candidate: nothing to disambiguate, and no token spent.
+  if (candidates.length <= 1) {
+    return { ...lexical, filter: { attempted: false, applied: false, reason: 'no disambiguation needed' } }
+  }
+  if (options.llm === undefined) {
+    return { ...lexical, filter: { attempted: false, applied: false, reason: 'llm unavailable' } }
+  }
+
+  let applicable: string[]
+  try {
+    applicable = await selectApplicableSkills(options.llm, query, candidates, {
+      ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+      ...(options.provider === undefined ? {} : { provider: options.provider }),
+      ...(options.model === undefined ? {} : { model: options.model }),
+    })
+  } catch (error) {
+    // Fail open to the lexical answer. A filter that cannot answer must not
+    // suppress a hint the old version would have produced — but the reason is
+    // reported, so a silent fallback is visible in `memory_search`.
     return {
-      kind,
-      id: hit.document.id,
-      title: hit.document.title,
-      score: Number(hit.score.toFixed(3)),
-      ...(hit.document.when === undefined ? {} : { when: hit.document.when }),
-      ...(hit.document.detail === undefined ? {} : { detail: hit.document.detail }),
+      ...lexical,
+      filter: { attempted: true, applied: false, reason: String((error as any)?.message ?? error) },
     }
   }
-  return { ...(pick('skill') === undefined ? {} : { skill: pick('skill') }), ...(pick('negative') === undefined ? {} : { negative: pick('negative') }), debug }
+
+  const kept = candidates.filter((candidate) => applicable.includes(candidate.id))
+  if (kept.length === 0) {
+    // The filter judged every skill irrelevant. Keep the negative (it is not
+    // filtered) and drop the skills it rejected.
+    return {
+      ...(lexical.negative === undefined ? {} : { negative: lexical.negative }),
+      debug: lexical.debug,
+      filter: { attempted: true, applied: true, kept: [] },
+    }
+  }
+  return {
+    skill: kept[0],
+    ...(kept.length <= 1 ? {} : { alternatives: kept.slice(1, 3) }),
+    ...(lexical.negative === undefined ? {} : { negative: lexical.negative }),
+    debug: lexical.debug,
+    filter: { attempted: true, applied: true, kept: kept.map((candidate) => candidate.id) },
+  }
 }
 
 /** One sentence, ≤120 chars, no imperatives. */
 export function renderHint(result: RetrieveResult): string | undefined {
-  const skill = result.skill
-  const negative = result.negative
-  if (skill === undefined && negative === undefined) return undefined
   const parts: string[] = []
-  if (skill !== undefined) parts.push(`这类任务上次「${skill.title}」有效`)
+  if (result.skill !== undefined) {
+    const titles = [result.skill.title, ...(result.alternatives ?? []).map((hit) => hit.title)].slice(0, 2).map((title) =>
+      clipTitle(title, 30),
+    )
+    parts.push(titles.length > 1 ? `这类任务上次「${titles.join('」「')}」有效` : `这类任务上次「${titles[0]}」有效`)
+  }
+  const negative = result.negative
   if (negative !== undefined) parts.push(`另有一次「${negative.title}」翻车，先核对再重跑`)
   if (parts.length === 0) return undefined
   return `（记忆提示：${parts.join('；')}。）`.slice(0, 120)

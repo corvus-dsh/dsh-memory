@@ -40,12 +40,16 @@ function makeEnv() {
           yield {
             type: 'text-delta',
             text: JSON.stringify({
+              facts: [{ text: '改断言之前没有先跑真实日志，测试失败原因被误判', seq: 4 }],
+              experiences: [{ text: '怀疑测试与实现不一致时，先用真实日志跑一遍再改断言', seq: 2 }],
               skills: [
                 {
                   name: 'verify-before-edit',
                   title: '先验证再改断言',
-                  when: '怀疑测试本身与实现不一致时',
-                  how: ['用真实日志跑一遍', '确认失败原因', '再决定改实现还是改断言'],
+                  description: '怀疑测试与实现不一致时的排查顺序。',
+                  when_to_use: '怀疑测试本身与实现不一致时',
+                  steps: ['用真实日志跑一遍', '确认失败原因', '再决定改实现还是改断言'],
+                  verify: ['修复后同一用例转绿，且失败信息与判断一致'],
                   evidence: [2],
                 },
               ],
@@ -63,16 +67,23 @@ function makeEnv() {
   return { ctx, tools, skillsDir, memoryDir, graftDataDir, root }
 }
 
-test('plugin: harvest reads the ledger + readSession and writes SKILL.md', async () => {
+test('plugin: harvest reads the ledger + readSession and writes structured SKILL.md', async () => {
   const { tools, skillsDir, memoryDir } = makeEnv()
   const report = await tools.get('memory_harvest').execute({})
   assert.equal(report.scanned, 1)
   assert.equal(report.harvested.length, 1)
   assert.equal(report.harvested[0].skills[0].status, 'created')
+  assert.equal(report.harvested[0].facts, 1, 'the fact layer is persisted with its seq')
+  assert.equal(report.harvested[0].experiences, 1)
   assert.ok(existsSync(join(skillsDir, 'verify-before-edit', 'SKILL.md')))
   assert.ok(existsSync(join(memoryDir, 'negatives.jsonl')))
+  assert.ok(existsSync(join(memoryDir, 'facts.jsonl')))
+  assert.ok(existsSync(join(memoryDir, 'experiences.jsonl')))
   const skillText = readFileSync(join(skillsDir, 'verify-before-edit', 'SKILL.md'), 'utf8')
   assert.match(skillText, /^name: verify-before-edit$/mu)
+  assert.match(skillText, /^when_to_use: /mu)
+  assert.match(skillText, /^## 执行步骤$/mu)
+  assert.match(skillText, /^## 验证标准$/mu)
 })
 
 test('plugin: the second harvest is a no-op (idempotent by session+boundarySeq)', async () => {

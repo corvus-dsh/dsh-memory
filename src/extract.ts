@@ -1,22 +1,56 @@
 /**
- * Turn an episode into skills and negative paths.
+ * Turn an episode into the four cognitive layers.
  *
- * The extraction is ONE model call with a strict JSON contract, then local
- * validation. Validation is not paranoia: a hallucinated evidence seq makes the
- * memory unauditable, and an unauditable memory is worse than none (it is a
- * claim the reader cannot check).
+ * WHY FOUR LAYERS
+ *
+ * One model call used to emit `skills` + `negatives` only, and the skill it wrote
+ * was measured live as a single sentence ("测试样本必须超过阈值") that named a
+ * conclusion but no procedure — useless to a session that had never seen the
+ * source conversation. The fix is not "ask for longer skills"; it is to make the
+ * model separate observation from conclusion from prohibition from procedure:
+ *
+ *   fact        — what objectively happened, with a seq pointer (auditable)
+ *   experience  — the conclusion of ONE trial (can be wrong; not yet a method)
+ *   negative    — the path that must never be repeated (symptom/cause/avoid)
+ *   skill       — a VERIFIED procedure, rendered as structured SKILL.md
+ *
+ * Validation is not paranoia: a hallucinated evidence seq makes the memory
+ * unauditable, and an unauditable memory is worse than none (it is a claim the
+ * reader cannot check). A skill without steps or without a verification
+ * criterion is refused *here*, because that is exactly the empty artifact the
+ * live trial produced.
  */
 
 import type { Episode } from './segment.js'
 import { renderEpisode } from './segment.js'
+
+export interface ExtractedFact {
+  /** What happened, in one observable sentence. */
+  text: string
+  /** The seq in the source log where it can be checked. Required. */
+  seq: number
+}
+
+export interface ExtractedExperience {
+  /** The conclusion drawn from one trial/error. */
+  text: string
+  /** The seq of the trial it came from. Required. */
+  seq: number
+}
 
 export interface ExtractedSkill {
   /** ASCII kebab-case, because that is what a SKILL.md name must be. */
   name: string
   /** Human title (may be Chinese). */
   title: string
+  /** One line for the skill catalog: what this skill is. */
+  description: string
+  /** Frontmatter `when_to_use`: the trigger, concrete enough to decide on. */
   when: string
-  how: string[]
+  /** `## 执行步骤` — ordered, replayable procedure. At least two steps. */
+  steps: string[]
+  /** `## 验证标准` — how the next session proves it worked. At least one. */
+  verify: string[]
   evidence: number[]
 }
 
@@ -28,6 +62,8 @@ export interface ExtractedNegative {
 }
 
 export interface ExtractionResult {
+  facts: ExtractedFact[]
+  experiences: ExtractedExperience[]
   skills: ExtractedSkill[]
   negatives: ExtractedNegative[]
   /** Names/entries refused locally, with the reason — never silently dropped. */
@@ -36,20 +72,42 @@ export interface ExtractionResult {
 
 export const EXTRACT_SYSTEM_PROMPT = [
   'You are a capability-memory extractor for a coding agent.',
-  'Read the episode and extract only what is REUSABLE in a later, different session.',
+  'Read the episode and extract FOUR layers, ordered from raw observation to reusable asset:',
+  '  fact        = what objectively happened (MUST cite a seq from the episode)',
+  '  experience  = the conclusion of ONE trial or failure (one seq is enough)',
+  '  negative    = a path that must NEVER be repeated: symptom + cause + avoid',
+  '  skill       = a VERIFIED, replayable procedure. Only promote an experience when the episode shows the method actually worked or was confirmed.',
   '',
-  'Rules:',
-  '1. A skill is a METHOD: "when <situation>, do <steps>". If it cannot be replayed by someone who never saw this session, drop it.',
-  '2. A negative path is a FAILURE with cause and avoidance. Symptom + cause + what to do instead.',
-  '3. Never invent evidence. Every entry cites seqs present in the episode. An entry with a seq that is not listed is discarded.',
-  '4. Reject generic advice ("be careful", "test thoroughly", "write clean code"). Only concrete, session-specific lessons.',
-  '5. At most 2 skills and 2 negative paths. Fewer is better: precision beats recall.',
-  '5b. Be terse: each `how` step <= 40 words, at most 4 steps; `when` <= 25 words. The JSON must stay complete.',
-  '6. `name` must be ASCII kebab-case (a-z, 0-9, hyphens, <= 48 chars). `title` may be Chinese.',
+  'HARD RULES:',
+  '1. Never invent evidence. Every entry cites seqs listed in the episode; an entry with an unlisted seq is discarded.',
+  '2. A skill is a PROCEDURE, not a slogan. It needs at least 2 execution steps and at least 1 verification criterion. "样本必须超过阈值" alone is a REFUSAL, not a skill.',
+  '3. A skill must state WHEN it applies, concretely enough that a fresh session can decide yes or no.',
+  '4. Reject generic advice (要小心 / 注意细节 / test thoroughly / write clean code). Only session-specific, checkable content.',
+  '5. At most 3 facts, 3 experiences, 2 skills and 3 negatives. Precision beats recall.',
+  '6. name is ASCII kebab-case (a-z, 0-9, hyphens, <= 48 chars). title/description/when_to_use may be Chinese.',
+  '7. Be terse: step <= 40 words, verify <= 25 words, description <= 30 words. The JSON must stay complete.',
+  '',
+  'Every skill becomes one SKILL.md with exactly this shape:',
+  '---',
+  'name: threshold-fixture-sizing',
+  'description: 处理阈值型逻辑测试时的样本量设计规范。',
+  'when_to_use: 当你在编写涉及 `>`, `<`, `>=`, `<=` 判断的测试用例时。',
+  '---',
+  '## 执行步骤',
+  '1. 查看源码中的阈值变量（如 `MAX_RETRIES = 3`）。',
+  '2. 测试用例的输入数据必须设为 `阈值 + 1`。',
+  '3. 必须写两个测试：一个传 `阈值` 断言不触发，一个传 `阈值 + 1` 断言触发。',
+  '## 验证标准',
+  '运行测试，确保覆盖了跨越边界的正反两种情况。',
+  '',
+  'So: description = what it is; when_to_use = the trigger; steps = the procedure; verify = how the next session proves it worked.',
   '',
   'Return ONLY JSON:',
-  '{"skills":[{"name":"kebab-name","title":"...","when":"...","how":["..."],"evidence":[12,34]}],',
-  ' "negatives":[{"symptom":"...","cause":"...","avoid":"...","evidence":[56]}]}',
+  '{"facts":[{"text":"...","seq":12}],',
+  ' "experiences":[{"text":"...","seq":12}],',
+  ' "negatives":[{"symptom":"...","cause":"...","avoid":"...","evidence":[56]}],',
+  ' "skills":[{"name":"kebab-name","title":"...","description":"...","when_to_use":"...",',
+  '            "steps":["...","..."],"verify":["..."],"evidence":[12,34]}]}',
 ].join('\n')
 
 const GENERIC = /(要小心|注意安全|多加测试|注意细节|保持整洁|be careful|test thoroughly|write clean|pay attention|good luck)/iu
@@ -57,6 +115,19 @@ const KEBAB = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 
 function asText(value: unknown): string {
   return typeof value === 'string' ? value.replace(/\s+/gu, ' ').trim() : ''
+}
+
+/** Strings only, trimmed and de-duplicated, bounded by `max`. */
+function asTextList(value: unknown, max: number): string[] {
+  const raw = Array.isArray(value) ? value : typeof value === 'string' ? [value] : []
+  const out: string[] = []
+  for (const item of raw) {
+    const text = asText(item)
+    if (text.length === 0 || out.includes(text)) continue
+    out.push(text)
+    if (out.length >= max) break
+  }
+  return out
 }
 
 function asSeqList(value: unknown, allowed: Set<number>): number[] {
@@ -72,12 +143,59 @@ function asSeqList(value: unknown, allowed: Set<number>): number[] {
   return out
 }
 
+/** One seq that must exist in the episode, or undefined. */
+function asSeq(value: unknown, allowed: Set<number>): number | undefined {
+  const seq = Number(value)
+  return Number.isFinite(seq) && allowed.has(seq) ? seq : undefined
+}
+
 export function sanitizeExtraction(raw: unknown, episode: Episode): ExtractionResult {
   const dropped: string[] = []
   const allowed = new Set(episode.evidence)
+  const facts: ExtractedFact[] = []
+  const experiences: ExtractedExperience[] = []
   const skills: ExtractedSkill[] = []
   const negatives: ExtractedNegative[] = []
-  if (raw === null || typeof raw !== 'object') return { skills, negatives, dropped: ['payload is not an object'] }
+  if (raw === null || typeof raw !== 'object') {
+    return { facts, experiences, skills, negatives, dropped: ['payload is not an object'] }
+  }
+
+  const rawFacts = Array.isArray((raw as any).facts) ? (raw as any).facts : []
+  for (const item of rawFacts) {
+    if (facts.length >= 3) break
+    if (item === null || typeof item !== 'object') continue
+    const text = asText(item.text)
+    const label = text.slice(0, 40) || '(unnamed fact)'
+    if (text.length < 8) {
+      dropped.push(`${label}: fact is too short to be an observation`)
+      continue
+    }
+    const seq = asSeq(item.seq, allowed)
+    if (seq === undefined) {
+      // A fact without a pointer is an opinion; the whole point of this layer is auditability.
+      dropped.push(`${label}: fact has no valid seq pointer`)
+      continue
+    }
+    facts.push({ text: text.slice(0, 240), seq })
+  }
+
+  const rawExperiences = Array.isArray((raw as any).experiences) ? (raw as any).experiences : []
+  for (const item of rawExperiences) {
+    if (experiences.length >= 3) break
+    if (item === null || typeof item !== 'object') continue
+    const text = asText(item.text)
+    const label = text.slice(0, 40) || '(unnamed experience)'
+    if (text.length < 6) {
+      dropped.push(`${label}: experience is too short to be a conclusion`)
+      continue
+    }
+    const seq = asSeq(item.seq, allowed)
+    if (seq === undefined) {
+      dropped.push(`${label}: experience has no valid seq pointer`)
+      continue
+    }
+    experiences.push({ text: text.slice(0, 240), seq })
+  }
 
   const rawSkills = Array.isArray((raw as any).skills) ? (raw as any).skills : []
   for (const item of rawSkills) {
@@ -85,31 +203,49 @@ export function sanitizeExtraction(raw: unknown, episode: Episode): ExtractionRe
     if (item === null || typeof item !== 'object') continue
     const name = asText(item.name).toLowerCase()
     const title = asText(item.title)
-    const when = asText(item.when)
-    const how = (Array.isArray(item.how) ? item.how : []).map(asText).filter((step) => step.length > 0).slice(0, 5)
+    const when = asText(item.when_to_use) || asText(item.when)
+    // `how`/`steps` and `when`/`when_to_use` aliases keep an already-queued v0.1
+    // suggestion readable; the shape written to disk is always the new one.
+    const steps = asTextList(item.steps ?? item.how, 5)
+    const verify = asTextList(item.verify ?? item.verification, 3)
     const evidence = asSeqList(item.evidence, allowed)
+    const description = asText(item.description) || when.slice(0, 160)
     const label = name || title || '(unnamed skill)'
     if (!KEBAB.test(name) || name.length > 48) {
       dropped.push(`${label}: name is not ASCII kebab-case`)
       continue
     }
     if (when.length < 6) {
-      dropped.push(`${label}: ` + 'when is missing')
+      dropped.push(`${label}: when_to_use is missing`)
       continue
     }
-    if (how.length === 0) {
-      dropped.push(`${label}: ` + 'no replayable steps')
+    if (steps.length < 2) {
+      // The live failure this rule exists for: a one-line "skill" that states a
+      // conclusion and calls it a method.
+      dropped.push(`${label}: needs at least 2 execution steps (got ${steps.length})`)
+      continue
+    }
+    if (verify.length === 0 || verify.every((line) => line.length < 4)) {
+      dropped.push(`${label}: no verification criterion`)
       continue
     }
     if (evidence.length === 0) {
-      dropped.push(`${label}: ` + 'no evidence seq from this session')
+      dropped.push(`${label}: no evidence seq from this session`)
       continue
     }
-    if (GENERIC.test(`${title} ${when} ${how.join(' ')}`.slice(0, 600)) && how.length < 2) {
-      dropped.push(`${label}: ` + 'generic advice')
+    if (GENERIC.test(`${title} ${when} ${steps.join(' ')}`.slice(0, 600)) && steps.length < 3) {
+      dropped.push(`${label}: generic advice`)
       continue
     }
-    skills.push({ name, title: title || name, when: when.slice(0, 200), how, evidence })
+    skills.push({
+      name,
+      title: title || name,
+      description: description.slice(0, 160),
+      when: when.slice(0, 200),
+      steps,
+      verify,
+      evidence,
+    })
   }
 
   const rawNegatives = Array.isArray((raw as any).negatives) ? (raw as any).negatives : []
@@ -126,13 +262,13 @@ export function sanitizeExtraction(raw: unknown, episode: Episode): ExtractionRe
       continue
     }
     if (evidence.length === 0) {
-      dropped.push(`${label}: ` + 'no evidence seq from this session')
+      dropped.push(`${label}: no evidence seq from this session`)
       continue
     }
     negatives.push({ symptom: symptom.slice(0, 200), cause: cause.slice(0, 200), avoid: avoid.slice(0, 200), evidence })
   }
 
-  return { skills, negatives, dropped }
+  return { facts, experiences, skills, negatives, dropped }
 }
 
 /** Pull the outermost JSON object out of a model reply (fenced or chatty). */
@@ -144,6 +280,8 @@ export function parseExtractionJson(raw: string, episode: Episode): ExtractionRe
   if (start < 0 || end <= start) {
     const truncated = start >= 0
     return {
+      facts: [],
+      experiences: [],
       skills: [],
       negatives: [],
       dropped: [truncated ? 'reply truncated before the JSON closed' : 'no JSON object in the reply'],
@@ -153,7 +291,14 @@ export function parseExtractionJson(raw: string, episode: Episode): ExtractionRe
   try {
     return { ...sanitizeExtraction(JSON.parse(raw.slice(start, end + 1)), episode), parsedOk: true }
   } catch (error) {
-    return { skills: [], negatives: [], dropped: [`invalid JSON: ${String((error as any)?.message ?? error)}`], parsedOk: false }
+    return {
+      facts: [],
+      experiences: [],
+      skills: [],
+      negatives: [],
+      dropped: [`invalid JSON: ${String((error as any)?.message ?? error)}`],
+      parsedOk: false,
+    }
   }
 }
 
@@ -181,7 +326,7 @@ export async function extractEpisode(
   options: ExtractOptions = {},
 ): Promise<ExtractionResult & { rawChars: number; ok: boolean; rawText?: string }> {
   if (llm === undefined || typeof llm.stream !== 'function') {
-    return { skills: [], negatives: [], dropped: ['llm service unavailable'], rawChars: 0, ok: false }
+    return { facts: [], experiences: [], skills: [], negatives: [], dropped: ['llm service unavailable'], rawChars: 0, ok: false }
   }
   const input = renderEpisode(episode)
   const timeoutMs = options.timeoutMs ?? 60_000
@@ -197,7 +342,7 @@ export async function extractEpisode(
             ? EXTRACT_SYSTEM_PROMPT
             : `${EXTRACT_SYSTEM_PROMPT}\n\n上一次回复里没有 JSON 对象。只输出一个 JSON 对象本身：不要解释、不要代码围栏、不要前后缀。`,
         messages: [{ role: 'user', content: [{ type: 'text', text: input }] }],
-        maxTokens: 3200,
+        maxTokens: 4000,
         ...(typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
           ? { signal: AbortSignal.timeout(timeoutMs) }
           : {}),
@@ -223,6 +368,8 @@ export async function extractEpisode(
     }
   }
   return {
+    facts: [],
+    experiences: [],
     skills: [],
     negatives: [],
     dropped: [`${lastError}; raw: ${lastRaw.replace(/\s+/gu, ' ').slice(0, 300)}`],

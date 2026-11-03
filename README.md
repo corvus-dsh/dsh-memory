@@ -48,14 +48,86 @@ dsh --profile <name> --dump-config      # 应出现 dsh-memory 行
 | `memoryDir` | 负知识 / 进度账本；默认 `<paths.data>/.dsh-memory` |
 | `harvestLimit` | 单次最多处理几个已退休会话（默认 3） |
 | `extractor` | `llm`（用宿主模型抽取）或 `off`（只扫账本，不花 token） |
+| `retrieval` | pre-step 是否检索（默认 `true`） |
+| `retrievalThreshold` | 提示阈值（默认 `0.55`） |
+| `semanticFilter` | 是否启用第二阶段 LLM 相关性过滤（默认 `true`；关掉则检索完全离线） |
+| `filterProvider` / `filterModel` | 过滤调用使用的模型路由；默认取宿主当前默认选择（`agentDefaultModel.currentSelection()`） |
+
+## 四层认知模型（v0.2.0）
+
+一次抽取不再直接产出“一句技能”，而是强制分成四层，并各自落盘：
+
+| 层 | 是什么 | 落点 |
+|---|---|---|
+| Fact | 客观发生的现象，**必须带 seq 指针** | `<memoryDir>/facts.jsonl` |
+| Experience | 单次试错得出的结论（可以还不成熟） | `<memoryDir>/experiences.jsonl` |
+| Negative Path | 绝不能再踩的坑（现象/原因/替代做法） | `<memoryDir>/negatives.jsonl` |
+| Skill | 经过验证、可复用的程序性资产 | `<skillsDir>/<name>/SKILL.md` |
+
+事实与经验是**证据指针，不是指令**，因此直接落盘（带 `sourceSessionId` / `boundarySeq` / `evidence`）；
+技能与负知识仍受审核队列（`autoApprove`）约束。
+
+### SKILL.md 的强制形状
+
+```markdown
+---
+name: threshold-fixture-sizing
+description: 处理阈值型逻辑测试时的样本量设计规范。
+when_to_use: 当你在编写涉及 `>`, `<`, `>=`, `<=` 判断的测试用例时。
+evidence: 14337
+sources: 1
+created: 2026-11-03
+---
+
+# 阈值型逻辑的测试样本必须超过阈值
+
+## 何时使用
+…
+
+## 执行步骤
+1. 查看源码中的阈值变量（如 `MAX_RETRIES = 3`）。
+2. 测试用例的输入数据必须设为 `阈值 + 1`。
+3. 必须写两个测试：一个传 `阈值` 断言不触发，一个传 `阈值 + 1` 断言触发。
+
+## 验证标准
+- 运行测试，确保覆盖了跨越边界的正反两种情况。
+
+## 证据
+- 源会话：…（seq …）
+```
+
+写入闸（`writeSkill`）：没有执行步骤、没有验证标准的技能**直接拒绝落盘**并返回 `skipped:<原因>`。
+v0.1 的 `when`/`how` 旧队列项仍能读入，但会被升级成上面的形状。
+
+## 两阶段检索（v0.2.0）
+
+1. **词法召回**（离线）：`IDF × 鲜活度 × 重要度`，决定“可能相关”。
+2. **LLM 相关性过滤**（可选，命中 >1 个技能时才调用）：把用户当前输入与候选技能的 `when` 一起给模型，
+   只保留真正适用的技能名。它**只能删、不能加**——返回的名字必须与第一阶段候选完全一致，否则丢弃；
+   调用失败时回退到词法 top-1，因此过滤器永远不会让提示变差。
+
+这一步是为了解决实测噪声：排查 `graft_commit` 漂移时，`divergent-rebuild-probe` 因为共享
+「prepare / 产物 / 字段」而被词法召回，但它与当前任务无关。
+
+三条实测得到的硬约束（都写进了代码与测试）：
+
+- **必须显式给 provider/model**：`llm.stream()` 没有 provider 会报
+  `no adapter registered for provider "undefined"`；过滤器静默回退会让人以为“过滤了但没效果”。
+  默认路由取宿主当前默认选择，可用 `filterProvider` / `filterModel` 覆盖。
+- **必须关掉推理**：实测推理模型在“3 个候选取哪个”这种小判定上会先烧掉 3627 字符推理，
+  然后撞上 max-tokens 一个字都不输出（`finish=max-tokens`）。过滤器强制 `reasoningEffort: off`。
+- **回退必须可见**：`memory_search` 返回 `filter: { attempted, applied, kept?, reason? }`。
+  `applied:false` + `reason` 说明过滤器没生效（模型超时/无 JSON），而不是“判定为无关”。
+
+延迟预算：pre-step 只给 4 秒（超时就发词法答案，不拖慢回合）；显式 `memory_search` 给 60 秒。
 
 ## 工具
 
 | 工具 | 作用 |
 |---|---|
-| `memory_harvest {limit?}` | 采矿：读账本 → 读日志 → 抽取 → 写技能/负知识 → 记幂等键 |
-| `memory_stats {}` | 技能数、负知识数、已处理会话数、两个目录路径 |
-| `memory_search {query}` | 本地词法检索（可解释：返回命中分数与 `when` 行） |
+| `memory_harvest {limit?}` | 采矿：读账本 → 读日志 → 四层抽取 → 写技能/负知识/事实/经验 → 记幂等键 |
+| `memory_stats {}` | 技能数、负知识数、事实数、经验数、已处理会话数、两个目录路径 |
+| `memory_search {query, semantic?}` | 本地词法检索；`semantic:true` 再加一次 LLM 过滤（返回分数与 `when` 行） |
 | `memory_forget {name}` | 删除一条技能（显式、可审计；永不自动） |
 
 ## 离线 CLI（M1）
@@ -79,16 +151,22 @@ CLI 直接用**本仓库自带的 zstd 读取器**读会话文件（DSH 的 v4 �
 ## 抽取契约（严格 JSON）
 
 ```json
-{"skills":[{"name":"kebab-name","title":"中文标题","when":"何时用","how":["步骤"],"evidence":[12,34]}],
- "negatives":[{"symptom":"现象","cause":"原因","avoid":"替代做法","evidence":[56]}]}
+{"facts":[{"text":"客观现象","seq":12}],
+ "experiences":[{"text":"单次试错的结论","seq":12}],
+ "negatives":[{"symptom":"现象","cause":"原因","avoid":"替代做法","evidence":[56]}],
+ "skills":[{"name":"kebab-name","title":"中文标题","description":"是什么",
+            "when_to_use":"何时用","steps":["步骤 1","步骤 2"],
+            "verify":["验证标准"],"evidence":[12,34]}]}
 ```
 
 本地校验（不过就丢，且把原因写进 `dropped`）：
 
 1. `name` 必须 ASCII kebab-case（SKILL.md 的命名规则，同时阻断路径穿越）；
-2. 每条必须有 `evidence`，且 **seq 必须真实存在于该会话**（防幻觉）；
-3. 泛化句（“要小心/多测试”之类）直接拒绝；
-4. 每会话 ≤3 技能 / ≤3 负知识。
+2. 事实/经验必须带 **真实存在** 的 seq 指针（防幻觉，保证可回查）；
+3. 技能至少 2 个执行步骤 + 1 条验证标准——单句口号不是技能；
+4. 每条技能/负知识必须有 `evidence`，且 seq 必须真实存在于该会话；
+5. 泛化句（“要小心/多测试”之类）直接拒绝；
+6. 每会话 ≤3 事实 / ≤3 经验 / ≤2 技能 / ≤3 负知识。
 
 ## 写入前的安全闸
 
@@ -99,6 +177,7 @@ CLI 直接用**本仓库自带的 zstd 读取器**读会话文件（DSH 的 v4 �
 - ✅ M1：读账本、读日志、抽取、落盘 `SKILL.md` + `negatives.jsonl`、幂等键、离线 CLI（dry-run / OpenAI 兼容）
 - ✅ M2：`suggest` 审核队列（`autoApprove` 开关）+ 四道闸（名字 / 归一化精确 / Jaccard ≥0.85 / 同因不同解互链）
 - ✅ M3：`IDF × 鲜活度 × 重要度` 本地检索 + pre-step 一句话提示（每轮一次、30 分钟不重复）
+- ✅ v0.2.0：四层认知模型（fact / experience / negative / skill）+ 结构化 SKILL.md（`when_to_use` / 执行步骤 / 验证标准）+ 两阶段检索（LLM 相关性过滤）
 - ⏳ M4：飞轮计分（提示后成功加权、误命中降权）
 
 ## 测试

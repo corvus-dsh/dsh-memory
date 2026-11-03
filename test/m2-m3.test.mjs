@@ -16,8 +16,10 @@ import { renderHint, retrieve } from '../lib/retrieve.js'
 const skill = {
   name: 'red-test-first',
   title: '先跑冻结构建做红测',
+  description: '改动迁移逻辑时，先证明修复有效再动手。',
   when: '改动迁移逻辑且要证明修复有效',
-  how: ['在冻结包跑同一套测试', '确认 3 条必红', '再在现行构建跑绿'],
+  steps: ['在冻结包跑同一套测试', '确认 3 条必红', '再在现行构建跑绿'],
+  verify: ['同一组用例先红后绿，且失败信息指向被改的函数'],
   evidence: [3],
 }
 
@@ -175,7 +177,7 @@ test('retrieve: stopword-only queries score below the threshold', async () => {
   const { retrieve } = await import('../lib/retrieve.js')
   const skills = mkdtempSync(join(tmpdir(), 'dsh-stop-s-'))
   const memory = mkdtempSync(join(tmpdir(), 'dsh-stop-m-'))
-  writeSkill(skills, { name: 'red-test-first', title: '先跑红测', when: '改动迁移逻辑且要证明修复有效', how: ['跑冻结包'], evidence: [3] }, { sessionId: 's', boundarySeq: 9 })
+  writeSkill(skills, { name: 'red-test-first', title: '先跑红测', when: '改动迁移逻辑且要证明修复有效', steps: ['跑冻结包', '确认必红'], verify: ['失败信息指向被改函数'], evidence: [3] }, { sessionId: 's', boundarySeq: 9 })
   const result = retrieve(memory, skills, '逻辑 修复 改动 的 了 在 是', { threshold: 0.55 })
   assert.equal(result.skill, undefined, 'high-frequency words must not recall a skill on their own')
 })

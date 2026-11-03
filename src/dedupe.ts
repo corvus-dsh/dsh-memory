@@ -48,7 +48,9 @@ export interface SkillCandidate {
 
 function readWhen(path: string): string {
   try {
-    return readFileSync(path, 'utf8').match(/^when:\s*(.+)$/mu)?.[1] ?? ''
+    const text = readFileSync(path, 'utf8')
+    // v0.2.0 writes `when_to_use`; legacy files still carry `when`.
+    return text.match(/^(?:when_to_use|when):\s*(.+)$/mu)?.[1] ?? ''
   } catch {
     return ''
   }

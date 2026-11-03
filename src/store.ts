@@ -1,5 +1,6 @@
 /**
- * Durable store: skills as SKILL.md files, negative paths as JSONL.
+ * Durable store: skills as structured SKILL.md files, negative paths as JSONL,
+ * and the observation layers (facts / experiences) as append-only JSONL.
  *
  * WHY SKILL.md AND NOT A PRIVATE JSON
  *
@@ -8,13 +9,21 @@
  * retrieval protocol of ours in the loop. The store only has to be *correct*, not
  * clever: kebab-case name as the identity key, frontmatter the loader understands,
  * atomic writes, and a prompt-injection scan before anything is written.
+ *
+ * WHY THE SHAPE IS ENFORCED HERE TOO
+ *
+ * The extractor already refuses a skill without steps/verification. This second
+ * gate exists because the store is also reachable from the review queue, where a
+ * v0.1 suggestion (a single `how` line) can still arrive. One measured skill was
+ * literally `测试样本必须超过阈值` — a slogan. A file that cannot guide execution
+ * is not written at all; the reason is returned, never swallowed.
  */
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 
-import type { ExtractedNegative, ExtractedSkill } from './extract.js'
+import type { ExtractedExperience, ExtractedFact, ExtractedNegative, ExtractedSkill } from './extract.js'
 import { planNegative } from './dedupe.js'
 
 export function defaultSkillsDir(): string {
@@ -62,57 +71,53 @@ export interface SkillMeta {
   at?: string
 }
 
-/** Create or merge one skill. Returns `created`, `merged`, or `skipped:<reason>`. */
-export function writeSkill(skillsDir: string, skill: ExtractedSkill, meta: SkillMeta): string {
-  const threat = scanThreat(`${skill.title} ${skill.when} ${skill.how.join(' ')}`)
-  if (threat !== undefined) return `skipped:${threat}`
-  const path = skillPath(skillsDir, skill.name)
-  const now = meta.at ?? new Date().toISOString().slice(0, 10)
-  if (existsSync(path)) {
-    // Merge: keep the earliest evidence, refresh the wording, count the use of
-    // the *provenance* (sessions that confirmed it), never duplicate the file.
-    const previous = readFileSync(path, 'utf8')
-    const evidence = previous.match(/^evidence:\s*(.+)$/mu)?.[1] ?? ''
-    const merged = [...new Set([...evidence.split(/[,\s]+/u).filter(Boolean), ...skill.evidence.map(String)])]
-    const sources = previous.match(/^sources:\s*(\d+)$/mu)?.[1]
-    const next = [
-      frontmatter({
-        name: skill.name,
-        description: skill.when.slice(0, 160),
-        when: skill.when.slice(0, 160),
-        evidence: merged.join(','),
-        sources: Number(sources ?? '1') + 1,
-        updated: now,
-      }),
-      '',
-      `# ${skill.title}`,
-      '',
-      '## 何时使用',
-      '',
-      skill.when,
-      '',
-      '## 方法',
-      '',
-      ...skill.how.map((step, index) => `${index + 1}. ${step}`),
-      '',
-      '## 证据',
-      '',
-      `- 源会话：${meta.sessionId}（seq ${skill.evidence.join(', ')}）`,
-      '',
-    ].join('\n')
-    atomicWrite(path, next)
-    return 'merged'
-  }
+/** What the review queue may still hold from v0.1: `when` + `how`, no verify. */
+export interface SkillInput {
+  name: string
+  title?: string
+  description?: string
+  when?: string
+  when_to_use?: string
+  steps?: string[]
+  how?: string[]
+  verify?: string[]
+  verification?: string[]
+  evidence: number[]
+}
 
-  const body = [
-    frontmatter({
-      name: skill.name,
-      description: skill.when.slice(0, 160),
-      when: skill.when.slice(0, 160),
-      evidence: skill.evidence.join(','),
-      sources: 1,
-      created: now,
-    }),
+export function normalizeSkill(input: SkillInput | ExtractedSkill): ExtractedSkill {
+  const raw = input as SkillInput
+  const when = String(raw.when_to_use ?? raw.when ?? '').replace(/\s+/gu, ' ').trim()
+  const steps = (raw.steps ?? raw.how ?? []).map((step) => String(step).replace(/\s+/gu, ' ').trim()).filter(Boolean)
+  const verify = (raw.verify ?? raw.verification ?? []).map((line) => String(line).replace(/\s+/gu, ' ').trim()).filter(Boolean)
+  return {
+    name: String(raw.name ?? '').toLowerCase(),
+    title: String(raw.title ?? raw.name ?? ''),
+    description: String(raw.description ?? when).replace(/\s+/gu, ' ').trim(),
+    when,
+    steps,
+    verify,
+    evidence: Array.isArray(raw.evidence) ? raw.evidence.map(Number).filter(Number.isFinite) : [],
+  }
+}
+
+function renderSkill(skill: ExtractedSkill, meta: SkillMeta, previous?: { evidence: number; sources: number; created: string }): string {
+  const now = meta.at ?? new Date().toISOString().slice(0, 10)
+  const fields: Record<string, string | number> = {
+    name: skill.name,
+    description: skill.description.slice(0, 160),
+    when_to_use: skill.when.slice(0, 200),
+    evidence: skill.evidence.join(','),
+    sources: previous === undefined ? 1 : previous.sources,
+  }
+  if (previous !== undefined && previous.created.length > 0) {
+    fields.created = previous.created
+    fields.updated = now
+  } else {
+    fields.created = now
+  }
+  return [
+    frontmatter(fields),
     '',
     `# ${skill.title}`,
     '',
@@ -120,34 +125,64 @@ export function writeSkill(skillsDir: string, skill: ExtractedSkill, meta: Skill
     '',
     skill.when,
     '',
-    '## 方法',
+    '## 执行步骤',
     '',
-    ...skill.how.map((step, index) => `${index + 1}. ${step}`),
+    ...skill.steps.map((step, index) => `${index + 1}. ${step}`),
+    '',
+    '## 验证标准',
+    '',
+    ...skill.verify.map((line) => `- ${line}`),
     '',
     '## 证据',
     '',
     `- 源会话：${meta.sessionId}（seq ${skill.evidence.join(', ')}）`,
     '',
   ].join('\n')
-  atomicWrite(path, body)
+}
+
+/** Create or merge one skill. Returns `created`, `merged`, or `skipped:<reason>`. */
+export function writeSkill(skillsDir: string, input: SkillInput | ExtractedSkill, meta: SkillMeta): string {
+  const skill = normalizeSkill(input)
+  if (skill.steps.length === 0) return 'skipped:no execution steps'
+  if (skill.verify.length === 0) return 'skipped:no verification criterion'
+  const threat = scanThreat(`${skill.title} ${skill.description} ${skill.when} ${skill.steps.join(' ')} ${skill.verify.join(' ')}`)
+  if (threat !== undefined) return `skipped:${threat}`
+  const path = skillPath(skillsDir, skill.name)
+  if (existsSync(path)) {
+    // Merge: keep the earliest evidence, refresh the wording, count the use of
+    // the *provenance* (sessions that confirmed it), never duplicate the file.
+    const previousText = readFileSync(path, 'utf8')
+    const evidence = previousText.match(/^evidence:\s*(.+)$/mu)?.[1] ?? ''
+    const merged = [...new Set([...evidence.split(/[,\s]+/u).filter(Boolean), ...skill.evidence.map(String)])]
+    const sources = Number(previousText.match(/^sources:\s*(\d+)$/mu)?.[1] ?? '1')
+    const created = previousText.match(/^created:\s*(.+)$/mu)?.[1] ?? ''
+    const mergedSkill: ExtractedSkill = { ...skill, evidence: merged.map(Number).filter(Number.isFinite) }
+    atomicWrite(path, renderSkill(mergedSkill, meta, { evidence: merged.length, sources: sources + 1, created }))
+    return 'merged'
+  }
+  atomicWrite(path, renderSkill(skill, meta))
   return 'created'
+}
+
+function readJsonl(path: string): Array<Record<string, unknown>> {
+  const out: Array<Record<string, unknown>> = []
+  if (!existsSync(path)) return out
+  for (const line of readFileSync(path, 'utf8').split(/\r?\n/u)) {
+    if (line.trim().length === 0) continue
+    try {
+      const parsed = JSON.parse(line)
+      if (parsed !== null && typeof parsed === 'object') out.push(parsed)
+    } catch {
+      // A torn line must not erase the rest of the ledger.
+    }
+  }
+  return out
 }
 
 export function appendNegatives(memoryDir: string, negatives: ExtractedNegative[], meta: SkillMeta): number {
   if (negatives.length === 0) return 0
   const path = join(memoryDir, 'negatives.jsonl')
-  const existing: Array<Record<string, unknown>> = []
-  if (existsSync(path)) {
-    for (const line of readFileSync(path, 'utf8').split(/\r?\n/u)) {
-      if (line.trim().length === 0) continue
-      try {
-        const parsed = JSON.parse(line)
-        if (parsed !== null && typeof parsed === 'object') existing.push(parsed)
-      } catch {
-        // A torn line must not erase the rest of the ledger.
-      }
-    }
-  }
+  const existing = readJsonl(path)
   let appended = 0
   let dirty = false
   for (const negative of negatives) {
@@ -183,6 +218,57 @@ export function appendNegatives(memoryDir: string, negatives: ExtractedNegative[
   atomicWrite(path, existing.map((record) => JSON.stringify(record)).join('\n') + '\n')
   return appended
 }
+
+interface LayerRecord {
+  text: string
+  evidence: number[]
+  sourceSessionId: string
+  boundarySeq: number
+  at: string
+  hits: number
+}
+
+/** Append facts/experiences, merging evidence (never instructions, only pointers). */
+function appendLayer(memoryDir: string, file: string, entries: ReadonlyArray<{ text: string; seq: number }>, meta: SkillMeta): number {
+  if (entries.length === 0) return 0
+  const path = join(memoryDir, file)
+  const existing = readJsonl(path) as unknown as LayerRecord[]
+  let appended = 0
+  let dirty = false
+  for (const entry of entries) {
+    if (scanThreat(entry.text) !== undefined) continue
+    const same = existing.find((record) => record.text === entry.text)
+    if (same !== undefined) {
+      const merged = [...new Set([...(Array.isArray(same.evidence) ? same.evidence.map(Number) : []), entry.seq])]
+      same.evidence = merged
+      same.hits = Number(same.hits ?? 0) + 1
+      dirty = true
+      continue
+    }
+    existing.push({
+      text: entry.text,
+      evidence: [entry.seq],
+      sourceSessionId: meta.sessionId,
+      boundarySeq: meta.boundarySeq,
+      at: meta.at ?? new Date().toISOString(),
+      hits: 1,
+    })
+    appended += 1
+    dirty = true
+  }
+  if (!dirty) return 0
+  atomicWrite(path, existing.map((record) => JSON.stringify(record)).join('\n') + '\n')
+  return appended
+}
+
+export function appendFacts(memoryDir: string, facts: readonly ExtractedFact[], meta: SkillMeta): number {
+  return appendLayer(memoryDir, 'facts.jsonl', facts, meta)
+}
+
+export function appendExperiences(memoryDir: string, experiences: readonly ExtractedExperience[], meta: SkillMeta): number {
+  return appendLayer(memoryDir, 'experiences.jsonl', experiences, meta)
+}
+
 export function processedKey(sessionId: string, boundarySeq: number): string {
   return `${sessionId}:${boundarySeq}`
 }
@@ -207,19 +293,22 @@ export function markProcessed(memoryDir: string, key: string): void {
 export interface MemoryStats {
   skills: number
   negatives: number
+  facts: number
+  experiences: number
   processed: number
   memoryDir: string
   skillsDir: string
 }
 
+function countJsonl(path: string): number {
+  try {
+    return readFileSync(path, 'utf8').split(/\r?\n/u).filter(Boolean).length
+  } catch {
+    return 0
+  }
+}
+
 export function stats(memoryDir: string, skillsDir: string): MemoryStats {
-  const negatives = (() => {
-    try {
-      return readFileSync(join(memoryDir, 'negatives.jsonl'), 'utf8').split(/\r?\n/u).filter(Boolean).length
-    } catch {
-      return 0
-    }
-  })()
   const skills = (() => {
     try {
       return readdirNames(skillsDir).length
@@ -227,7 +316,15 @@ export function stats(memoryDir: string, skillsDir: string): MemoryStats {
       return 0
     }
   })()
-  return { skills, negatives, processed: readProcessed(memoryDir).size, memoryDir, skillsDir }
+  return {
+    skills,
+    negatives: countJsonl(join(memoryDir, 'negatives.jsonl')),
+    facts: countJsonl(join(memoryDir, 'facts.jsonl')),
+    experiences: countJsonl(join(memoryDir, 'experiences.jsonl')),
+    processed: readProcessed(memoryDir).size,
+    memoryDir,
+    skillsDir,
+  }
 }
 
 function readdirNames(dir: string): string[] {

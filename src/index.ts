@@ -16,10 +16,21 @@ import { join } from 'node:path'
 import { readLedgers } from './ledger.js'
 import { resolveModelTarget, segmentSession } from './segment.js'
 import { extractEpisode } from './extract.js'
+import type { ExtractionResult } from './extract.js'
 import { findSkillCandidate } from './dedupe.js'
-import { retrieve, renderHint } from './retrieve.js'
+import { retrieve, renderHint, retrieveWithFilter } from './retrieve.js'
 import { approveSuggestion, listSuggestions, queueSuggestion, rejectSuggestion } from './suggest.js'
-import { appendNegatives, defaultSkillsDir, markProcessed, processedKey, readProcessed, stats, writeSkill } from './store.js'
+import {
+  appendExperiences,
+  appendFacts,
+  appendNegatives,
+  defaultSkillsDir,
+  markProcessed,
+  processedKey,
+  readProcessed,
+  stats,
+  writeSkill,
+} from './store.js'
 
 export const name = 'dsh-memory'
 
@@ -52,6 +63,15 @@ export interface MemoryConfig {
   retrieval?: boolean
   /** Score threshold for a hint. Default 0.55. */
   retrievalThreshold?: number
+  /**
+   * v0.2.0 stage-2 LLM relevance filter. Default true: when more than one skill
+   * clears the threshold, one cheap model call drops the lexical false friends.
+   * Set false to keep retrieval fully offline.
+   */
+  semanticFilter?: boolean
+  /** Optional explicit route for the filter call; default is the host's current default selection. */
+  filterProvider?: string
+  filterModel?: string
 }
 
 interface ContextLike {
@@ -104,7 +124,42 @@ function resolveConfig(ctx: ContextLike, config: MemoryConfig) {
     autoApprove: config.autoApprove === true,
     retrieval: config.retrieval !== false,
     threshold: Number.isFinite(Number(config.retrievalThreshold)) ? Number(config.retrievalThreshold) : 0.55,
+    semanticFilter: config.semanticFilter !== false,
+    filterProvider: typeof config.filterProvider === 'string' && config.filterProvider.length > 0 ? config.filterProvider : undefined,
+    filterModel: typeof config.filterModel === 'string' && config.filterModel.length > 0 ? config.filterModel : undefined,
   }
+}
+
+/**
+ * The model route for the filter call.
+ *
+ * Measured: `llm.stream()` without a provider fails with
+ * `no adapter registered for provider "undefined"`, and the failure was invisible
+ * because the filter falls back to the lexical answer. The host's own default
+ * selection is the right route for a decision that is not about any one session;
+ * an explicit config pair overrides it.
+ */
+function resolveFilterTarget(ctx: ContextLike, filterProvider?: string, filterModel?: string): { provider?: string; model?: string } {
+  if (filterProvider !== undefined && filterModel !== undefined) return { provider: filterProvider, model: filterModel }
+  let provider = filterProvider
+  let model = filterModel
+  const asId = (value: unknown): string | undefined => {
+    if (typeof value === 'string' && value.length > 0) return value
+    if (value !== null && typeof value === 'object' && typeof (value as { id?: unknown }).id === 'string') {
+      const id = (value as { id: string }).id
+      return id.length > 0 ? id : undefined
+    }
+    return undefined
+  }
+  try {
+    const service = ctx.get?.('agentDefaultModel') as { currentSelection?: () => unknown } | undefined
+    const selection = typeof service?.currentSelection === 'function' ? (service.currentSelection() as Record<string, unknown> | undefined) : undefined
+    provider = provider ?? asId(selection?.provider)
+    model = model ?? asId(selection?.model)
+  } catch {
+    // A profile without the service keeps retrieval lexical.
+  }
+  return { ...(provider === undefined ? {} : { provider }), ...(model === undefined ? {} : { model }) }
 }
 
 export interface HarvestReport {
@@ -115,6 +170,8 @@ export interface HarvestReport {
     turns: number
     skills: Array<{ name: string; status: string }>
     negatives: number
+    facts: number
+    experiences: number
     dropped: string[]
   }>
   skipped: string[]
@@ -147,11 +204,7 @@ export async function harvest(ctx: ContextLike, config: MemoryConfig): Promise<H
         skipped.push(`${sessionId}: already processed at seq ${episode.boundarySeq}`)
         continue
       }
-      let extraction = {
-        skills: [] as Array<{ name: string; title: string; when: string; how: string[]; evidence: number[] }>,
-        negatives: [] as Array<{ symptom: string; cause: string; avoid: string; evidence: number[] }>,
-        dropped: [] as string[],
-      }
+      let extraction: ExtractionResult = { facts: [], experiences: [], skills: [], negatives: [], dropped: [] }
       if (resolved.extractor === 'llm') {
         const llm = (() => {
           try {
@@ -180,7 +233,7 @@ export async function harvest(ctx: ContextLike, config: MemoryConfig): Promise<H
           warnings.push(`${sessionId}: extraction failed (${result.dropped[0] ?? 'unknown'})`)
           continue
         }
-        extraction = { skills: result.skills, negatives: result.negatives, dropped: result.dropped }
+        extraction = result
       }
       const meta = { sessionId, boundarySeq: episode.boundarySeq }
       const written: Array<{ name: string; status: string }> = []
@@ -205,8 +258,13 @@ export async function harvest(ctx: ContextLike, config: MemoryConfig): Promise<H
           queued += 1
         }
       }
+      // Facts and experiences are evidence pointers, not instructions: they are
+      // written straight to their own JSONL (with seq), even when skills wait for
+      // review. That keeps the 4-layer model auditable instead of prompt-only.
+      const facts = appendFacts(resolved.memoryDir, extraction.facts, meta)
+      const experiences = appendExperiences(resolved.memoryDir, extraction.experiences, meta)
       markProcessed(resolved.memoryDir, key)
-      harvested.push({ sessionId, turns: episode.turns, skills: written, negatives, dropped: extraction.dropped })
+      harvested.push({ sessionId, turns: episode.turns, skills: written, negatives, facts, experiences, dropped: extraction.dropped })
     } catch (error) {
       warnings.push(`${sessionId}: ${String((error as any)?.message ?? error)}`)
     }
@@ -293,7 +351,8 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
   ctx.tools?.register({
     name: 'memory_harvest',
     description:
-      'Mine finished (retired) sessions for reusable skills and negative paths. Reads the handoff ledger, extracts with the host model, ' +
+      'Mine finished (retired) sessions for the four cognitive layers: facts (with seq pointers), experiences, negative paths, and structured SKILL.md skills ' +
+      '(frontmatter with when_to_use + 执行步骤 + 验证标准). Reads the handoff ledger, extracts with the host model, ' +
       'then queues suggestions (default) or writes directly when autoApprove is on. Idempotent per (session, boundarySeq).',
     parameters: { type: 'object', properties: { limit: { type: 'number' } }, additionalProperties: false },
     output: textOutput(),
@@ -346,18 +405,39 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
 
   ctx.tools?.register({
     name: 'memory_search',
-    description: 'Retrieval preview: idf × freshness × importance over stored skills and negatives.',
+    description:
+      'Retrieval preview: idf × freshness × importance, plus an optional LLM relevance filter (semantic:true) that drops lexical false friends.',
     parameters: {
       type: 'object',
-      properties: { query: { type: 'string' }, threshold: { type: 'number' } },
+      properties: {
+        query: { type: 'string' },
+        threshold: { type: 'number' },
+        semantic: { type: 'boolean' },
+      },
       required: ['query'],
       additionalProperties: false,
     },
     output: textOutput(),
-    execute: async (args: { query: string; threshold?: number }) => {
-      const result = retrieve(resolved.memoryDir, resolved.skillsDir, String(args.query ?? ''), {
+    execute: async (args: { query: string; threshold?: number; semantic?: boolean }) => {
+      const options = {
         threshold: Number.isFinite(Number(args.threshold)) ? Number(args.threshold) : resolved.threshold,
-      })
+      }
+      const llm = (() => {
+        if (args.semantic !== true || !llmAvailable) return undefined
+        try {
+          return ctx.get?.('llm') as never
+        } catch {
+          return undefined
+        }
+      })()
+      const result =
+        llm === undefined
+          ? retrieve(resolved.memoryDir, resolved.skillsDir, String(args.query ?? ''), options)
+          : await retrieveWithFilter(resolved.memoryDir, resolved.skillsDir, String(args.query ?? ''), {
+              ...options,
+              llm,
+              ...resolveFilterTarget(ctx, resolved.filterProvider, resolved.filterModel),
+            })
       const hint = renderHint(result)
       // `hint: undefined` is not lossless JSON: the ToolService validates the raw
       // value, not its stringified form, and rejects the whole call.
@@ -396,10 +476,27 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
         if (key === state.userKey) return decision
         state.userKey = key
         nudgeState.set(agentId, state)
-        const result = retrieve(resolved.memoryDir, resolved.skillsDir, userText, { threshold: resolved.threshold })
+        const llm = (() => {
+          if (!resolved.semanticFilter) return undefined
+          try {
+            return ctx.get?.('llm') as never
+          } catch {
+            return undefined
+          }
+        })()
+        const result = await retrieveWithFilter(resolved.memoryDir, resolved.skillsDir, userText, {
+          threshold: resolved.threshold,
+          // A per-turn hint must stay cheap: if the filter cannot answer in a few
+          // seconds, the lexical answer goes out and the turn continues.
+          timeoutMs: 4000,
+          ...(llm === undefined ? {} : { llm, ...resolveFilterTarget(ctx, resolved.filterProvider, resolved.filterModel) }),
+        })
         const hint = renderHint(result)
         if (hint === undefined) return decision
-        const bestId = result.skill?.id ?? result.negative?.id ?? ''
+        const bestId =
+          [result.skill?.id ?? '', ...(result.alternatives ?? []).map((hit) => hit.id), result.negative?.id ?? '']
+            .filter((id) => id.length > 0)
+            .join('+')
         const now = Date.now()
         if (bestId === state.lastId && now - state.lastAt < 30 * 60_000) return decision
         state.lastId = bestId
@@ -431,7 +528,7 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
   try {
     ctx.logger?.info?.(
       `[dsh-memory] ready: ledger=${resolved.graftDataDir} memory=${resolved.memoryDir} skills=${resolved.skillsDir} ` +
-        `extractor=${resolved.extractor} autoApprove=${resolved.autoApprove} retrieval=${resolved.retrieval}`,
+        `extractor=${resolved.extractor} autoApprove=${resolved.autoApprove} retrieval=${resolved.retrieval} semanticFilter=${resolved.semanticFilter}`,
     )
   } catch {
     // Logging must not block activation.
