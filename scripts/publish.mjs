@@ -2,8 +2,8 @@
 /**
  * One-command publish: git init → commit → tag → push → topics → Release.
  *
- *   GITHUB_TOKEN=ghp_xxx node scripts/publish.mjs            # 真发布
- *   GITHUB_TOKEN=ghp_xxx node scripts/publish.mjs --dry-run   # 只打印将执行的步骤
+ *   GITHUB_TOKEN=<your-token> node scripts/publish.mjs            # 真发布
+ *   GITHUB_TOKEN=<your-token> node scripts/publish.mjs --dry-run   # 只打印将执行的步骤
  *
  * 需要 token 具备 `repo` 权限（classic）或 Contents + Administration 写权限（fine-grained）。
  *

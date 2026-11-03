@@ -19,3 +19,8 @@
         # 'llm' extracts with the host model; 'off' disables extraction (ledger
         # scan only, useful for verifying the wiring before spending tokens).
         extractor: 'llm'
+        # v0.4 retrieval: the lexical net recalls at 0.20; the LLM adjudicates.
+        retrievalFloor: 0.20
+        semanticFilter: true
+        # Strict bar, used only when semanticFilter is false (pure offline mode).
+        retrievalThreshold: 0.55
