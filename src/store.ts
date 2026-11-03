@@ -82,6 +82,8 @@ export interface SkillInput {
   how?: string[]
   verify?: string[]
   verification?: string[]
+  scope?: string
+  aliases?: string[]
   evidence: number[]
 }
 
@@ -90,6 +92,11 @@ export function normalizeSkill(input: SkillInput | ExtractedSkill): ExtractedSki
   const when = String(raw.when_to_use ?? raw.when ?? '').replace(/\s+/gu, ' ').trim()
   const steps = (raw.steps ?? raw.how ?? []).map((step) => String(step).replace(/\s+/gu, ' ').trim()).filter(Boolean)
   const verify = (raw.verify ?? raw.verification ?? []).map((line) => String(line).replace(/\s+/gu, ' ').trim()).filter(Boolean)
+  const scope = String(raw.scope ?? '').toLowerCase()
+  const aliases = (Array.isArray(raw.aliases) ? raw.aliases : [])
+    .map((alias) => String(alias).replace(/\s+/gu, ' ').trim())
+    .filter(Boolean)
+    .slice(0, 3)
   return {
     name: String(raw.name ?? '').toLowerCase(),
     title: String(raw.title ?? raw.name ?? ''),
@@ -97,6 +104,8 @@ export function normalizeSkill(input: SkillInput | ExtractedSkill): ExtractedSki
     when,
     steps,
     verify,
+    scope: scope === 'workspace' || scope === 'global' ? scope : 'project',
+    aliases,
     evidence: Array.isArray(raw.evidence) ? raw.evidence.map(Number).filter(Number.isFinite) : [],
   }
 }
@@ -246,7 +255,19 @@ export function parseSkillFile(text: string, name: string): ExtractedSkill {
     if (match !== null) steps.push(match[1].trim())
   }
   const evidence = (text.match(/^evidence:\s*(.+)$/mu)?.[1] ?? '').split(/[,\s]+/u).filter(Boolean).map(Number)
-  return { name, title, description, when, steps, verify: [], evidence }
+  const scopeText = (text.match(/^scope:\s*(.+)$/mu)?.[1] ?? '').trim().toLowerCase()
+  const aliases = (text.match(/^aliases:\s*(.+)$/mu)?.[1] ?? '').split(/,/u).map((item) => item.trim()).filter(Boolean)
+  return {
+    name,
+    title,
+    description,
+    when,
+    steps,
+    verify: [],
+    scope: scopeText === 'workspace' || scopeText === 'global' ? scopeText : 'project',
+    aliases,
+    evidence,
+  }
 }
 
 function listSkillFiles(skillsDir: string): string[] {
@@ -292,7 +313,7 @@ function conflictFooter(conflicts: readonly SkillConflict[]): string[] {
   function renderSkill(
   skill: ExtractedSkill,
   meta: SkillMeta,
-  previous?: { evidence: number; sources: number; created: string },
+  previous?: { evidence: number; sources: number; created: string; lastUsed?: string; lastValidated?: string },
   conflicts: readonly SkillConflict[] = [],
 ): string {
   const now = meta.at ?? new Date().toISOString().slice(0, 10)
@@ -300,6 +321,8 @@ function conflictFooter(conflicts: readonly SkillConflict[]): string[] {
     name: skill.name,
     description: skill.description.slice(0, 160),
     when_to_use: skill.when.slice(0, 200),
+    scope: skill.scope,
+    ...(skill.aliases.length === 0 ? {} : { aliases: skill.aliases.join(', ') }),
     evidence: skill.evidence.join(','),
     sources: previous === undefined ? 1 : previous.sources,
     ...(conflicts.length === 0 ? {} : { conflicts_with: conflicts.map((conflict) => conflict.name).join(',') }),
@@ -310,6 +333,9 @@ function conflictFooter(conflicts: readonly SkillConflict[]): string[] {
   } else {
     fields.created = now
   }
+  // v0.5 decay bookkeeping: a fresh write is also a fresh validation.
+  fields.last_validated = previous?.lastValidated !== undefined && previous.lastValidated.length > 0 ? previous.lastValidated : now
+  fields.last_used = previous?.lastUsed !== undefined && previous.lastUsed.length > 0 ? previous.lastUsed : now
   return [
     frontmatter(fields),
     '',
@@ -353,8 +379,10 @@ export function writeSkill(skillsDir: string, input: SkillInput | ExtractedSkill
     const merged = [...new Set([...evidence.split(/[,\s]+/u).filter(Boolean), ...skill.evidence.map(String)])]
     const sources = Number(previousText.match(/^sources:\s*(\d+)$/mu)?.[1] ?? '1')
     const created = previousText.match(/^created:\s*(.+)$/mu)?.[1] ?? ''
+    const lastUsed = previousText.match(/^last_used:\s*(.+)$/mu)?.[1] ?? undefined
+    const lastValidated = previousText.match(/^last_validated:\s*(.+)$/mu)?.[1] ?? undefined
     const mergedSkill: ExtractedSkill = { ...skill, evidence: merged.map(Number).filter(Number.isFinite) }
-    atomicWrite(path, renderSkill(mergedSkill, meta, { evidence: merged.length, sources: sources + 1, created }, conflicts))
+    atomicWrite(path, renderSkill(mergedSkill, meta, { evidence: merged.length, sources: sources + 1, created, lastUsed, lastValidated }, conflicts))
     for (const conflict of conflicts) linkConflictBack(skillsDir, conflict, skill)
     return 'merged'
   }
@@ -438,6 +466,11 @@ export function appendNegatives(memoryDir: string, negatives: ExtractedNegative[
     }
     existing.push({
       ...negative,
+      scope: negative.scope ?? 'project',
+      // v0.5: confidence starts at 1 and is lowered by counter-evidence, never
+      // raised by repetition alone (a repeated failure is not a stronger rule).
+      confidence: 1,
+      counterEvidence: [],
       sourceSessionId: meta.sessionId,
       boundarySeq: meta.boundarySeq,
       at: meta.at ?? new Date().toISOString(),
@@ -459,6 +492,120 @@ interface LayerRecord {
   boundarySeq: number
   at: string
   hits: number
+}
+
+/**
+ * v0.5: counter-evidence — the ONLY mechanism that can weaken a stored rule.
+ *
+ * A negative path says "doing A fails". When a later session does A and it
+ * SUCCEEDS, the rule has been falsified in practice. Silently keeping it at full
+ * weight is how a stale rule becomes a permanent prohibition; deleting it on one
+ * success is the opposite mistake (the old failure may still happen elsewhere).
+ * So: record the seq as `counterEvidence`, lower `confidence` by a step, and let
+ * retrieval rank it down. The rule survives, visibly weakened, with its receipt.
+ */
+export interface CounterEvidenceResult {
+  updated: Array<{ symptom: string; seq: number; confidence: number }>
+  scannedResults: number
+}
+
+export function recordCounterEvidence(
+  memoryDir: string,
+  events: readonly { type?: string; seq?: number; data?: any }[],
+): CounterEvidenceResult {
+  const path = join(memoryDir, 'negatives.jsonl')
+  const records = readJsonl(path)
+  if (records.length === 0) return { updated: [], scannedResults: 0 }
+
+  const callNames = new Map<string, string>()
+  const successes: Array<{ seq: number; tool: string; text: string }> = []
+  for (const event of events) {
+    if (event?.type === 'tool/call') {
+      const callId = typeof event.data?.callId === 'string' ? event.data.callId : ''
+      const name = typeof event.data?.name === 'string' ? event.data.name : ''
+      if (callId.length > 0 && name.length > 0) callNames.set(callId, name)
+      continue
+    }
+    if (event?.type !== 'tool/result') continue
+    const message = event.data?.message
+    if (message?.isError === true || event.data?.error !== undefined) continue
+    const callId = message?.source?.callId ?? message?.toolCallId
+    const tool = typeof callId === 'string' ? (callNames.get(String(callId)) ?? '') : ''
+    if (tool.length === 0) continue
+    const content = Array.isArray(message?.content) ? message.content : []
+    const text = content
+      .filter((block: any) => block?.type === 'text' && typeof block.text === 'string')
+      .map((block: any) => block.text)
+      .join(' ')
+    successes.push({ seq: Number(event.seq ?? 0), tool, text: text.slice(0, 2000) })
+  }
+
+  const updated: CounterEvidenceResult['updated'] = []
+  let dirty = false
+  for (const record of records) {
+    const symptom = String(record.symptom ?? '')
+    const cause = String(record.cause ?? '')
+    const avoid = String(record.avoid ?? '')
+    const haystack = `${symptom} ${cause} ${avoid}`
+    const tokens = new Set(
+      (haystack.toLowerCase().match(/[a-z][a-z0-9_-]{2,}/gu) ?? []).filter(
+        (token) => !['the', 'and', 'with', 'for', 'this', 'that', 'from', 'then', 'than', 'into'].includes(token),
+      ),
+    )
+    if (tokens.size === 0) continue
+    const seen = new Set((Array.isArray(record.counterEvidence) ? record.counterEvidence : []).map(Number))
+    for (const success of successes) {
+      if (seen.has(success.seq)) continue
+      if (!tokens.has(success.tool.toLowerCase())) continue
+      // The success must not still show the symptom it is supposed to refute.
+      const symptomWords = (symptom.match(/[\u4e00-\u9fff]{2,}/gu) ?? []).slice(0, 3)
+      if (symptomWords.some((word) => success.text.includes(word))) continue
+      const counter = [...seen, success.seq]
+      seen.add(success.seq)
+      record.counterEvidence = counter
+      const confidence = Number(record.confidence ?? 1)
+      record.confidence = Math.max(0.2, Math.round((confidence - 0.2) * 100) / 100)
+      record.lastCounterAt = new Date().toISOString()
+      updated.push({ symptom: symptom.slice(0, 80), seq: success.seq, confidence: Number(record.confidence) })
+      dirty = true
+    }
+  }
+  if (dirty) atomicWrite(path, records.map((record) => JSON.stringify(record)).join('\n') + '\n')
+  return { updated, scannedResults: successes.length }
+}
+
+/** v0.5: record that a recalled skill was actually used (drives decay). */
+export function touchSkillUsage(skillsDir: string, name: string, at?: string): boolean {
+  const path = skillPath(skillsDir, name)
+  if (!existsSync(path)) return false
+  try {
+    let text = readFileSync(path, 'utf8')
+    const stamp = at ?? new Date().toISOString()
+    text = /^last_used:/mu.test(text)
+      ? text.replace(/^last_used:.*$/mu, `last_used: ${stamp}`)
+      : text.replace(/^(name:.*)$/mu, `$1\nlast_used: ${stamp}`)
+    atomicWrite(path, text)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** v0.5: new evidence re-validates a skill (cancels decay for 14 days). */
+export function markSkillValidated(skillsDir: string, name: string, at?: string): boolean {
+  const path = skillPath(skillsDir, name)
+  if (!existsSync(path)) return false
+  try {
+    let text = readFileSync(path, 'utf8')
+    const stamp = at ?? new Date().toISOString()
+    text = /^last_validated:/mu.test(text)
+      ? text.replace(/^last_validated:.*$/mu, `last_validated: ${stamp}`)
+      : text.replace(/^(name:.*)$/mu, `$1\nlast_validated: ${stamp}`)
+    atomicWrite(path, text)
+    return true
+  } catch {
+    return false
+  }
 }
 
 /** Append facts/experiences, merging evidence (never instructions, only pointers). */

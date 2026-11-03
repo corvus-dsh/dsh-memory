@@ -1,6 +1,6 @@
 {
   "name": "dsh-memory",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Capability memory for DSH: mine finished sessions into four cognitive layers (facts with seq pointers, experiences, negative paths, structured SKILL.md skills), and filter lexical retrieval with a cheap LLM relevance pass. Reads the handoff ledger as a file contract; imports nothing from the slicing plugin.",
   "entry": "lib/index.js",
   "activate": "activate(ctx, config)",

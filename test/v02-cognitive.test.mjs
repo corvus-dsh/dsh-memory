@@ -8,7 +8,7 @@
  * ids, and must never make retrieval worse than the offline top-1.
  */
 
-import test from 'node:test'
+import test, { beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -16,7 +16,11 @@ import { join } from 'node:path'
 
 import { appendNegatives, writeSkill } from '../lib/store.js'
 import { retrieve, retrieveCandidates, retrieveWithFilter, renderHint } from '../lib/retrieve.js'
-import { FILTER_SYSTEM_PROMPT, selectApplicableSkills } from '../lib/filter.js'
+import { FILTER_SYSTEM_PROMPT, clearFilterCache, selectApplicableSkills } from '../lib/filter.js'
+
+// v0.5: the verdict cache is process-wide; a test must not inherit another
+// test's adjudication for the same (query, candidates) pair.
+beforeEach(() => clearFilterCache())
 
 const RELEVANT = {
   name: 'boundary-seq-fix',

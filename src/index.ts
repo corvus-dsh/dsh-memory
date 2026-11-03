@@ -11,6 +11,7 @@
  */
 
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { readLedgers } from './ledger.js'
@@ -29,7 +30,9 @@ import {
   markProcessed,
   processedKey,
   readProcessed,
+  recordCounterEvidence,
   stats,
+  touchSkillUsage,
   writeSkill,
 } from './store.js'
 
@@ -200,11 +203,54 @@ export interface HarvestReport {
     facts: number
     experiences: number
     dropped: string[]
+    /** v0.5: write-phase retries (never a second model call). */
+    writeRetries?: number
+    /** v0.5: another writer committed while the model was thinking; merged. */
+    mergedConcurrentWrites?: number
+    /** v0.5: negatives weakened by a successful run of the forbidden tool. */
+    counterEvidence?: number
   }>
   skipped: string[]
   warnings: string[]
   suggestionsQueued: number
   stats: ReturnType<typeof stats>
+}
+
+/**
+ * v0.5 optimistic-concurrency stamp.
+ *
+ * Covers the files harvest reads and writes; a change between "read" and "write"
+ * means another harvest finished in between. The write phase merges (read-modify-
+ * write inside the store), so the correct response is a merge + retry of the
+ * WRITE — never a second LLM extraction, which is the expensive part.
+ */
+export function snapshotStoreVersion(memoryDir: string, skillsDir: string): string {
+  const parts: string[] = []
+  for (const file of ['negatives.jsonl', 'processed.json', 'facts.jsonl', 'experiences.jsonl', 'suggestions.jsonl']) {
+    try {
+      const state = statSync(join(memoryDir, file))
+      parts.push(`${file}:${state.size}:${Math.round(state.mtimeMs)}`)
+    } catch {
+      parts.push(`${file}:-`)
+    }
+  }
+  try {
+    const names = readdirSync(skillsDir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .sort()
+    for (const name of names) {
+      try {
+        const state = statSync(join(skillsDir, name, 'SKILL.md'))
+        parts.push(`${name}:${state.size}:${Math.round(state.mtimeMs)}`)
+      } catch {
+        // a vanished skill is simply absent from the stamp
+      }
+    }
+  } catch {
+    // no skills dir yet
+  }
+  return parts.join('|')
 }
 
 export async function harvest(ctx: ContextLike, config: MemoryConfig): Promise<HarvestReport> {
@@ -226,6 +272,10 @@ export async function harvest(ctx: ContextLike, config: MemoryConfig): Promise<H
         continue
       }
       const episode = segmentSession(sessionId, log as { events?: unknown[] })
+      // v0.5: version stamp taken BEFORE the slow extraction call. A change here
+      // means another harvest wrote meanwhile; the write phase merges, and the
+      // model is never called twice for it.
+      const versionAtExtractStart = snapshotStoreVersion(resolved.memoryDir, resolved.skillsDir)
       const key = processedKey(sessionId, episode.boundarySeq)
       if (processed.has(key)) {
         skipped.push(`${sessionId}: already processed at seq ${episode.boundarySeq}`)
@@ -264,40 +314,70 @@ export async function harvest(ctx: ContextLike, config: MemoryConfig): Promise<H
       }
       const meta = { sessionId, boundarySeq: episode.boundarySeq }
       const written: Array<{ name: string; status: string }> = []
-      for (const skill of extraction.skills) {
-        // Gates ①/②/③: an existing skill wins the name, so the merge lands in it.
-        //
-        // v0.3 exception: a similar TRIGGER with a DIFFERENT METHOD is not the
-        // same skill. Merging there would overwrite one of two mutually exclusive
-        // procedures; the alternative is recorded as a conflict instead.
-        const candidate = findSkillCandidate(resolved.skillsDir, skill.when)
-        const conflicts = findConflicts(resolved.skillsDir, skill)
-        const mergeInto = candidate !== undefined && !conflicts.some((conflict) => conflict.name === candidate.name)
-        const target = mergeInto ? { ...skill, name: candidate!.name } : skill
-        if (mergeInto || resolved.autoApprove) {
-          written.push({ name: target.name, status: writeSkill(resolved.skillsDir, target, meta) })
-        } else {
-          queueSuggestion(resolved.memoryDir, 'skill', skill, meta)
-          queued += 1
-          written.push({ name: skill.name, status: 'queued' })
-        }
-      }
       let negatives = 0
-      if (resolved.autoApprove) {
-        negatives = appendNegatives(resolved.memoryDir, extraction.negatives, meta)
-      } else {
-        for (const negative of extraction.negatives) {
-          queueSuggestion(resolved.memoryDir, 'negative', negative, meta)
-          queued += 1
+      // v0.5 optimistic writes: the LLM call above can take a minute, and another
+      // harvest may have written meanwhile. We re-read the version ONCE, then
+      // merge (never re-call the model). A failed write is retried, not re-mined.
+      const versionBeforeWrites = snapshotStoreVersion(resolved.memoryDir, resolved.skillsDir)
+      const mergedConcurrentWrites = versionBeforeWrites !== versionAtExtractStart ? 1 : 0
+      let writeRetries = 0
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          written.length = 0
+          negatives = 0
+          for (const skill of extraction.skills) {
+            // Gates ①/②/③: an existing skill wins the name, so the merge lands in it.
+            //
+            // v0.3 exception: a similar TRIGGER with a DIFFERENT METHOD is not the
+            // same skill. Merging there would overwrite one of two mutually exclusive
+            // procedures; the alternative is recorded as a conflict instead.
+            const candidate = findSkillCandidate(resolved.skillsDir, skill.when)
+            const conflicts = findConflicts(resolved.skillsDir, skill)
+            const mergeInto = candidate !== undefined && !conflicts.some((conflict) => conflict.name === candidate.name)
+            const target = mergeInto ? { ...skill, name: candidate!.name } : skill
+            if (mergeInto || resolved.autoApprove) {
+              written.push({ name: target.name, status: writeSkill(resolved.skillsDir, target, meta) })
+            } else {
+              queueSuggestion(resolved.memoryDir, 'skill', skill, meta)
+              queued += 1
+              written.push({ name: skill.name, status: 'queued' })
+            }
+          }
+          if (resolved.autoApprove) {
+            negatives = appendNegatives(resolved.memoryDir, extraction.negatives, meta)
+          } else {
+            for (const negative of extraction.negatives) {
+              queueSuggestion(resolved.memoryDir, 'negative', negative, meta)
+              queued += 1
+            }
+          }
+          // Facts and experiences are evidence pointers, not instructions: they are
+          // written straight to their own JSONL (with seq), even when skills wait for
+          // review. That keeps the 4-layer model auditable instead of prompt-only.
+          const facts = appendFacts(resolved.memoryDir, extraction.facts, meta)
+          const experiences = appendExperiences(resolved.memoryDir, extraction.experiences, meta)
+          markProcessed(resolved.memoryDir, key)
+          // v0.5: a finished session may FALSIFY an older negative ("A always
+          // fails" — yet A just succeeded). Record the receipt before reporting.
+          const counter = recordCounterEvidence(resolved.memoryDir, ((log as any).events ?? []) as any[])
+          harvested.push({
+            sessionId,
+            turns: episode.turns,
+            skills: written,
+            negatives,
+            facts,
+            experiences,
+            dropped: extraction.dropped,
+            ...(writeRetries === 0 ? {} : { writeRetries }),
+            ...(mergedConcurrentWrites === 0 ? {} : { mergedConcurrentWrites }),
+            ...(counter.updated.length === 0 ? {} : { counterEvidence: counter.updated.length }),
+          })
+          break
+        } catch (error) {
+          writeRetries += 1
+          if (attempt === 2) throw error
         }
       }
-      // Facts and experiences are evidence pointers, not instructions: they are
-      // written straight to their own JSONL (with seq), even when skills wait for
-      // review. That keeps the 4-layer model auditable instead of prompt-only.
-      const facts = appendFacts(resolved.memoryDir, extraction.facts, meta)
-      const experiences = appendExperiences(resolved.memoryDir, extraction.experiences, meta)
-      markProcessed(resolved.memoryDir, key)
-      harvested.push({ sessionId, turns: episode.turns, skills: written, negatives, facts, experiences, dropped: extraction.dropped })
     } catch (error) {
       warnings.push(`${sessionId}: ${String((error as any)?.message ?? error)}`)
     }
@@ -492,6 +572,38 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
   // -------------------------------------------------------------------------
   // M3: the flywheel. One sentence at most, once per user turn, never blocking.
   // -------------------------------------------------------------------------
+  // -------------------------------------------------------------------------
+  // v0.5: live counter-evidence sweep. Tool results are the only place where a
+  // stored prohibition can be falsified by reality; turn-stopping is the host's
+  // quiet boundary, so the sweep never competes with an in-flight step.
+  // -------------------------------------------------------------------------
+  const counterSweptTo = new Map<string, number>()
+  ctx.on?.('agent/turn-stopping', async (payload: any) => {
+    try {
+      const agentId = typeof payload?.agent?.id === 'string' ? payload.agent.id : ''
+      if (agentId.length === 0) return
+      const live = (() => {
+        try {
+          return (ctx.get?.('sessions') as any)?.get?.(agentId)
+        } catch {
+          return undefined
+        }
+      })()
+      if (live === undefined || typeof live.snapshotEvents !== 'function') return
+      const events = live.snapshotEvents(0) as any[]
+      const from = counterSweptTo.get(agentId) ?? 0
+      const fresh = events.filter((event) => Number(event?.seq ?? 0) > from)
+      if (fresh.length === 0) return
+      const result = recordCounterEvidence(resolved.memoryDir, fresh)
+      counterSweptTo.set(agentId, Number(events.at(-1)?.seq ?? from))
+      if (result.updated.length > 0) {
+        ctx.logger?.info?.(`[dsh-memory] counter-evidence recorded for ${result.updated.length} negative(s)`)
+      }
+    } catch {
+      // The sweep is maintenance; it must never break the closing turn.
+    }
+  })
+
   const nudgeState = new Map<string, { userKey: string; lastId: string; lastAt: number }>()
   if (resolved.retrieval) {
     ctx.on?.('agent/pre-step', async (payload: any, next: any) => {
@@ -532,6 +644,9 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
         })
         const hint = renderHint(result)
         if (hint === undefined) return decision
+        // v0.5 decay bookkeeping: a recalled skill that is actually injected has
+        // been used; its decay clock restarts.
+        if (result.skill !== undefined) touchSkillUsage(resolved.skillsDir, result.skill.id)
         const bestId =
           [result.skill?.id ?? '', ...(result.alternatives ?? []).map((hit) => hit.id), result.negative?.id ?? '']
             .filter((id) => id.length > 0)

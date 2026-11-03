@@ -38,6 +38,8 @@ export interface ExtractedExperience {
   seq: number
 }
 
+export type MemoryScope = 'workspace' | 'project' | 'global'
+
 export interface ExtractedSkill {
   /** ASCII kebab-case, because that is what a SKILL.md name must be. */
   name: string
@@ -51,6 +53,10 @@ export interface ExtractedSkill {
   steps: string[]
   /** `## 验证标准` — how the next session proves it worked. At least one. */
   verify: string[]
+  /** v0.5: how far the procedure travels. Defaults to `project`. */
+  scope: MemoryScope
+  /** v0.5: 2-3 alternate phrasings a future session might search with. */
+  aliases: string[]
   evidence: number[]
 }
 
@@ -58,6 +64,8 @@ export interface ExtractedNegative {
   symptom: string
   cause: string
   avoid: string
+  /** v0.5: same three-way scope as skills. Defaults to `project`. */
+  scope: MemoryScope
   evidence: number[]
 }
 
@@ -86,6 +94,8 @@ export const EXTRACT_SYSTEM_PROMPT = [
   '4. Reject generic advice (要小心 / 注意细节 / test thoroughly / write clean code). Only session-specific, checkable content.',
   '5. At most 3 facts, 3 experiences, 2 skills and 3 negatives. Precision beats recall.',
   '6. name is ASCII kebab-case (a-z, 0-9, hyphens, <= 48 chars). title/description/when_to_use may be Chinese.',
+  '6b. Every skill and negative carries `scope`: workspace (only this repo/dir), project (this project family) or global (any DSH session). Be conservative: when unsure, use project.',
+  '6c. Every skill carries 2-3 `aliases`: other phrasings a future session might use to ask for this, e.g. ["连数据库", "mysql 查询", "pymysql 客户端"]. They feed lexical recall, so prefer the words a human would type.',
   '7. Be terse: step <= 40 words, verify <= 25 words, description <= 30 words. The JSON must stay complete.',
   '',
   'Every skill becomes one SKILL.md with exactly this shape:',
@@ -93,6 +103,8 @@ export const EXTRACT_SYSTEM_PROMPT = [
   'name: threshold-fixture-sizing',
   'description: 处理阈值型逻辑测试时的样本量设计规范。',
   'when_to_use: 当你在编写涉及 `>`, `<`, `>=`, `<=` 判断的测试用例时。',
+  'scope: project',
+  'aliases: 阈值测试, 边界样本, threshold tests',
   '---',
   '## 执行步骤',
   '1. 查看源码中的阈值变量（如 `MAX_RETRIES = 3`）。',
@@ -106,13 +118,21 @@ export const EXTRACT_SYSTEM_PROMPT = [
   'Return ONLY JSON:',
   '{"facts":[{"text":"...","seq":12}],',
   ' "experiences":[{"text":"...","seq":12}],',
-  ' "negatives":[{"symptom":"...","cause":"...","avoid":"...","evidence":[56]}],',
+  ' "negatives":[{"symptom":"...","cause":"...","avoid":"...","scope":"project","evidence":[56]}],',
   ' "skills":[{"name":"kebab-name","title":"...","description":"...","when_to_use":"...",',
+  '            "scope":"project","aliases":["连数据库","mysql 查询"],',
   '            "steps":["...","..."],"verify":["..."],"evidence":[12,34]}]}',
 ].join('\n')
 
 const GENERIC = /(要小心|注意安全|多加测试|注意细节|保持整洁|be careful|test thoroughly|write clean|pay attention|good luck)/iu
 const KEBAB = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
+const SCOPES = new Set(['workspace', 'project', 'global'])
+
+/** v0.5: scope is a stated claim, never inferred from wording. Bad/missing → project. */
+function asScope(value: unknown): MemoryScope {
+  const text = typeof value === 'string' ? value.trim().toLowerCase() : ''
+  return SCOPES.has(text) ? (text as MemoryScope) : 'project'
+}
 
 function asText(value: unknown): string {
   return typeof value === 'string' ? value.replace(/\s+/gu, ' ').trim() : ''
@@ -245,6 +265,8 @@ export function sanitizeExtraction(raw: unknown, episode: Episode): ExtractionRe
       when: when.slice(0, 200),
       steps,
       verify,
+      scope: asScope(item.scope),
+      aliases: asTextList(item.aliases ?? item.alias, 3),
       evidence,
     })
   }
@@ -266,7 +288,13 @@ export function sanitizeExtraction(raw: unknown, episode: Episode): ExtractionRe
       dropped.push(`${label}: no evidence seq from this session`)
       continue
     }
-    negatives.push({ symptom: symptom.slice(0, 200), cause: cause.slice(0, 200), avoid: avoid.slice(0, 200), evidence })
+    negatives.push({
+      symptom: symptom.slice(0, 200),
+      cause: cause.slice(0, 200),
+      avoid: avoid.slice(0, 200),
+      scope: asScope(item.scope),
+      evidence,
+    })
   }
 
   return { facts, experiences, skills, negatives, dropped }

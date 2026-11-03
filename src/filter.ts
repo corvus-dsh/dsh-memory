@@ -40,6 +40,50 @@ export interface FilterOptions {
    * max-tokens without ever emitting an answer.
    */
   reasoningEffort?: string
+  /** v0.5: adjudication cache TTL. Default 10 minutes. */
+  cacheTtlMs?: number
+  /** v0.5: skip the cache for this call (diagnostics/tests). */
+  bypassCache?: boolean
+}
+
+/**
+ * v0.5: verdict cache. A long task asks the same question every step, and the
+ * candidate set rarely changes; paying one model call per step is pure latency.
+ * Keyed by query + the exact candidate ids/scores, so a changed skill corpus
+ * invalidates itself.
+ */
+interface CacheEntry {
+  at: number
+  ids: string[]
+}
+const verdictCache = new Map<string, CacheEntry>()
+
+function hashText(text: string): string {
+  let hash = 5381
+  for (let index = 0; index < text.length; index += 1) hash = ((hash << 5) + hash + text.charCodeAt(index)) | 0
+  return (hash >>> 0).toString(36)
+}
+
+export function filterCacheKey(query: string, candidates: readonly MemoryHit[]): string {
+  return hashText(`${query}\u0000${candidates.map((candidate) => `${candidate.id}:${candidate.score}`).join(',')}`)
+}
+
+export function clearFilterCache(): void {
+  verdictCache.clear()
+}
+
+export function filterCacheStats(): { size: number } {
+  return { size: verdictCache.size }
+}
+
+function readVerdict(key: string, ttlMs: number, now: number): string[] | undefined {
+  const entry = verdictCache.get(key)
+  if (entry === undefined) return undefined
+  if (now - entry.at > ttlMs) {
+    verdictCache.delete(key)
+    return undefined
+  }
+  return entry.ids
 }
 
 function renderFilterInput(query: string, candidates: readonly MemoryHit[]): string {
@@ -73,6 +117,12 @@ export async function selectApplicableSkills(
 ): Promise<string[]> {
   if (candidates.length === 0) return []
   if (llm === undefined || typeof llm.stream !== 'function') throw new Error('llm service unavailable')
+  const ttlMs = options.cacheTtlMs ?? 600_000
+  const cacheKey = filterCacheKey(query, candidates)
+  if (options.bypassCache !== true) {
+    const cached = readVerdict(cacheKey, ttlMs, Date.now())
+    if (cached !== undefined) return cached
+  }
   const timeoutMs = options.timeoutMs ?? 60_000
   const stream = llm.stream({
     ...(options.provider === undefined ? {} : { provider: options.provider }),
@@ -117,5 +167,7 @@ export async function selectApplicableSkills(
     const id = allowed.get(String(item ?? '').trim().toLowerCase())
     if (id !== undefined) named.add(id)
   }
-  return candidates.map((candidate) => candidate.id).filter((id) => named.has(id))
+  const picked = candidates.map((candidate) => candidate.id).filter((id) => named.has(id))
+  verdictCache.set(cacheKey, { at: Date.now(), ids: picked })
+  return picked
 }
