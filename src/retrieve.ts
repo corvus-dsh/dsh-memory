@@ -23,8 +23,32 @@ import { join } from 'node:path'
 import { selectApplicableSkills } from './filter.js'
 import type { LlmLike } from './extract.js'
 
+/** v0.6: all four layers participate in retrieval. */
+export type DocumentKind = 'skill' | 'negative' | 'fact' | 'experience'
+
+/**
+ * v0.6 scene routing lexicon.
+ *
+ * Retrieval is scoped by scene: a UI question must not activate a database
+ * skill, no matter how high its lexical score. The lexicon is intentionally
+ * small and explicit — an unknown query keeps the global pool (no scene gate)
+ * rather than guessing wrong and hiding everything.
+ */
+const SCENE_HINTS: Array<{ scene: string; pattern: RegExp }> = [
+  { scene: 'database', pattern: /(数据库|sql|mysql|sqlite|pymysql|sqlite3|查询|orm|连接池|事务)/iu },
+  { scene: 'ui', pattern: /(界面|前端|组件|样式|css|react|vue|按钮|布局|ui)/iu },
+  { scene: 'plugin-dev', pattern: /(插件|plugin|cordis|manifest|fiber|工具注册|host)/iu },
+  { scene: 'session-ops', pattern: /(交接|graft|切片|上下文|水位|handoff|retire)/iu },
+  { scene: 'testing', pattern: /(测试|fixture|断言|回归|unittest|pytest)/iu },
+]
+
+export function inferScene(query: string): string | undefined {
+  for (const hint of SCENE_HINTS) if (hint.pattern.test(query)) return hint.scene
+  return undefined
+}
+
 export interface MemoryHit {
-  kind: 'skill' | 'negative'
+  kind: DocumentKind
   id: string
   /** Display title: the skill's `# heading`, or the negative's symptom. */
   title: string
@@ -43,10 +67,14 @@ export interface MemoryHit {
   /** v0.5: negatives only — lowered by counter-evidence. */
   confidence?: number
   counterEvidence?: number[]
+  /** v0.6: scene tag and the composite pointer for "look this up" hints. */
+  scene?: string
+  sessionId?: string
+  seq?: number
 }
 
 interface Document {
-  kind: 'skill' | 'negative'
+  kind: DocumentKind
   id: string
   title: string
   when?: string
@@ -59,6 +87,9 @@ interface Document {
   updatedAt?: string
   confidence?: number
   counterEvidence?: number[]
+  scene?: string
+  sessionId?: string
+  seq?: number
   tokens: Set<string>
   ageDays: number
   importance: number
@@ -166,6 +197,13 @@ function skillDocuments(skillsDir: string, now: number): Document[] {
     // v0.5 decay: an unused, unvalidated skill ranks half as high, and says so.
     const decayed = usedDays > 14 && validatedDays > 14
     const stale = validatedDays > 14
+    const sceneText = (text.match(/^scene:\s*(.+)$/mu)?.[1] ?? '').trim().toLowerCase()
+    const scene = /^[a-z][a-z0-9-]{1,23}$/u.test(sceneText) ? sceneText : 'general'
+    const evidenceRaw = text.match(/^evidence:\s*(.+)$/mu)?.[1] ?? ''
+    const firstRef = evidenceRaw.split(/[,\s]+/u).filter(Boolean)[0] ?? ''
+    const at = firstRef.lastIndexOf('@')
+    const evidenceSession = at > 0 ? firstRef.slice(0, at) : ''
+    const evidenceSeq = Number(at > 0 ? firstRef.slice(at + 1) : firstRef)
     out.push({
       kind: 'skill',
       id: name,
@@ -173,7 +211,10 @@ function skillDocuments(skillsDir: string, now: number): Document[] {
       when,
       detail: when,
       scope,
+      scene,
       aliases,
+      ...(evidenceSession.length === 0 ? {} : { sessionId: evidenceSession }),
+      ...(Number.isFinite(evidenceSeq) ? { seq: evidenceSeq } : {}),
       ...(conflictsWith.length === 0 ? {} : { conflictsWith }),
       ...(stale ? { stale: true } : {}),
       ...(lastValidated === undefined ? {} : { lastValidated }),
@@ -210,12 +251,17 @@ function negativeDocuments(memoryDir: string, now: number): Document[] {
       const hits = Number(record.hits ?? 1)
       const confidence = Math.min(1, Math.max(0.2, Number(record.confidence ?? 1)))
       const scopeText = String(record.scope ?? 'project').toLowerCase()
+      const sceneText = String(record.scene ?? 'general').toLowerCase()
+      const firstEvidence = Array.isArray(record.evidence) ? Number(record.evidence[0]) : NaN
       out.push({
         kind: 'negative',
         id: `neg-${index}`,
         title: clipTitle(symptom, 60),
         detail: avoid.slice(0, 80),
         scope: scopeText === 'workspace' || scopeText === 'global' ? scopeText : 'project',
+        scene: /^[a-z][a-z0-9-]{1,23}$/u.test(sceneText) ? sceneText : 'general',
+        ...(typeof record.sourceSessionId === 'string' ? { sessionId: record.sourceSessionId } : {}),
+        ...(Number.isFinite(firstEvidence) ? { seq: firstEvidence } : {}),
         confidence,
         ...(Array.isArray(record.counterEvidence) && record.counterEvidence.length > 0
           ? { counterEvidence: record.counterEvidence.map(Number) }
@@ -232,10 +278,57 @@ function negativeDocuments(memoryDir: string, now: number): Document[] {
   return out
 }
 
+/** v0.6: facts and experiences are retrievable evidence, not just stored text. */
+function layerDocuments(memoryDir: string, file: string, kind: 'fact' | 'experience', now: number): Document[] {
+  const path = join(memoryDir, file)
+  if (!existsSync(path)) return []
+  let lines: string[] = []
+  try {
+    lines = readFileSync(path, 'utf8').split(/\r?\n/u).filter(Boolean)
+  } catch {
+    return []
+  }
+  const out: Document[] = []
+  lines.forEach((line, index) => {
+    try {
+      const record = JSON.parse(line)
+      if (record === null || typeof record !== 'object') return
+      const text = String(record.text ?? '')
+      if (text.length === 0) return
+      const sceneText = String(record.scene ?? 'general').toLowerCase()
+      const seq = Array.isArray(record.evidence) ? Number(record.evidence[0]) : NaN
+      out.push({
+        kind,
+        id: `${kind}-${index}`,
+        title: clipTitle(text, 60),
+        detail: text.slice(0, 120),
+        scene: /^[a-z][a-z0-9-]{1,23}$/u.test(sceneText) ? sceneText : 'general',
+        ...(typeof record.sourceSessionId === 'string' ? { sessionId: record.sourceSessionId } : {}),
+        ...(Number.isFinite(seq) ? { seq } : {}),
+        tokens: new Set(tokenize(`${text} ${sceneText}`)),
+        ageDays: ageDaysOf(typeof record.at === 'string' ? record.at : undefined, now),
+        importance: 1,
+      })
+    } catch {
+      // Skip a torn line.
+    }
+  })
+  return out
+}
+
 /** Stage 1: score every stored document against the query. */
 function scoreDocuments(memoryDir: string, skillsDir: string, query: string, now: number): { terms: string[]; scored: Scored[] } {
   const terms = tokenize(query)
-  const documents = [...skillDocuments(skillsDir, now), ...negativeDocuments(memoryDir, now)]
+  // v0.6 scene routing: infer the query's scene and activate only that scene
+  // (plus `general`). An unrecognised query keeps the full pool.
+  const scene = inferScene(query)
+  const inScene = (document: Document): boolean => scene === undefined || (document.scene ?? 'general') === scene || (document.scene ?? 'general') === 'general'
+  const documents = [
+    ...skillDocuments(skillsDir, now),
+    ...negativeDocuments(memoryDir, now),
+    ...layerDocuments(memoryDir, 'facts.jsonl', 'fact', now),
+    ...layerDocuments(memoryDir, 'experiences.jsonl', 'experience', now),
+  ].filter(inScene)
   if (terms.length === 0 || documents.length === 0) return { terms, scored: [] }
 
   const df = new Map<string, number>()
@@ -287,6 +380,9 @@ function hitOf(document: Document, score: number): MemoryHit {
     ...(document.updatedAt === undefined ? {} : { updatedAt: document.updatedAt }),
     ...(document.confidence === undefined ? {} : { confidence: document.confidence }),
     ...(document.counterEvidence === undefined ? {} : { counterEvidence: document.counterEvidence }),
+    ...(document.scene === undefined ? {} : { scene: document.scene }),
+    ...(document.sessionId === undefined ? {} : { sessionId: document.sessionId }),
+    ...(document.seq === undefined ? {} : { seq: document.seq }),
   }
 }
 
@@ -325,6 +421,9 @@ export function retrieveCandidates(
 export interface RetrieveResult {
   skill?: MemoryHit
   negative?: MemoryHit
+  /** v0.6: the observation layers, retrievable in their own right. */
+  fact?: MemoryHit
+  experience?: MemoryHit
   /** Further skill candidates that cleared the threshold, best first (max 2). */
   alternatives?: MemoryHit[]
   /** Stage-2 diagnostics. Present only on `retrieveWithFilter` results. */
@@ -356,12 +455,16 @@ export function retrieve(
 
   const best = scored[0]
   const debug = { terms: terms.length, matched: Math.round(best.coverage * terms.length) }
-  const above = (kind: 'skill' | 'negative'): Scored[] => scored.filter((item) => item.document.kind === kind && item.score >= threshold)
+  const above = (kind: DocumentKind): Scored[] => scored.filter((item) => item.document.kind === kind && item.score >= threshold)
   const skills = above('skill')
   const negatives = above('negative')
+  const facts = above('fact')
+  const experiences = above('experience')
   return {
     ...(skills.length === 0 ? {} : { skill: hitOf(skills[0].document, skills[0].score) }),
     ...(negatives.length === 0 ? {} : { negative: hitOf(negatives[0].document, negatives[0].score) }),
+    ...(facts.length === 0 ? {} : { fact: hitOf(facts[0].document, facts[0].score) }),
+    ...(experiences.length === 0 ? {} : { experience: hitOf(experiences[0].document, experiences[0].score) }),
     ...(skills.length <= 1 ? {} : { alternatives: skills.slice(1, 3).map((item) => hitOf(item.document, item.score)) }),
     debug,
   }
@@ -435,11 +538,15 @@ export async function retrieveWithFilter(
   const kept = candidates.filter((candidate) => applicable.includes(candidate.id))
   const keptSkills = kept.filter((candidate) => candidate.kind === 'skill')
   const keptNegative = kept.find((candidate) => candidate.kind === 'negative')
+  const keptFact = kept.find((candidate) => candidate.kind === 'fact')
+  const keptExperience = kept.find((candidate) => candidate.kind === 'experience')
   return {
     ...base,
     ...(keptSkills.length === 0 ? {} : { skill: keptSkills[0] }),
     ...(keptSkills.length <= 1 ? {} : { alternatives: keptSkills.slice(1, 3) }),
     ...(keptNegative === undefined ? {} : { negative: keptNegative }),
+    ...(keptFact === undefined ? {} : { fact: keptFact }),
+    ...(keptExperience === undefined ? {} : { experience: keptExperience }),
     filter: { attempted: true, applied: true, kept: kept.map((candidate) => candidate.id) },
   }
 }
@@ -479,8 +586,19 @@ export function renderHint(result: RetrieveResult): string | undefined {
         : `另有一次「${negative.title}」翻车，先核对再重跑`,
     )
   }
+  const fact = result.fact
+  if (fact !== undefined) {
+    const where = fact.sessionId !== undefined && Number.isFinite(fact.seq) ? `在 ${fact.sessionId} seq=${fact.seq} ` : ''
+    parts.push(`事实回查：上次${where}发生过「${clipTitle(fact.detail ?? fact.title, 40)}」，细节请用 graft_search_history 查`)
+  }
+  const experience = result.experience
+  if (experience !== undefined) {
+    const where = experience.sessionId !== undefined && Number.isFinite(experience.seq) ? `在 ${experience.sessionId} seq=${experience.seq} ` : ''
+    parts.push(`经验回查：上次${where}得到「${clipTitle(experience.detail ?? experience.title, 40)}」`)
+  }
   if (parts.length === 0) return undefined
   const staleWarning = result.skill?.stale === true ? '注意：此技能较久未被验证，请结合当前环境谨慎使用。' : ''
   const text = `（记忆提示：${parts.join('；')}。${staleWarning}）`
-  return text.slice(0, staleWarning.length > 0 ? 220 : 120)
+  const long = staleWarning.length > 0 || fact !== undefined || experience !== undefined
+  return text.slice(0, long ? 260 : 120)
 }

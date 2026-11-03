@@ -139,7 +139,7 @@ test('conflict: harvest does NOT merge two methods that share one trigger', asyn
       when_to_use: whenOf('MySQL'),
       steps: MYSQL.steps,
       verify: MYSQL.verify,
-      evidence: [2],
+      evidence: [5],
     },
     {
       name: SQLITE.name,
@@ -148,7 +148,7 @@ test('conflict: harvest does NOT merge two methods that share one trigger', asyn
       when_to_use: whenOf('SQLite'),
       steps: SQLITE.steps,
       verify: SQLITE.verify,
-      evidence: [4],
+      evidence: [5],
     },
   ]
   const assistant = (seq) => ({
@@ -166,7 +166,7 @@ test('conflict: harvest does NOT merge two methods that share one trigger', asyn
   const ctx = {
     paths: { data: join(root, 'data') },
     tools: { register: (definition) => tools.set(definition.name, definition) },
-    sessionQuery: { readSession: async () => ({ events: [assistant(2), assistant(4)] }) },
+    sessionQuery: { readSession: async () => ({ events: [assistant(2), { type: 'tool/call', seq: 3, data: { callId: 'c1', name: 'pwsh' } }, { type: 'tool/result', seq: 5, data: { message: { source: { callId: 'c1' }, content: [{ type: 'text', text: 'ok' }] } } }, assistant(4)] }) },
     get: (name) =>
       name === 'llm'
         ? {

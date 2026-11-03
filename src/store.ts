@@ -23,7 +23,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFile
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 
-import type { ExtractedExperience, ExtractedFact, ExtractedNegative, ExtractedSkill } from './extract.js'
+import type { EvidenceRef, ExtractedExperience, ExtractedFact, ExtractedNegative, ExtractedSkill } from './extract.js'
 import { jaccard, planNegative, trigrams } from './dedupe.js'
 
 export function defaultSkillsDir(): string {
@@ -84,7 +84,7 @@ export interface SkillInput {
   verification?: string[]
   scope?: string
   aliases?: string[]
-  evidence: number[]
+  evidence: Array<number | EvidenceRef>
 }
 
 export function normalizeSkill(input: SkillInput | ExtractedSkill): ExtractedSkill {
@@ -93,10 +93,26 @@ export function normalizeSkill(input: SkillInput | ExtractedSkill): ExtractedSki
   const steps = (raw.steps ?? raw.how ?? []).map((step) => String(step).replace(/\s+/gu, ' ').trim()).filter(Boolean)
   const verify = (raw.verify ?? raw.verification ?? []).map((line) => String(line).replace(/\s+/gu, ' ').trim()).filter(Boolean)
   const scope = String(raw.scope ?? '').toLowerCase()
+  const scene = String((raw as any).scene ?? '').trim().toLowerCase()
   const aliases = (Array.isArray(raw.aliases) ? raw.aliases : [])
     .map((alias) => String(alias).replace(/\s+/gu, ' ').trim())
     .filter(Boolean)
     .slice(0, 3)
+  // v0.6: accept legacy numbers (a bare seq is resolved against the write's
+  // session id) and composite refs (already carry their own session id).
+  const evidence: EvidenceRef[] = []
+  for (const item of Array.isArray(raw.evidence) ? raw.evidence : []) {
+    if (item !== null && typeof item === 'object' && typeof (item as EvidenceRef).seq !== 'undefined') {
+      const seq = Number((item as EvidenceRef).seq)
+      const sourceSessionId = String((item as EvidenceRef).sourceSessionId ?? '')
+      if (Number.isFinite(seq) && !evidence.some((ref) => ref.seq === seq && ref.sourceSessionId === sourceSessionId)) {
+        evidence.push({ sourceSessionId, seq })
+      }
+      continue
+    }
+    const seq = Number(item)
+    if (Number.isFinite(seq)) evidence.push({ sourceSessionId: '', seq })
+  }
   return {
     name: String(raw.name ?? '').toLowerCase(),
     title: String(raw.title ?? raw.name ?? ''),
@@ -105,8 +121,9 @@ export function normalizeSkill(input: SkillInput | ExtractedSkill): ExtractedSki
     steps,
     verify,
     scope: scope === 'workspace' || scope === 'global' ? scope : 'project',
+    scene: /^[a-z][a-z0-9-]{1,23}$/u.test(scene) ? scene : 'general',
     aliases,
-    evidence: Array.isArray(raw.evidence) ? raw.evidence.map(Number).filter(Number.isFinite) : [],
+    evidence,
   }
 }
 
@@ -254,8 +271,9 @@ export function parseSkillFile(text: string, name: string): ExtractedSkill {
     const match = /^\s*\d+\.\s+(.+)$/u.exec(line)
     if (match !== null) steps.push(match[1].trim())
   }
-  const evidence = (text.match(/^evidence:\s*(.+)$/mu)?.[1] ?? '').split(/[,\s]+/u).filter(Boolean).map(Number)
+  const evidence = parseEvidenceField(text.match(/^evidence:\s*(.+)$/mu)?.[1] ?? '', '')
   const scopeText = (text.match(/^scope:\s*(.+)$/mu)?.[1] ?? '').trim().toLowerCase()
+  const sceneText = (text.match(/^scene:\s*(.+)$/mu)?.[1] ?? '').trim().toLowerCase()
   const aliases = (text.match(/^aliases:\s*(.+)$/mu)?.[1] ?? '').split(/,/u).map((item) => item.trim()).filter(Boolean)
   return {
     name,
@@ -265,6 +283,7 @@ export function parseSkillFile(text: string, name: string): ExtractedSkill {
     steps,
     verify: [],
     scope: scopeText === 'workspace' || scopeText === 'global' ? scopeText : 'project',
+    scene: /^[a-z][a-z0-9-]{1,23}$/u.test(sceneText) ? sceneText : 'general',
     aliases,
     evidence,
   }
@@ -310,7 +329,31 @@ function conflictFooter(conflicts: readonly SkillConflict[]): string[] {
     '',
   ]
 }
-  function renderSkill(
+  function parseEvidenceField(raw: string, fallbackSession: string): EvidenceRef[] {
+  const refs: EvidenceRef[] = []
+  for (const token of raw.split(/[,\s]+/u).filter(Boolean)) {
+    const at = token.lastIndexOf('@')
+    const sourceSessionId = at > 0 ? token.slice(0, at) : fallbackSession
+    const seq = Number(at > 0 ? token.slice(at + 1) : token)
+    if (!Number.isFinite(seq)) continue
+    if (refs.some((ref) => ref.seq === seq && ref.sourceSessionId === sourceSessionId)) continue
+    refs.push({ sourceSessionId, seq })
+  }
+  return refs
+}
+
+function evidenceBodyLines(evidence: readonly EvidenceRef[], fallbackSession: string): string[] {
+  const bySession = new Map<string, number[]>()
+  for (const ref of evidence) {
+    const session = ref.sourceSessionId.length > 0 ? ref.sourceSessionId : fallbackSession
+    const list = bySession.get(session) ?? []
+    list.push(ref.seq)
+    bySession.set(session, list)
+  }
+  return [...bySession.entries()].map(([session, seqs]) => `- 源会话：${session}（seq ${seqs.join(', ')}）`)
+}
+
+function renderSkill(
   skill: ExtractedSkill,
   meta: SkillMeta,
   previous?: { evidence: number; sources: number; created: string; lastUsed?: string; lastValidated?: string },
@@ -322,8 +365,11 @@ function conflictFooter(conflicts: readonly SkillConflict[]): string[] {
     description: skill.description.slice(0, 160),
     when_to_use: skill.when.slice(0, 200),
     scope: skill.scope,
+    scene: skill.scene,
     ...(skill.aliases.length === 0 ? {} : { aliases: skill.aliases.join(', ') }),
-    evidence: skill.evidence.join(','),
+    evidence: skill.evidence
+      .map((ref) => (ref.sourceSessionId.length > 0 ? `${ref.sourceSessionId}@${ref.seq}` : String(ref.seq)))
+      .join(','),
     sources: previous === undefined ? 1 : previous.sources,
     ...(conflicts.length === 0 ? {} : { conflicts_with: conflicts.map((conflict) => conflict.name).join(',') }),
   }
@@ -355,7 +401,7 @@ function conflictFooter(conflicts: readonly SkillConflict[]): string[] {
     '',
     '## 证据',
     '',
-    `- 源会话：${meta.sessionId}（seq ${skill.evidence.join(', ')}）`,
+    ...evidenceBodyLines(skill.evidence, meta.sessionId),
     '',
     ...conflictFooter(conflicts),
   ].join('\n')
@@ -366,6 +412,11 @@ export function writeSkill(skillsDir: string, input: SkillInput | ExtractedSkill
   const skill = normalizeSkill(input)
   if (skill.steps.length === 0) return 'skipped:no execution steps'
   if (skill.verify.length === 0) return 'skipped:no verification criterion'
+  // v0.6: a ref without a session id inherits the session that produced it.
+  const withSession: ExtractedSkill = {
+    ...skill,
+    evidence: skill.evidence.map((ref) => ({ ...ref, sourceSessionId: ref.sourceSessionId.length > 0 ? ref.sourceSessionId : meta.sessionId })),
+  }
   const threat = scanThreat(`${skill.title} ${skill.description} ${skill.when} ${skill.steps.join(' ')} ${skill.verify.join(' ')}`)
   if (threat !== undefined) return `skipped:${threat}`
   // v0.3: record mutually exclusive alternatives instead of storing both silently.
@@ -375,18 +426,19 @@ export function writeSkill(skillsDir: string, input: SkillInput | ExtractedSkill
     // Merge: keep the earliest evidence, refresh the wording, count the use of
     // the *provenance* (sessions that confirmed it), never duplicate the file.
     const previousText = readFileSync(path, 'utf8')
-    const evidence = previousText.match(/^evidence:\s*(.+)$/mu)?.[1] ?? ''
-    const merged = [...new Set([...evidence.split(/[,\s]+/u).filter(Boolean), ...skill.evidence.map(String)])]
+    const previousEvidence = parseEvidenceField(previousText.match(/^evidence:\s*(.+)$/mu)?.[1] ?? '', meta.sessionId)
+    const evidenceKey = (ref: EvidenceRef): string => `${ref.sourceSessionId}@${ref.seq}`
+    const merged = [...new Map([...previousEvidence, ...withSession.evidence].map((ref) => [evidenceKey(ref), ref])).values()]
     const sources = Number(previousText.match(/^sources:\s*(\d+)$/mu)?.[1] ?? '1')
     const created = previousText.match(/^created:\s*(.+)$/mu)?.[1] ?? ''
     const lastUsed = previousText.match(/^last_used:\s*(.+)$/mu)?.[1] ?? undefined
     const lastValidated = previousText.match(/^last_validated:\s*(.+)$/mu)?.[1] ?? undefined
-    const mergedSkill: ExtractedSkill = { ...skill, evidence: merged.map(Number).filter(Number.isFinite) }
+    const mergedSkill: ExtractedSkill = { ...withSession, evidence: merged }
     atomicWrite(path, renderSkill(mergedSkill, meta, { evidence: merged.length, sources: sources + 1, created, lastUsed, lastValidated }, conflicts))
     for (const conflict of conflicts) linkConflictBack(skillsDir, conflict, skill)
     return 'merged'
   }
-  atomicWrite(path, renderSkill(skill, meta, undefined, conflicts))
+  atomicWrite(path, renderSkill(withSession, meta, undefined, conflicts))
   for (const conflict of conflicts) linkConflictBack(skillsDir, conflict, skill)
   return 'created'
 }
@@ -457,7 +509,8 @@ export function appendNegatives(memoryDir: string, negatives: ExtractedNegative[
         String(record.cause) === negative.cause,
       )
       if (same !== undefined) {
-        const merged = [...new Set([...(Array.isArray(same.evidence) ? same.evidence.map(Number) : []), ...negative.evidence])]
+        const keyOf = (ref: any): string => (ref !== null && typeof ref === 'object' ? `${ref.sourceSessionId}@${ref.seq}` : String(ref))
+        const merged = [...new Map([...(Array.isArray(same.evidence) ? same.evidence : []), ...negative.evidence].map((ref) => [keyOf(ref), ref])).values()]
         same.evidence = merged
         same.hits = Number(same.hits ?? 0) + 1
         dirty = true
@@ -487,6 +540,7 @@ export function appendNegatives(memoryDir: string, negatives: ExtractedNegative[
 
 interface LayerRecord {
   text: string
+  scene?: string
   evidence: number[]
   sourceSessionId: string
   boundarySeq: number
@@ -609,7 +663,12 @@ export function markSkillValidated(skillsDir: string, name: string, at?: string)
 }
 
 /** Append facts/experiences, merging evidence (never instructions, only pointers). */
-function appendLayer(memoryDir: string, file: string, entries: ReadonlyArray<{ text: string; seq: number }>, meta: SkillMeta): number {
+function appendLayer(
+  memoryDir: string,
+  file: string,
+  entries: ReadonlyArray<{ text: string; seq: number; scene?: string }>,
+  meta: SkillMeta,
+): number {
   if (entries.length === 0) return 0
   const path = join(memoryDir, file)
   const existing = readJsonl(path) as unknown as LayerRecord[]
@@ -627,6 +686,7 @@ function appendLayer(memoryDir: string, file: string, entries: ReadonlyArray<{ t
     }
     existing.push({
       text: entry.text,
+      scene: /^[a-z][a-z0-9-]{1,23}$/u.test(String(entry.scene ?? '')) ? String(entry.scene) : 'general',
       evidence: [entry.seq],
       sourceSessionId: meta.sessionId,
       boundarySeq: meta.boundarySeq,

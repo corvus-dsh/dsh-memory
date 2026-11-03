@@ -25,6 +25,14 @@ export interface Episode {
   /** The assistant's own conclusions, newest last, each carrying its seq. */
   conclusions: Array<{ text: string; seq: number }>
   errors: SegmentError[]
+  /**
+   * v0.6: successful tool results, seq-labelled.
+   *
+   * The strong verifier requires a skill's evidence to include a real successful
+   * tool result, so that seq must be citable: an evidence set made only of prose
+   * is exactly the "narration as proof" failure this guards.
+   */
+  successes: SegmentError[]
   toolNames: string[]
   /** Every seq quoted above — the evidence set an extractor must cite. */
   evidence: number[]
@@ -76,6 +84,7 @@ export function segmentSession(sessionId: string, log: { events?: unknown[] }): 
   const callNames = new Map<string, string>()
   const conclusions: Array<{ text: string; seq: number }> = []
   const errors: SegmentError[] = []
+  const successes: SegmentError[] = []
   const toolNames = new Set<string>()
   let turns = 0
   let boundarySeq = 0
@@ -96,11 +105,14 @@ export function segmentSession(sessionId: string, log: { events?: unknown[] }): 
     if (event.type === 'tool/result') {
       const message = event.data?.message
       const isError = message?.isError === true || event.data?.error !== undefined
-      if (!isError) continue
       const callId = message?.source?.callId ?? message?.toolCallId
       const tool = typeof callId === 'string' ? callNames.get(callId) : undefined
       const text = textOf(message).split(/\r?\n/u).map((line) => line.trim()).find((line) => line.length > 0) ?? ''
       if (text.length === 0) continue
+      if (!isError) {
+        successes.push({ ...(tool === undefined ? {} : { tool }), text: text.slice(0, 160), seq })
+        continue
+      }
       errors.push({ ...(tool === undefined ? {} : { tool }), text: text.slice(0, 240), seq })
       continue
     }
@@ -122,9 +134,14 @@ export function segmentSession(sessionId: string, log: { events?: unknown[] }): 
 // prompt (the extractor's budget is 4000 output tokens).
   const keptConclusions = conclusions.slice(-20)
   const keptErrors = errors.slice(-10)
-  const evidence = [...new Set([...keptConclusions.map((item) => item.seq), ...keptErrors.map((item) => item.seq ?? 0)])].filter(
-    (seq) => seq > 0,
-  )
+  const keptSuccesses = successes.slice(-10)
+  const evidence = [
+    ...new Set([
+      ...keptConclusions.map((item) => item.seq),
+      ...keptErrors.map((item) => item.seq ?? 0),
+      ...keptSuccesses.map((item) => item.seq ?? 0),
+    ]),
+  ].filter((seq) => seq > 0)
 
   return {
     sessionId,
@@ -132,6 +149,7 @@ export function segmentSession(sessionId: string, log: { events?: unknown[] }): 
     turns,
     conclusions: keptConclusions,
     errors: keptErrors,
+    successes: keptSuccesses,
     toolNames: [...toolNames].slice(0, 20),
     evidence,
   }
@@ -151,6 +169,15 @@ export function renderEpisode(episode: Episode): string {
     lines.push('', 'FAILURES (tool, first line, seq):')
     for (const error of episode.errors) {
       lines.push(`- [seq ${error.seq ?? '?'}] ${error.tool ?? 'tool'}: ${error.text}`)
+    }
+  }
+  // v0.6: cite-able successes. A skill's evidence must include one of these; the
+  // verifier re-opens each cited seq in the real log and refuses narration-only
+  // evidence, so the prompt has to show the model where the proof lives.
+  if ((episode.successes ?? []).length > 0) {
+    lines.push('', 'SUCCESSFUL TOOL RESULTS (tool, first line, seq — cite these to prove an operation worked):')
+    for (const success of episode.successes ?? []) {
+      lines.push(`- [seq ${success.seq ?? '?'}] ${success.tool ?? 'tool'}: ${success.text}`)
     }
   }
   return lines.join('\n')

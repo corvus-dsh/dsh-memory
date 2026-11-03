@@ -48,7 +48,7 @@ test('store: writing the same skill again merges instead of duplicating', () => 
   const second = writeSkill(dir, { ...skill, evidence: [7], when: '更新后的触发条件，同样需要证明修复有效' }, { sessionId: 's2', boundarySeq: 20 })
   assert.equal(second, 'merged')
   const text = readFileSync(skillPath(dir, skill.name), 'utf8')
-  assert.match(text, /evidence: 3,7/u)
+  assert.match(text, /evidence: s1@3,s2@7/u, "v0.6 composite evidence")
   assert.match(text, /sources: 2/u)
   assert.match(text, /更新后的触发条件/u)
   assert.match(text, /^updated: /mu)

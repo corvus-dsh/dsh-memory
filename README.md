@@ -4,7 +4,7 @@
 
 **能力记忆**：把做过的会话沉淀成可复用的技能与负知识。DSH 开源生态插件（topic `dsh-plugin`）。
 
-> 当前版本 **0.5.0（预发布）**。发布说明：[RELEASE_NOTES.md](./RELEASE_NOTES.md)。
+> 当前版本 **0.6.0（预发布）**。发布说明：[RELEASE_NOTES.md](./RELEASE_NOTES.md)。
 
 > 事实记忆只需可查，能力记忆才需要持久化。
 >
@@ -192,6 +192,20 @@ CLI 直接用**本仓库自带的 zstd 读取器**读会话文件（DSH 的 v4 �
 5. 泛化句（“要小心/多测试”之类）直接拒绝；
 6. 每会话 ≤3 事实 / ≤3 经验 / ≤2 技能 / ≤3 负知识。
 
+## 场景隔离与证据溯源（v0.6.0）
+
+1. **scene（场景）**：四层记忆都带 `scene`（database / ui / plugin-dev / session-ops / testing…，
+   词表开放，非法值降级 `general`）。检索先由 query 推断 scene，**只激活同 scene 或 general 的条目**——
+   UI 提问不会再激活数据库技能，哪怕词面更接近。
+2. **复合证据**：所有 evidence 存为 `{sourceSessionId, seq}`，SKILL.md 写作 `session-id@seq`；
+   提示里的「事实回查」明确给出 `sessionId / seq`，可直接 `graft_search_history` 反查。
+   旧文件里的裸 seq 仍可读（按写入会话补全）。
+3. **强反查（反幻觉）**：抽取的每条技能必须能通过 `buildEvidenceVerifier`——回到**真实会话日志**，
+   逐条检查被引用的 seq：工具调用必须有成功结果、工具结果必须非错误；**只有助手叙述（narration）
+   没有工具结果 → 直接拒绝写入**。240 字摘要不再是“做过”的证据。
+4. **四层检索**：Fact / Experience 也进入检索与提示（格式分别为「事实回查：上次在 <sid> seq=<X>
+   发生过 …」「经验回查：…」），技能、负知识、事实、经验共用同一套词法 + 裁决 + 场景路由。
+
 ## 自我证伪与遗忘（v0.5.0）
 
 记忆最大的风险不是“想不起来”，而是**把错的当成权威**。v0.5 给每条记忆装上可被现实推翻的接口：
@@ -222,7 +236,7 @@ CLI 直接用**本仓库自带的 zstd 读取器**读会话文件（DSH 的 v4 �
 - ✅ v0.2.0：四层认知模型（fact / experience / negative / skill）+ 结构化 SKILL.md（`when_to_use` / 执行步骤 / 验证标准）+ 两阶段检索（LLM 相关性过滤）
 - ✅ v0.3.x：冲突互链（`conflicts_with` + 双向警告）、产物优先抽取、互链重建
 - ✅ v0.4.0：两阶段检索改为低阈值召回（0.20）+ LLM 精准裁决（fail-closed）
-- ✅ v0.5.0：scope / aliases / 反向证据降权 / 冲突按新旧排序 / 14 天衰减 / 裁决缓存 / 乐观写入
+- ✅ v0.5.0：scope / aliases / 反向证据降权 / 冲突按新旧排序 / 14 天衰减 / 裁决缓存 / 乐观写入`n- ✅ v0.6.0：scene 场景路由 / 复合证据 sid@seq / 强反查（拒绝纯叙述）/ Fact·Experience 接入检索
 - ⏳ M4：飞轮计分（提示后成功加权、误命中降权）
 
 ## 测试

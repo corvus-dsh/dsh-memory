@@ -26,6 +26,7 @@ function makeEnv() {
       { type: 'assistant/message', seq: 2, data: { message: { role: 'assistant', source: { kind: 'model' }, content: [{ type: 'text', text: '结论：先跑真实日志校验，再改断言。' }] } } },
       { type: 'tool/call', seq: 3, data: { name: 'pwsh', callId: 'c1' } },
       { type: 'tool/result', seq: 4, data: { message: { source: { callId: 'c1' }, isError: true, content: [{ type: 'text', text: 'Error: SOURCE_DRIFT' }] } } },
+      { type: 'tool/result', seq: 5, data: { message: { source: { callId: 'c2' }, content: [{ type: 'text', text: 'ok' }] } } },
     ],
   }
   const tools = new Map()
@@ -50,7 +51,9 @@ function makeEnv() {
                   when_to_use: '怀疑测试本身与实现不一致时',
                   steps: ['用真实日志跑一遍', '确认失败原因', '再决定改实现还是改断言'],
                   verify: ['修复后同一用例转绿，且失败信息与判断一致'],
-                  evidence: [2],
+                  // v0.6: must cite a real, successful tool result (seq 5), or the
+                  // extractor refuses the skill.
+                  evidence: [5],
                 },
               ],
               negatives: [
@@ -93,7 +96,7 @@ test('plugin: the second harvest is a no-op (idempotent by session+boundarySeq)'
   assert.equal(second.scanned, 0, 'processed key must remove the session from the queue')
   assert.equal(second.harvested.length, 0)
   const processed = JSON.parse(readFileSync(join(memoryDir, 'processed.json'), 'utf8'))
-  assert.deepEqual(processed, ['session-a:4'])
+  assert.deepEqual(processed, ['session-a:5'])
 })
 
 test('plugin: stats and forget are wired', async () => {

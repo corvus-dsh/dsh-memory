@@ -24,11 +24,30 @@
 import type { Episode } from './segment.js'
 import { renderEpisode } from './segment.js'
 
+/**
+ * v0.6: evidence is a COMPOSITE pointer, not a bare seq.
+ *
+ * A seq is only unique inside one session log. Once memory accumulates across
+ * generations, `evidence: 14926` is ambiguous — and `graft_read_result` needs the
+ * session id to resolve anything at all. Every stored evidence entry is therefore
+ * {sourceSessionId, seq}; the extractor still cites numbers, and the local side
+ * attaches the session id it read them from.
+ */
+export interface EvidenceRef {
+  sourceSessionId: string
+  seq: number
+}
+
+/** v0.6: scene is the isolation axis: database / ui / plugin-dev / … */
+export type MemoryScene = string
+
 export interface ExtractedFact {
   /** What happened, in one observable sentence. */
   text: string
   /** The seq in the source log where it can be checked. Required. */
   seq: number
+  /** v0.6: the domain this observation belongs to. */
+  scene: MemoryScene
 }
 
 export interface ExtractedExperience {
@@ -36,6 +55,8 @@ export interface ExtractedExperience {
   text: string
   /** The seq of the trial it came from. Required. */
   seq: number
+  /** v0.6: the domain this lesson belongs to. */
+  scene: MemoryScene
 }
 
 export type MemoryScope = 'workspace' | 'project' | 'global'
@@ -55,9 +76,11 @@ export interface ExtractedSkill {
   verify: string[]
   /** v0.5: how far the procedure travels. Defaults to `project`. */
   scope: MemoryScope
+  /** v0.6: the scene that gates retrieval. */
+  scene: MemoryScene
   /** v0.5: 2-3 alternate phrasings a future session might search with. */
   aliases: string[]
-  evidence: number[]
+  evidence: EvidenceRef[]
 }
 
 export interface ExtractedNegative {
@@ -66,7 +89,9 @@ export interface ExtractedNegative {
   avoid: string
   /** v0.5: same three-way scope as skills. Defaults to `project`. */
   scope: MemoryScope
-  evidence: number[]
+  /** v0.6: scene gate. */
+  scene: MemoryScene
+  evidence: EvidenceRef[]
 }
 
 export interface ExtractionResult {
@@ -87,7 +112,8 @@ export const EXTRACT_SYSTEM_PROMPT = [
   '  skill       = a VERIFIED, replayable procedure. Only promote an experience when the episode shows the method actually worked or was confirmed.',
   '',
   'HARD RULES:',
-  '1. Never invent evidence. Every entry cites seqs listed in the episode; an entry with an unlisted seq is discarded.',
+  '1. Never invent evidence. Every entry cites seqs listed in the episode; an entry with an unlisted seq is discarded. The runner re-opens the cited seq in the real session log and drops any skill whose evidence does not show the operation actually succeeding.',
+  '1b. Every entry (fact, experience, negative, skill) carries a `scene`: a short latin tag naming the domain, e.g. database, ui, plugin-dev, testing, session-ops, docs. Retrieval only activates memories of the query\'s scene, so a mislabelled scene hides the memory.',
   '2. A skill is a PROCEDURE, not a slogan. It needs at least 2 execution steps and at least 1 verification criterion. "样本必须超过阈值" alone is a REFUSAL, not a skill.',
   '2b. If the session BUILT a reusable artifact (a client, ORM, wrapper, migration, protocol), one of the two skills MUST be that artifact\'s core technique: driver/setup, connection and transaction shape, and the pitfall that shaped it. Process lessons may take the other slot. Do not reduce such a session to process lessons ("test in rounds") when the method itself is the reusable asset.',
   '3. A skill must state WHEN it applies, concretely enough that a fresh session can decide yes or no.',
@@ -116,11 +142,11 @@ export const EXTRACT_SYSTEM_PROMPT = [
   'So: description = what it is; when_to_use = the trigger; steps = the procedure; verify = how the next session proves it worked.',
   '',
   'Return ONLY JSON:',
-  '{"facts":[{"text":"...","seq":12}],',
-  ' "experiences":[{"text":"...","seq":12}],',
-  ' "negatives":[{"symptom":"...","cause":"...","avoid":"...","scope":"project","evidence":[56]}],',
+  '{"facts":[{"text":"...","scene":"database","seq":12}],',
+  ' "experiences":[{"text":"...","scene":"database","seq":12}],',
+  ' "negatives":[{"symptom":"...","cause":"...","avoid":"...","scope":"project","scene":"database","evidence":[56]}],',
   ' "skills":[{"name":"kebab-name","title":"...","description":"...","when_to_use":"...",',
-  '            "scope":"project","aliases":["连数据库","mysql 查询"],',
+  '            "scope":"project","scene":"database","aliases":["连数据库","mysql 查询"],',
   '            "steps":["...","..."],"verify":["..."],"evidence":[12,34]}]}',
 ].join('\n')
 
@@ -132,6 +158,28 @@ const SCOPES = new Set(['workspace', 'project', 'global'])
 function asScope(value: unknown): MemoryScope {
   const text = typeof value === 'string' ? value.trim().toLowerCase() : ''
   return SCOPES.has(text) ? (text as MemoryScope) : 'project'
+}
+
+const SCENE = /^[a-z][a-z0-9-]{1,23}$/
+
+/** v0.6: scene must be a simple latin tag; anything else degrades to `general`. */
+export function asScene(value: unknown): MemoryScene {
+  const text = typeof value === 'string' ? value.trim().toLowerCase() : ''
+  return SCENE.test(text) ? text : 'general'
+}
+
+/** v0.6: numbers become composite refs against the episode's own session id. */
+function asEvidenceRefs(value: unknown, allowed: Set<number>, sourceSessionId: string): EvidenceRef[] {
+  const out: EvidenceRef[] = []
+  const raw = Array.isArray(value) ? value : []
+  for (const item of raw) {
+    const seq = Number(typeof item === 'object' && item !== null ? (item as any).seq : item)
+    if (!Number.isFinite(seq)) continue
+    if (!allowed.has(seq)) continue
+    if (out.some((ref) => ref.seq === seq)) continue
+    out.push({ sourceSessionId, seq })
+  }
+  return out
 }
 
 function asText(value: unknown): string {
@@ -197,7 +245,7 @@ export function sanitizeExtraction(raw: unknown, episode: Episode): ExtractionRe
       dropped.push(`${label}: fact has no valid seq pointer`)
       continue
     }
-    facts.push({ text: text.slice(0, 240), seq })
+    facts.push({ text: text.slice(0, 240), seq, scene: asScene(item.scene) })
   }
 
   const rawExperiences = Array.isArray((raw as any).experiences) ? (raw as any).experiences : []
@@ -215,7 +263,7 @@ export function sanitizeExtraction(raw: unknown, episode: Episode): ExtractionRe
       dropped.push(`${label}: experience has no valid seq pointer`)
       continue
     }
-    experiences.push({ text: text.slice(0, 240), seq })
+    experiences.push({ text: text.slice(0, 240), seq, scene: asScene(item.scene) })
   }
 
   const rawSkills = Array.isArray((raw as any).skills) ? (raw as any).skills : []
@@ -229,7 +277,7 @@ export function sanitizeExtraction(raw: unknown, episode: Episode): ExtractionRe
     // suggestion readable; the shape written to disk is always the new one.
     const steps = asTextList(item.steps ?? item.how, 5)
     const verify = asTextList(item.verify ?? item.verification, 3)
-    const evidence = asSeqList(item.evidence, allowed)
+    const evidence = asEvidenceRefs(item.evidence, allowed, episode.sessionId)
     const description = asText(item.description) || when.slice(0, 160)
     const label = name || title || '(unnamed skill)'
     if (!KEBAB.test(name) || name.length > 48) {
@@ -266,6 +314,7 @@ export function sanitizeExtraction(raw: unknown, episode: Episode): ExtractionRe
       steps,
       verify,
       scope: asScope(item.scope),
+      scene: asScene(item.scene),
       aliases: asTextList(item.aliases ?? item.alias, 3),
       evidence,
     })
@@ -278,7 +327,7 @@ export function sanitizeExtraction(raw: unknown, episode: Episode): ExtractionRe
     const symptom = asText(item.symptom)
     const cause = asText(item.cause)
     const avoid = asText(item.avoid)
-    const evidence = asSeqList(item.evidence, allowed)
+    const evidence = asEvidenceRefs(item.evidence, allowed, episode.sessionId)
     const label = symptom.slice(0, 40) || '(unnamed negative)'
     if (symptom.length < 6 || cause.length < 4 || avoid.length < 4) {
       dropped.push(`${label}: symptom/cause/avoid incomplete`)
@@ -293,6 +342,7 @@ export function sanitizeExtraction(raw: unknown, episode: Episode): ExtractionRe
       cause: cause.slice(0, 200),
       avoid: avoid.slice(0, 200),
       scope: asScope(item.scope),
+      scene: asScene(item.scene),
       evidence,
     })
   }
@@ -346,9 +396,29 @@ export interface ExtractOptions {
   provider?: string
   model?: string
   timeoutMs?: number
+  /**
+   * v0.6 strong verification: called with the cited evidence refs. The caller
+   * re-opens the REAL session log and confirms the operation happened and
+   * succeeded. A skill that cannot be confirmed is dropped with a reason — a
+   * summarised 240-char conclusion is not proof that the code ran.
+   */
+  verify?: (refs: readonly EvidenceRef[]) => { ok: boolean; reason?: string }
 }
 
 /** One extraction call. Returns an empty result (with a reason) rather than throwing. */
+function verifySkills(
+  parsed: ExtractionResult,
+  verify: (refs: readonly EvidenceRef[]) => { ok: boolean; reason?: string },
+): ExtractionResult {
+  const skills: ExtractedSkill[] = []
+  const dropped = [...parsed.dropped]
+  for (const skill of parsed.skills) {
+    const check = verify(skill.evidence)
+    if (check.ok) skills.push(skill)
+    else dropped.push(`${skill.name}: evidence not confirmed (${check.reason ?? 'raw log check failed'})`)
+  }
+  return { ...parsed, skills, dropped }
+}
 export async function extractEpisode(
   llm: LlmLike | undefined,
   episode: Episode,
@@ -386,7 +456,8 @@ export async function extractEpisode(
       lastRaw = raw
       const parsed = parseExtractionJson(raw, episode)
       if (parsed.parsedOk) {
-        return { ...parsed, rawChars: raw.length, ok: true, rawText: raw.slice(0, 4000) }
+        const verified = options.verify === undefined ? parsed : verifySkills(parsed, options.verify)
+        return { ...verified, rawChars: raw.length, ok: true, rawText: raw.slice(0, 4000) }
       }
       lastError = `${parsed.dropped[0] ?? 'no JSON'}`
       // A reply without JSON is a FAILED CALL, not "no lessons": retry once with

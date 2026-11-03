@@ -17,7 +17,7 @@ import { join } from 'node:path'
 import { readLedgers } from './ledger.js'
 import { resolveModelTarget, segmentSession } from './segment.js'
 import { extractEpisode } from './extract.js'
-import type { ExtractionResult } from './extract.js'
+import type { EvidenceRef, ExtractionResult } from './extract.js'
 import { findSkillCandidate } from './dedupe.js'
 import { retrieve, renderHint, retrieveWithFilter } from './retrieve.js'
 import { approveSuggestion, listSuggestions, queueSuggestion, rejectSuggestion } from './suggest.js'
@@ -253,6 +253,57 @@ export function snapshotStoreVersion(memoryDir: string, skillsDir: string): stri
   return parts.join('|')
 }
 
+/**
+ * v0.6 strong verification: re-open the cited seqs in the REAL session log.
+ *
+ * A 240-character conclusion is not proof that the code ran. A skill is written
+ * only when at least one cited seq is a tool call that produced a successful
+ * result (or a successful tool/result itself). Narration-only evidence is
+ * refused, and so is a call whose result is an error.
+ */
+export function buildEvidenceVerifier(events: readonly any[]): (refs: readonly EvidenceRef[]) => { ok: boolean; reason?: string } {
+  const bySeq = new Map<number, any>()
+  const successfulCallIds = new Set<string>()
+  const byCall = new Map<string, any>()
+  for (const event of events) {
+    const seq = Number(event?.seq)
+    if (Number.isFinite(seq)) bySeq.set(seq, event)
+    const callId = event?.data?.callId ?? event?.data?.message?.source?.callId ?? event?.data?.message?.toolCallId
+    if (typeof callId === 'string') byCall.set(callId, event)
+  }
+  for (const event of events) {
+    if (event?.type !== 'tool/result') continue
+    const message = event.data?.message
+    if (message?.isError === true || event.data?.error !== undefined) continue
+    const callId = message?.source?.callId ?? message?.toolCallId
+    if (typeof callId === 'string') successfulCallIds.add(callId)
+  }
+  return (refs) => {
+    if (refs.length === 0) return { ok: false, reason: 'no evidence ref' }
+    let confirmedByTool = false
+    for (const ref of refs) {
+      const event = bySeq.get(Number(ref.seq))
+      if (event === undefined) return { ok: false, reason: `seq ${ref.seq} is not in the session log` }
+      if (event.type === 'tool/result') {
+        const message = event.data?.message
+        if (message?.isError === true || event.data?.error !== undefined) {
+          return { ok: false, reason: `seq ${ref.seq} is a failed tool result` }
+        }
+        confirmedByTool = true
+        continue
+      }
+      if (event.type === 'tool/call') {
+        const callId = event.data?.callId
+        if (typeof callId !== 'string' || !successfulCallIds.has(callId)) {
+          return { ok: false, reason: `tool call at seq ${ref.seq} has no successful result` }
+        }
+        confirmedByTool = true
+      }
+    }
+    return confirmedByTool ? { ok: true } : { ok: false, reason: 'evidence is narration only (no tool result)' }
+  }
+}
+
 export async function harvest(ctx: ContextLike, config: MemoryConfig): Promise<HarvestReport> {
   const resolved = resolveConfig(ctx, config)
   const warnings: string[] = []
@@ -291,7 +342,12 @@ export async function harvest(ctx: ContextLike, config: MemoryConfig): Promise<H
           }
         })()
         const target = resolveModelTarget(log as { session?: unknown; events?: unknown[] })
-        const result = await extractEpisode(llm, episode, target)
+        const result = await extractEpisode(llm, episode, {
+          ...target,
+          // v0.6: no skill survives without a real, successful tool result behind
+          // its evidence. `log` is the actual session, not the 240-char digest.
+          verify: buildEvidenceVerifier(((log as any).events ?? []) as any[]),
+        })
         if (!result.ok) {
           // A failed CALL is not "this session had no lessons": leave the session
           // unprocessed so the next harvest can retry it instead of skipping it
