@@ -21,7 +21,7 @@ import type { EvidenceRef, ExtractionResult } from './extract.js'
 import { findSkillCandidate } from './dedupe.js'
 import { retrieve, renderHint, retrieveWithFilter, collectScenes } from './retrieve.js'
 import { currentWorkspaceOf, workspaceOfSession } from './workspace.js'
-import { applySupersede } from './store.js'
+import { applySupersede, listSkillRecords, quarantineWorkspaceMemory } from './store.js'
 import type { EvidenceRef, MemoryProvenance } from './extract.js'
 
 /**
@@ -578,6 +578,51 @@ function lastUserText(messages: unknown): string | undefined {
   return undefined
 }
 
+/**
+ * v0.16 CONSOLE: the memory knobs the panel may write, and the one place that
+ * knows how to persist them.
+ *
+ * A whitelist plus a spread of `current`: the console exists so the user does not
+ * have to hand-edit the patch, not so a UI click can produce a config that the
+ * Loader rejects on the next restart.
+ */
+const MEMORY_CONSOLE_KEYS = new Set(['retrieval', 'workspaceIsolation', 'semanticFilter', 'autoApprove'])
+const MEMORY_CONSOLE_PATCH_ID = 'dsh-memory'
+
+export async function writeMemoryConsoleSetting(
+  ctx: ContextLike,
+  rawInput: string,
+): Promise<{ ok: boolean; text: string }> {
+  const parts = String(rawInput ?? '').trim().split(/\s+/u).filter((part) => part.length > 0)
+  if (parts.length < 2) {
+    return { ok: false, text: `需要两个参数：<key> <true|false>；可写键：${[...MEMORY_CONSOLE_KEYS].join(', ')}` }
+  }
+  const [key, raw] = parts
+  if (!MEMORY_CONSOLE_KEYS.has(key)) {
+    return { ok: false, text: `未知的配置键 ${key}；可写键：${[...MEMORY_CONSOLE_KEYS].join(', ')}` }
+  }
+  const value = raw.toLowerCase()
+  if (value !== 'true' && value !== 'false') return { ok: false, text: `${key} 只接受 true / false（收到 ${raw}）` }
+  const editor = (() => {
+    try {
+      return ctx.get?.('configEditor') as any
+    } catch {
+      return undefined
+    }
+  })()
+  if (editor === undefined || editor === null || typeof editor.edit !== 'function' || typeof editor.entries !== 'function') {
+    return { ok: false, text: 'configEditor 服务不可用：本次改动没有落盘，请手动修改 profile 的 cordis.patch.yml。' }
+  }
+  const entry = (editor.entries() as any[]).find((row) => row?.patchId === MEMORY_CONSOLE_PATCH_ID || row?.id === MEMORY_CONSOLE_PATCH_ID)
+  if (entry === undefined) return { ok: false, text: `找不到 ${MEMORY_CONSOLE_PATCH_ID} 的配置行。` }
+  try {
+    await editor.edit(entry, (current: Record<string, unknown>) => ({ ...(current ?? {}), [key]: value === 'true' }))
+  } catch (error) {
+    return { ok: false, text: `写入失败：${String((error as any)?.message ?? error)}` }
+  }
+  return { ok: true, text: `已保存 ${key}=${value}（无需重启：下一条提示就按新值过滤）` }
+}
+
 export function apply(ctx: ContextLike, config: MemoryConfig = {}): void {
   try {
     applyInner(ctx, config)
@@ -910,6 +955,130 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
       }
     })
   }
+
+  /**
+   * v0.16 CONSOLE: the Host half of the memory panel.
+   *
+   * Same reasoning as the graft console: the panel needs a live read and a live
+   * write, both exposed as commands so the UI and the slash command share one
+   * implementation, and the write goes through `configEditor.edit` so the value
+   * lands in the profile patch instead of a shadow copy that dies with the process.
+   *
+   * The "clear this workspace" action is the one destructive-looking button in
+   * either console, so it MOVES rather than deletes (`quarantineWorkspaceMemory`)
+   * and reports every file it touched — a debug convenience that eats three weeks
+   * of learned rules is a debug convenience nobody uses twice.
+   */
+  const liveWorkspaceOf = (agentId: string): string => {
+    if (agentId.length === 0) return ''
+    try {
+      const session = (ctx.get?.('sessions') as any)?.get?.(agentId)
+      if (session === undefined || session === null) return currentWorkspaceOf(undefined)
+      const wd = ctx.get?.('workingDirectory') as any
+      if (wd !== undefined && wd !== null && typeof wd.get === 'function') {
+        const value = wd.get(session)
+        if (typeof value === 'string' && value.trim().length > 0) return value.trim()
+      }
+      const cwd = (session as any)?.header?.cwd
+      if (typeof cwd === 'string' && cwd.trim().length > 0) return cwd.trim()
+    } catch {
+      // An unresolvable workspace falls back to the process directory, and the
+      // panel says which one it used instead of guessing silently.
+    }
+    return currentWorkspaceOf(undefined)
+  }
+
+  const memoryConsoleState = (agentId: string): Record<string, unknown> => {
+    const workspace = liveWorkspaceOf(agentId)
+    const skills = listSkillRecords(resolved.skillsDir)
+    const scenes = [...new Set(skills.map((skill) => skill.scene))].sort()
+    const active = skills.filter((skill) => skill.invalidAt.length === 0 || Date.parse(skill.invalidAt) > Date.now())
+    return {
+      config: {
+        retrieval: resolved.retrieval,
+        workspaceIsolation: resolved.workspaceIsolation,
+        semanticFilter: resolved.semanticFilter,
+        autoApprove: resolved.autoApprove,
+        extraction: resolved.extractor,
+        floor: resolved.floor,
+        threshold: resolved.threshold,
+      },
+      workspace,
+      memoryDir: resolved.memoryDir,
+      skillsDir: resolved.skillsDir,
+      counts: {
+        skills: skills.length,
+        active: active.length,
+        superseded: skills.length - active.length,
+        scenes: scenes.length,
+        queued: listSuggestions(resolved.memoryDir).length,
+      },
+      scenes,
+      skills,
+      generatedAt: new Date().toISOString(),
+    }
+  }
+
+  const writeMemorySetting = async (rawInput: string) => writeMemoryConsoleSetting(ctx, rawInput)
+
+  const registerMemoryConsole = (): void => {
+    const commands = (() => {
+      try {
+        return ctx.get?.('commands') as any
+      } catch {
+        return undefined
+      }
+    })()
+    if (commands === undefined || commands === null || typeof commands.register !== 'function') {
+      ctx.logger?.warn?.('[dsh-memory] ctx.commands unavailable; the memory console falls back to its tools')
+      return
+    }
+    commands.register({
+      name: 'memory-console',
+      description: '读取记忆库控制台状态（开关、技能清单、场景、失效计数）。Read the memory console state.',
+      handler: async (invocation: any) => ({
+        kind: 'success' as const,
+        text: JSON.stringify(memoryConsoleState(String(invocation?.agent?.id ?? ''))),
+      }),
+    })
+    commands.register({
+      name: 'memory-console-set',
+      description:
+        '修改记忆开关并存盘（无需重启）：<retrieval|workspaceIsolation|semanticFilter|autoApprove> <true|false>。' +
+        'Set a memory knob live, e.g. `/memory-console-set retrieval true`.',
+      input: { hint: '<retrieval|workspaceIsolation|semanticFilter|autoApprove> <true|false>' },
+      handler: async (invocation: any) => {
+        const result = await writeMemorySetting(String(invocation?.rawInput ?? ''))
+        return { kind: result.ok ? ('success' as const) : ('error' as const), text: result.text }
+      },
+    })
+    commands.register({
+      name: 'memory-console-clear',
+      description:
+        '把「当前工作区」的记忆移入隔离区（不删除，报告清单）：可选 `include-unscoped`。' +
+        'Quarantine this workspace\'s memories; add `include-unscoped` for pre-v0.8 rows.',
+      input: { hint: '[include-unscoped]' },
+      handler: async (invocation: any) => {
+        const agentId = String(invocation?.agent?.id ?? '')
+        const workspace = liveWorkspaceOf(agentId)
+        const includeUnscoped = /include-unscoped/iu.test(String(invocation?.rawInput ?? ''))
+        const result = quarantineWorkspaceMemory(resolved.memoryDir, resolved.skillsDir, workspace, { includeUnscoped })
+        const moved = result.skills.length + result.negatives
+        if (moved === 0) {
+          return { kind: 'success' as const, text: `当前工作区（${workspace}）没有可清理的记忆；保留 ${result.kept} 条。` }
+        }
+        return {
+          kind: 'success' as const,
+          text: [
+            `已隔离 ${result.skills.length} 条技能、${result.negatives} 条负知识（工作区 ${workspace}）。`,
+            `保留 ${result.kept} 条（其它工作区 + global）。`,
+            `隔离目录：${result.quarantineDir}（含 MANIFEST.json，可直接移回）`,
+          ].join('\n'),
+        }
+      },
+    })
+  }
+  registerMemoryConsole()
 
   try {
     ctx.logger?.info?.(

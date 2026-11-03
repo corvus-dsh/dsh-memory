@@ -56,6 +56,23 @@ dsh --profile <name> --dump-config      # 应出现 dsh-memory 行
 | `semanticFilter` | 是否启用 LLM 精准裁决（默认 `true`；关掉则退化为严格词法检索） |
 | `filterProvider` / `filterModel` | 过滤调用使用的模型路由；默认取宿主当前默认选择（`agentDefaultModel.currentSelection()`） |
 
+## v0.16.0：记忆控制台（Web 面板）
+
+侧栏「记忆」进入，三块：
+
+- **开关**：`retrieval`（是否自动注入记忆提示）、`workspaceIsolation`（工作区硬隔离）、`semanticFilter`（LLM 语义裁决）。
+  写入走宿主 `configEditor.edit`——**无需重启，且活过重启**，因为改的就是 profile 配置本身。
+- **记忆库**：按 scene（database / ui / testing …）过滤的清单，每行给出标题、来源（human 绿色 / tool / inferred）、
+  scope、记录时的工作区、失效时间与取代关系、证据条数。**失效的记忆显示为划除**，正是双时态那套字段在 UI 上的样子。
+- **数据清理**：一键清空**当前工作区**的记忆 → 移入 `<memoryDir>/_quarantine-<ts>/`（含 `MANIFEST.json`），
+  `global` 与其它工作区保留。**移动而非删除**——一个会抹掉三周学习成果的调试按钮没人敢点第二次。
+
+同样的操作注册为命令：`/memory-console`、`/memory-console-set retrieval true`、`/memory-console-clear`。
+命令行与面板共用同一份实现（`user-actions.md` 的「一个操作、两个调用者」）。
+
+未验证项与依赖同 `dsh-graft-slice`：客户端→宿主的调用形状是防御式桥接（面板会显示实际生效的通道），
+且客户端半边是新增的，需要**一次宿主重启 + 一次页面刷新**进入 boot graph。
+
 ## 已验证能力（v0.15.0 实战验收，2026-11-03）
 
 > 上一版本致命问题的取证与修复全过程见 **[POSTMORTEM-2026-11-03.md](POSTMORTEM-2026-11-03.md)**
