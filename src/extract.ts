@@ -80,6 +80,8 @@ export interface ExtractedSkill {
   scene: MemoryScene
   /** v0.5: 2-3 alternate phrasings a future session might search with. */
   aliases: string[]
+  /** v0.7: operational (a tool did something) vs observational (a tool read). */
+  evidenceKind?: 'operational' | 'observational'
   evidence: EvidenceRef[]
 }
 
@@ -402,20 +404,23 @@ export interface ExtractOptions {
    * succeeded. A skill that cannot be confirmed is dropped with a reason — a
    * summarised 240-char conclusion is not proof that the code ran.
    */
-  verify?: (refs: readonly EvidenceRef[]) => { ok: boolean; reason?: string }
+  verify?: (refs: readonly EvidenceRef[]) => { ok: boolean; observation?: boolean; reason?: string }
 }
 
 /** One extraction call. Returns an empty result (with a reason) rather than throwing. */
 function verifySkills(
   parsed: ExtractionResult,
-  verify: (refs: readonly EvidenceRef[]) => { ok: boolean; reason?: string },
+  verify: (refs: readonly EvidenceRef[]) => { ok: boolean; observation?: boolean; reason?: string },
 ): ExtractionResult {
   const skills: ExtractedSkill[] = []
   const dropped = [...parsed.dropped]
   for (const skill of parsed.skills) {
     const check = verify(skill.evidence)
-    if (check.ok) skills.push(skill)
-    else dropped.push(`${skill.name}: evidence not confirmed (${check.reason ?? 'raw log check failed'})`)
+    if (check.ok) {
+      skills.push(check.observation === true ? { ...skill, evidenceKind: 'observational' } : { ...skill, evidenceKind: 'operational' })
+    } else {
+      dropped.push(`${skill.name}: evidence not confirmed (${check.reason ?? 'raw log check failed'})`)
+    }
   }
   return { ...parsed, skills, dropped }
 }

@@ -258,29 +258,41 @@ export function snapshotStoreVersion(memoryDir: string, skillsDir: string): stri
  *
  * A 240-character conclusion is not proof that the code ran. A skill is written
  * only when at least one cited seq is a tool call that produced a successful
- * result (or a successful tool/result itself). Narration-only evidence is
- * refused, and so is a call whose result is an error.
+ * result. v0.7: `observational` tools (read/grep/glob/…) also count — a code
+ * READING session can produce a real architecture lesson even though it never
+ * wrote anything. The kind is recorded so a later reader knows whether the skill
+ * was demonstrated operationally or only observed.
  */
-export function buildEvidenceVerifier(events: readonly any[]): (refs: readonly EvidenceRef[]) => { ok: boolean; reason?: string } {
+const OBSERVATIONAL_TOOLS = new Set([
+  'read', 'read_file', 'grep', 'rg', 'glob', 'find', 'ls', 'dir', 'list', 'cat', 'head', 'tail', 'view', 'search', 'codebase_search',
+])
+
+export function buildEvidenceVerifier(
+  events: readonly any[],
+): (refs: readonly EvidenceRef[]) => { ok: boolean; observation?: boolean; reason?: string } {
   const bySeq = new Map<number, any>()
-  const successfulCallIds = new Set<string>()
-  const byCall = new Map<string, any>()
+  const callNames = new Map<string, string>()
+  const successful = new Map<string, string>() // callId -> tool name
   for (const event of events) {
     const seq = Number(event?.seq)
     if (Number.isFinite(seq)) bySeq.set(seq, event)
-    const callId = event?.data?.callId ?? event?.data?.message?.source?.callId ?? event?.data?.message?.toolCallId
-    if (typeof callId === 'string') byCall.set(callId, event)
+    if (event?.type === 'tool/call') {
+      const callId = event.data?.callId
+      const name = String(event.data?.name ?? '')
+      if (typeof callId === 'string' && name.length > 0) callNames.set(callId, name)
+    }
   }
   for (const event of events) {
     if (event?.type !== 'tool/result') continue
     const message = event.data?.message
     if (message?.isError === true || event.data?.error !== undefined) continue
     const callId = message?.source?.callId ?? message?.toolCallId
-    if (typeof callId === 'string') successfulCallIds.add(callId)
+    if (typeof callId === 'string') successful.set(callId, callNames.get(callId) ?? '')
   }
   return (refs) => {
     if (refs.length === 0) return { ok: false, reason: 'no evidence ref' }
-    let confirmedByTool = false
+    let operational = false
+    let observational = false
     for (const ref of refs) {
       const event = bySeq.get(Number(ref.seq))
       if (event === undefined) return { ok: false, reason: `seq ${ref.seq} is not in the session log` }
@@ -289,18 +301,25 @@ export function buildEvidenceVerifier(events: readonly any[]): (refs: readonly E
         if (message?.isError === true || event.data?.error !== undefined) {
           return { ok: false, reason: `seq ${ref.seq} is a failed tool result` }
         }
-        confirmedByTool = true
+        const callId = message?.source?.callId ?? message?.toolCallId
+        const tool = typeof callId === 'string' ? callNames.get(callId) ?? '' : ''
+        if (OBSERVATIONAL_TOOLS.has(tool)) observational = true
+        else operational = true
         continue
       }
       if (event.type === 'tool/call') {
         const callId = event.data?.callId
-        if (typeof callId !== 'string' || !successfulCallIds.has(callId)) {
+        if (typeof callId !== 'string' || !successful.has(callId)) {
           return { ok: false, reason: `tool call at seq ${ref.seq} has no successful result` }
         }
-        confirmedByTool = true
+        const tool = callNames.get(callId) ?? ''
+        if (OBSERVATIONAL_TOOLS.has(tool)) observational = true
+        else operational = true
       }
     }
-    return confirmedByTool ? { ok: true } : { ok: false, reason: 'evidence is narration only (no tool result)' }
+    if (operational) return { ok: true, observation: false }
+    if (observational) return { ok: true, observation: true }
+    return { ok: false, reason: 'evidence is narration only (no tool result)' }
   }
 }
 
