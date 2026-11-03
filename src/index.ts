@@ -19,7 +19,7 @@ import { resolveModelTarget, segmentSession } from './segment.js'
 import { extractEpisode } from './extract.js'
 import type { EvidenceRef, ExtractionResult } from './extract.js'
 import { findSkillCandidate } from './dedupe.js'
-import { retrieve, renderHint, retrieveWithFilter, collectScenes } from './retrieve.js'
+import { retrieve, renderHint, retrieveWithFilter, collectScenes, extractTaskTerms, askAsksForFix } from './retrieve.js'
 import { currentWorkspaceOf, workspaceOfSession } from './workspace.js'
 import { applySupersede, listSkillRecords, quarantineWorkspaceMemory } from './store.js'
 import type { EvidenceRef, MemoryProvenance } from './extract.js'
@@ -145,6 +145,25 @@ export interface MemoryConfig {
    * inspected in its unfiltered state; it is not a tuning knob.
    */
   workspaceIsolation?: boolean
+  /**
+   * v0.20 TASK ALIGNMENT. Default TRUE.
+   *
+   * The workspace gate answers "was this memory produced here"; this one answers
+   * "is it about what I am doing now". Inside one repository the dominant memory
+   * shape is the incident log — "when X reports SOURCE_DRIFT, …" — which is
+   * valuable for the task that hit it and actively harmful in an unrelated one: a
+   * model handed a confident, specific instruction about a problem it does not have
+   * will follow it.
+   *
+   * A memory whose SHAPE is an incident log and which shares NO distinctive term
+   * with the user's ask is removed from the pool before scoring. A METHOD-shaped
+   * memory only needs the existing scene/workspace gates, because a user's phrasing
+   * rarely matches a skill's trigger word and recall must not die for that.
+   *
+   * Off exists for a differential test and for an operator debugging the gate; it
+   * is not a tuning knob.
+   */
+  taskAlignment?: boolean
 }
 
 interface ContextLike {
@@ -205,6 +224,8 @@ function resolveConfig(ctx: ContextLike, config: MemoryConfig) {
     filterProvider: typeof config.filterProvider === 'string' && config.filterProvider.length > 0 ? config.filterProvider : undefined,
     filterModel: typeof config.filterModel === 'string' && config.filterModel.length > 0 ? config.filterModel : undefined,
     workspaceIsolation: config.workspaceIsolation !== false,
+    // v0.20: on by default. A filter that is off by default protects nobody.
+    taskAlignment: config.taskAlignment !== false,
   }
 }
 
@@ -609,7 +630,13 @@ function lastUserText(messages: unknown): string | undefined {
  * have to hand-edit the patch, not so a UI click can produce a config that the
  * Loader rejects on the next restart.
  */
-const MEMORY_CONSOLE_KEYS = new Set(['retrieval', 'workspaceIsolation', 'semanticFilter', 'autoApprove'])
+/**
+ * v0.20: `taskAlignment` joins the console's writable set.
+ *
+ * A gate an operator cannot toggle is a gate that gets disabled by editing YAML and
+ * restarting — which is the experience the console exists to remove.
+ */
+const MEMORY_CONSOLE_KEYS = new Set(['retrieval', 'workspaceIsolation', 'semanticFilter', 'autoApprove', 'taskAlignment'])
 const MEMORY_CONSOLE_PATCH_ID = 'dsh-memory'
 
 export async function writeMemoryConsoleSetting(
@@ -644,6 +671,17 @@ export async function writeMemoryConsoleSetting(
     return { ok: false, text: `写入失败：${String((error as any)?.message ?? error)}` }
   }
   return { ok: true, text: `已保存 ${key}=${value}（无需重启：下一条提示就按新值过滤）` }
+}
+
+/**
+ * Test-only entry point for the resolved config.
+ *
+ * `resolveConfig` stays module-private because it is an implementation detail of
+ * every entry point; veiling it behind a named export keeps the test honest (it
+ * exercises the real resolver, not a copy) without widening the public surface.
+ */
+export function resolveMemoryConfigForTest(ctx: ContextLike, config: MemoryConfig = {}) {
+  return resolveConfig(ctx, config)
 }
 
 export function apply(ctx: ContextLike, config: MemoryConfig = {}): void {
@@ -905,6 +943,39 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
     }
   })
 
+  /**
+   * v0.20: the task-alignment gate, kept per agent.
+   *
+   * The terms ACCUMULATE across the session's human turns. A follow-up ("继续",
+   * "修一下", "然后呢") carries no task signal, and a gate rebuilt from it alone
+   * would refuse every memory — which is the failure mode that gets a filter
+   * switched off. Accumulating keeps the ask's original vocabulary in force while
+   * still letting a genuinely new instruction widen it.
+   *
+   * `taskAlignment: false` disables the gate entirely (the differential switch).
+   */
+  const taskTermsByAgent = new Map<string, Set<string>>()
+  const taskGate = (
+    settings: { taskAlignment: boolean },
+    agentId: string,
+    userText: string,
+  ): { taskTerms?: ReadonlySet<string>; taskAlignment?: boolean; taskFixIntent?: boolean } => {
+    if (!settings.taskAlignment) return { taskAlignment: false }
+    if (agentId.length === 0) return {}
+    const fresh = extractTaskTerms(userText)
+    const merged = taskTermsByAgent.get(agentId) ?? new Set<string>()
+    for (const term of fresh) merged.add(term)
+    taskTermsByAgent.set(agentId, merged)
+    // Whether the CURRENT ask is about a failure. Read per turn, not accumulated:
+    // "fix this" is a property of this request, and a debugging turn early in the
+    // session must not keep incident logs in scope for a design turn later on.
+    const fixIntent = askAsksForFix(userText)
+    return {
+      ...(merged.size === 0 ? {} : { taskTerms: merged as ReadonlySet<string> }),
+      ...(fixIntent ? { taskFixIntent: true } : {}),
+    }
+  }
+
   const nudgeState = new Map<string, { userKey: string; lastId: string; lastAt: number }>()
   if (resolved.retrieval) {
     ctx.on?.('agent/pre-step', async (payload: any, next: any) => {
@@ -945,6 +1016,14 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
           // way the store records it (session cwd), so a memory from another
           // repository never reaches the hint — even one that scores highest.
           ...(resolved.workspaceIsolation ? { workspace: currentWorkspaceOf(payload) } : {}),
+          // v0.20 TASK ALIGNMENT: the second semantic gate, after the workspace one.
+          //
+          // The terms come from the USER'S ASK, and are accumulated across the
+          // session's human turns rather than taken from this turn alone: a follow-up
+          // like "继续" or "修一下" carries no task signal, and a gate built from it
+          // would refuse everything (or, worse, match only generic words). The ask is
+          // remembered per agent so the gate stays stable as the work proceeds.
+          ...taskGate(resolved, agentId, userText),
           // v0.15: the supersede verdict is PERSISTED here — this is the one path
           // where a real turn is being served. `applySupersede` refuses a machine
           // verdict against a human memory and appends the audit line; the manual
@@ -957,6 +1036,11 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
           },
           ...(llm === undefined ? {} : { llm, ...resolveFilterTarget(ctx, resolved.filterProvider, resolved.filterModel) }),
         })
+        // v0.20: record the task gate's refusals BEFORE the hint decision, so the
+        // panel can explain a turn that produced no hint at all.
+        const taskBlocked = Number((result.debug as { blockedByTask?: number } | undefined)?.blockedByTask ?? 0)
+        if (taskBlocked > 0) lastTaskBlocks.set(agentId, taskBlocked)
+        else lastTaskBlocks.delete(agentId)
         const hint = renderHint(result)
         if (hint === undefined) return decision
         // v0.5 decay bookkeeping: a recalled skill that is actually injected has
@@ -1032,6 +1116,15 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
     return currentWorkspaceOf(undefined)
   }
 
+  /**
+   * v0.20: the last turn's task-gate refusals, for the panel.
+   *
+   * "It did not recall" and "it refused three stale incident logs" are different
+   * states, and only one of them is a problem. Reporting the count is what lets an
+   * operator tell a working gate from a gate that ate the recall.
+   */
+  const lastTaskBlocks = new Map<string, number>()
+
   const memoryConsoleState = (agentId: string): Record<string, unknown> => {
     const workspace = liveWorkspaceOf(agentId)
     const skills = listSkillRecords(resolved.skillsDir)
@@ -1042,6 +1135,8 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
         retrieval: resolved.retrieval,
         workspaceIsolation: resolved.workspaceIsolation,
         semanticFilter: resolved.semanticFilter,
+        // v0.20: the task-alignment gate, so the panel can show and toggle it.
+        taskAlignment: resolved.taskAlignment,
         autoApprove: resolved.autoApprove,
         extraction: resolved.extractor,
         floor: resolved.floor,
@@ -1050,6 +1145,8 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
       workspace,
       memoryDir: resolved.memoryDir,
       skillsDir: resolved.skillsDir,
+      // v0.20: how many memories the task gate refused on the last turn.
+      ...(lastTaskBlocks.get(agentId) === undefined ? {} : { blockedByTask: lastTaskBlocks.get(agentId) }),
       counts: {
         skills: skills.length,
         active: active.length,

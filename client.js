@@ -209,6 +209,19 @@ window.__ModuleLoader__.load({
             checked: config ? config.semanticFilter === true : false,
             onChange: (next) => write('semanticFilter', next),
           }),
+          h(Toggle, {
+            key: 'ta',
+            label: '任务对齐过滤（taskAlignment）',
+            hint: '与当前任务无关的旧事故流水账一律不召回；修复类提问例外',
+            checked: config ? config.taskAlignment === true : false,
+            onChange: (next) => write('taskAlignment', next),
+          }),
+          // v0.20: the gate's own refusals, so "it did not recall" is explainable
+          // from the panel instead of requiring the log.
+          state && state.blockedByTask
+            ? h('p', { key: 'bt', className: 'mc-hint', style: { margin: '6px 0 0' } },
+                `上一次检索：${state.blockedByTask} 条记忆因与当前任务无关被拒（事故流水账）。`)
+            : null,
         ]),
         h('div', { key: 'cat', className: 'mc-card' }, [
           h('div', { key: 'h', style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' } }, [
