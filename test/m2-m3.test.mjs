@@ -141,11 +141,21 @@ test('pre-step: the hint rides messages once per user turn, non-blocking', async
     paths: { data: memory },
     tools: { register: () => {} },
     on: (event, handler) => handlers.push({ event, handler }),
-    get: () => undefined,
+    get: (name) => {
+      // v0.4: the two-stage pipeline requires a judge. Without one, the plugin
+      // deliberately injects nothing, so this fixture supplies a fake adjudicator.
+      if (name !== 'llm') return undefined
+      return {
+        async *stream() {
+          yield { type: 'text-delta', text: JSON.stringify({ apply: ['red-test-first'] }) }
+          yield { type: 'finish', reason: { kind: 'stop' } }
+        },
+      }
+    },
     sessionQuery: { readSession: async () => undefined },
   }
   const { apply } = await import('../lib/index.js')
-  apply(ctx, { memoryDir: memory, skillsDir: skills, retrieval: true, retrievalThreshold: 0.3 })
+  apply(ctx, { memoryDir: memory, skillsDir: skills, retrieval: true, retrievalFloor: 0.2 })
   const handler = handlers.find((item) => item.event === 'agent/pre-step')?.handler
   assert.ok(handler !== undefined, 'pre-step handler registered')
 

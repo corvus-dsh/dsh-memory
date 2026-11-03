@@ -142,27 +142,41 @@ test('retrieveWithFilter: the lexical false friend is dropped by the model', asy
   assert.equal(llm.counter.calls, 1, 'exactly one filter call')
 })
 
-test('retrieveWithFilter: a single candidate spends no tokens', async () => {
+test('retrieveWithFilter: even one weak candidate is adjudicated at the low floor', async () => {
   const { skills, memory } = store()
   const llm = fakeLlm('{"apply":[]}')
-  await retrieveWithFilter(memory, skills, 'SOURCE_DRIFT 边界 seq 校验失败', { llm })
-  assert.equal(llm.counter.calls, 0, 'nothing to disambiguate → no LLM call')
+  const result = await retrieveWithFilter(memory, skills, 'SOURCE_DRIFT 边界 seq 校验失败', { llm })
+  assert.equal(llm.counter.calls, 1, 'the net is wide: nothing is injected without a verdict')
+  assert.equal(result.skill, undefined, 'a rejected candidate is not injected')
+  assert.equal(result.filter?.applied, true)
+  assert.equal(renderHint(result), undefined)
 })
 
-test('retrieveWithFilter: a failing filter falls back to the lexical answer', async () => {
+test('retrieveWithFilter: a failing judge injects nothing (fail closed)', async () => {
   const { skills, memory } = store()
-  const lexical = retrieve(memory, skills, PROMPT, {})
-  assert.ok(lexical.skill !== undefined)
   const broken = {
     async *stream() {
       throw new Error('provider exploded')
     },
   }
   const result = await retrieveWithFilter(memory, skills, PROMPT, { llm: broken })
-  assert.equal(result.skill?.id, lexical.skill.id, 'a broken filter must not suppress the old hint')
+  assert.equal(result.skill, undefined, 'low-floor candidates must never fall back to a lexical hint')
+  assert.equal(result.filter?.applied, false)
+  assert.match(result.filter?.reason ?? '', /provider exploded/u)
+  assert.equal(renderHint(result), undefined)
+  assert.ok((result.candidates ?? []).length > 0, 'candidates stay visible for diagnostics only')
 })
 
-test('retrieveWithFilter: rejecting every skill keeps the negative warning', async () => {
+test('retrieveWithFilter: no judge means no hint, even with candidates on the table', async () => {
+  const { skills, memory } = store()
+  const result = await retrieveWithFilter(memory, skills, PROMPT, {})
+  assert.equal(result.skill, undefined)
+  assert.equal(result.filter?.applied, false)
+  assert.match(result.filter?.reason ?? '', /llm unavailable/u)
+  assert.ok((result.candidates ?? []).length > 0)
+})
+
+test('retrieveWithFilter: an empty verdict injects nothing — not even the negative', async () => {
   const { skills, memory } = store()
   appendNegatives(
     memory,
@@ -179,8 +193,45 @@ test('retrieveWithFilter: rejecting every skill keeps the negative warning', asy
   const llm = fakeLlm('{"apply":[]}')
   const result = await retrieveWithFilter(memory, skills, PROMPT, { llm })
   assert.equal(result.skill, undefined, 'the model said no skill applies')
-  assert.ok(result.negative !== undefined, 'negatives are not filtered')
+  assert.equal(result.negative, undefined, 'negatives answer to the same verdict at the low floor')
+  assert.equal(renderHint(result), undefined)
+})
+
+test('retrieveWithFilter: a kept negative still rides along', async () => {
+  const { skills, memory } = store()
+  appendNegatives(
+    memory,
+    [
+      {
+        symptom: 'graft_commit 反复返回 SOURCE_DRIFT，边界 seq 校验失败',
+        cause: '边界判定用可变 lastSeq 且写入早于校验',
+        avoid: '改用 boundarySeq 并在任何写入前校验',
+        evidence: [14926],
+      },
+    ],
+    { sessionId: 's', boundarySeq: 9 },
+  )
+  const llm = fakeLlm('{"apply":["neg-0"]}')
+  const result = await retrieveWithFilter(memory, skills, PROMPT, { llm })
+  assert.equal(result.negative?.id, 'neg-0')
   assert.match(renderHint(result) ?? '', /翻车/u)
+})
+
+test('v0.4: the recall floor is 0.20 (strict bar kept for offline mode)', async () => {
+  const { DEFAULT_RETRIEVAL_FLOOR, DEFAULT_RETRIEVAL_THRESHOLD } = await import('../lib/index.js')
+  assert.equal(DEFAULT_RETRIEVAL_FLOOR, 0.2)
+  assert.ok(DEFAULT_RETRIEVAL_THRESHOLD > DEFAULT_RETRIEVAL_FLOOR, 'offline mode keeps the strict bar')
+
+  const { skills, memory } = store()
+  const query = 'SOURCE_DRIFT 边界 seq'
+  assert.equal(retrieveCandidates(memory, skills, query, { threshold: 1.01 }).length, 0, 'nothing clears an impossible floor')
+  const wide = retrieveCandidates(memory, skills, query, {})
+  assert.ok(wide.length > 0, 'the default floor recalls')
+
+  const llm = fakeLlm(`{"apply":["${wide[0].id}"]}`)
+  const result = await retrieveWithFilter(memory, skills, query, { llm, floor: DEFAULT_RETRIEVAL_FLOOR })
+  assert.equal(result.skill?.id, wide[0].id)
+  assert.ok(renderHint(result) !== undefined)
 })
 
 test('retrieveWithFilter: two kept skills render as one hint within 120 chars', async () => {

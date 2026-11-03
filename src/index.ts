@@ -47,6 +47,16 @@ export const inject = ['tools', 'sessionQuery']
 
 export const MEMORY_PROTOCOL = 'dsh-memory/1'
 
+/**
+ * v0.4 retrieval defaults.
+ *
+ * `FLOOR` is the two-stage recall net; `THRESHOLD` is the strict bar kept for
+ * offline mode, where no model adjudicates and a weak lexical match must not be
+ * trusted on its own.
+ */
+export const DEFAULT_RETRIEVAL_FLOOR = 0.2
+export const DEFAULT_RETRIEVAL_THRESHOLD = 0.55
+
 export interface MemoryConfig {
   /** Where the slicing plugin keeps its ledgers. Default: sibling `dsh-graft-slice` data dir. */
   graftDataDir?: string
@@ -62,12 +72,24 @@ export interface MemoryConfig {
   autoApprove?: boolean
   /** Pre-step retrieval (M3). Default true. */
   retrieval?: boolean
-  /** Score threshold for a hint. Default 0.55. */
+  /**
+   * Strict lexical threshold, used ONLY in offline mode (`semanticFilter:false`).
+   * Default 0.55: without an LLM judge, a hint must be lexically convincing.
+   */
   retrievalThreshold?: number
   /**
-   * v0.2.0 stage-2 LLM relevance filter. Default true: when more than one skill
-   * clears the threshold, one cheap model call drops the lexical false friends.
-   * Set false to keep retrieval fully offline.
+   * v0.4: recall floor for the two-stage pipeline. Default 0.20.
+   *
+   * Deliberately low: stage 1 is a net, not a judge. A generic ask ("write a
+   * script that connects to a database") shares few words with a skill's trigger,
+   * and a high floor silently loses exactly those cases. The LLM adjudicates
+   * afterwards; if it cannot, nothing is injected.
+   */
+  retrievalFloor?: number
+  /**
+   * v0.2.0 stage-2 LLM relevance filter. Default true: recall at the floor, then
+   * adjudicate. Set false to keep retrieval fully offline (strict threshold,
+   * lexical top-1, no low-floor noise).
    */
   semanticFilter?: boolean
   /** Optional explicit route for the filter call; default is the host's current default selection. */
@@ -124,7 +146,11 @@ function resolveConfig(ctx: ContextLike, config: MemoryConfig) {
     extractor: config.extractor === 'off' ? ('off' as const) : ('llm' as const),
     autoApprove: config.autoApprove === true,
     retrieval: config.retrieval !== false,
-    threshold: Number.isFinite(Number(config.retrievalThreshold)) ? Number(config.retrievalThreshold) : 0.55,
+    threshold: Number.isFinite(Number(config.retrievalThreshold)) ? Number(config.retrievalThreshold) : DEFAULT_RETRIEVAL_THRESHOLD,
+    floor:
+      Number.isFinite(Number(config.retrievalFloor)) && Number(config.retrievalFloor) > 0
+        ? Math.min(0.9, Number(config.retrievalFloor))
+        : DEFAULT_RETRIEVAL_FLOOR,
     semanticFilter: config.semanticFilter !== false,
     filterProvider: typeof config.filterProvider === 'string' && config.filterProvider.length > 0 ? config.filterProvider : undefined,
     filterModel: typeof config.filterModel === 'string' && config.filterModel.length > 0 ? config.filterModel : undefined,
@@ -413,7 +439,8 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
   ctx.tools?.register({
     name: 'memory_search',
     description:
-      'Retrieval preview: idf × freshness × importance, plus an optional LLM relevance filter (semantic:true) that drops lexical false friends.',
+      'Two-stage retrieval preview: lexical recall at a LOW floor (0.20), then one LLM adjudication that keeps only semantically applicable skills. ' +
+      'semantic:false forces the old offline lexical mode. If the adjudicator is unavailable or returns none, no hint is produced.',
     parameters: {
       type: 'object',
       properties: {
@@ -426,25 +453,27 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
     },
     output: textOutput(),
     execute: async (args: { query: string; threshold?: number; semantic?: boolean }) => {
-      const options = {
-        threshold: Number.isFinite(Number(args.threshold)) ? Number(args.threshold) : resolved.threshold,
-      }
+      const query = String(args.query ?? '')
+      const explicitThreshold = Number.isFinite(Number(args.threshold)) ? Number(args.threshold) : undefined
+      // Default is the two-stage pipeline; `semantic:false` is the offline escape hatch.
+      const wantSemantic = args.semantic !== false && llmAvailable && resolved.semanticFilter
       const llm = (() => {
-        if (args.semantic !== true || !llmAvailable) return undefined
+        if (!wantSemantic) return undefined
         try {
           return ctx.get?.('llm') as never
         } catch {
           return undefined
         }
       })()
-      const result =
-        llm === undefined
-          ? retrieve(resolved.memoryDir, resolved.skillsDir, String(args.query ?? ''), options)
-          : await retrieveWithFilter(resolved.memoryDir, resolved.skillsDir, String(args.query ?? ''), {
-              ...options,
-              llm,
-              ...resolveFilterTarget(ctx, resolved.filterProvider, resolved.filterModel),
-            })
+      const result = wantSemantic
+        ? await retrieveWithFilter(resolved.memoryDir, resolved.skillsDir, query, {
+            floor: explicitThreshold ?? resolved.floor,
+            llm,
+            ...resolveFilterTarget(ctx, resolved.filterProvider, resolved.filterModel),
+          })
+        : retrieve(resolved.memoryDir, resolved.skillsDir, query, {
+            threshold: explicitThreshold ?? resolved.threshold,
+          })
       const hint = renderHint(result)
       // `hint: undefined` is not lossless JSON: the ToolService validates the raw
       // value, not its stringified form, and rejects the whole call.
@@ -492,9 +521,12 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
           }
         })()
         const result = await retrieveWithFilter(resolved.memoryDir, resolved.skillsDir, userText, {
-          threshold: resolved.threshold,
-          // A per-turn hint must stay cheap: if the filter cannot answer in a few
-          // seconds, the lexical answer goes out and the turn continues.
+          // v0.4: recall at the LOW floor, then let the model adjudicate. If the
+          // model cannot answer (no llm, timeout, malformed reply) the function
+          // returns no hit at all — low-floor candidates are never injected raw.
+          floor: resolved.floor,
+          // A per-turn hint must stay cheap: a slow adjudicator costs the hint,
+          // never the turn.
           timeoutMs: 4000,
           ...(llm === undefined ? {} : { llm, ...resolveFilterTarget(ctx, resolved.filterProvider, resolved.filterModel) }),
         })

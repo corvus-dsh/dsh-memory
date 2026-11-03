@@ -4,7 +4,7 @@
 
 **能力记忆**：把做过的会话沉淀成可复用的技能与负知识。DSH 开源生态插件（topic `dsh-plugin`）。
 
-> 当前版本 **0.3.0（预发布）**。发布说明：[RELEASE_NOTES.md](./RELEASE_NOTES.md)。
+> 当前版本 **0.4.0（预发布）**。发布说明：[RELEASE_NOTES.md](./RELEASE_NOTES.md)。
 
 > 事实记忆只需可查，能力记忆才需要持久化。
 >
@@ -51,8 +51,9 @@ dsh --profile <name> --dump-config      # 应出现 dsh-memory 行
 | `harvestLimit` | 单次最多处理几个已退休会话（默认 3） |
 | `extractor` | `llm`（用宿主模型抽取）或 `off`（只扫账本，不花 token） |
 | `retrieval` | pre-step 是否检索（默认 `true`） |
-| `retrievalThreshold` | 提示阈值（默认 `0.55`） |
-| `semanticFilter` | 是否启用第二阶段 LLM 相关性过滤（默认 `true`；关掉则检索完全离线） |
+| `retrievalFloor` | **词法召回下限，默认 `0.20`**：只负责“捞候选”，不负责“判定” |
+| `retrievalThreshold` | 严格阈值，**仅离线模式**（`semanticFilter:false`）使用，默认 `0.55` |
+| `semanticFilter` | 是否启用 LLM 精准裁决（默认 `true`；关掉则退化为严格词法检索） |
 | `filterProvider` / `filterModel` | 过滤调用使用的模型路由；默认取宿主当前默认选择（`agentDefaultModel.currentSelection()`） |
 
 ## 四层认知模型（v0.2.0）
@@ -101,27 +102,32 @@ created: 2026-11-03
 写入闸（`writeSkill`）：没有执行步骤、没有验证标准的技能**直接拒绝落盘**并返回 `skipped:<原因>`。
 v0.1 的 `when`/`how` 旧队列项仍能读入，但会被升级成上面的形状。
 
-## 两阶段检索（v0.2.0）
+## 两阶段检索（v0.4.0：低阈值召回 + LLM 精准裁决）
 
-1. **词法召回**（离线）：`IDF × 鲜活度 × 重要度`，决定“可能相关”。
-2. **LLM 相关性过滤**（可选，命中 >1 个技能时才调用）：把用户当前输入与候选技能的 `when` 一起给模型，
-   只保留真正适用的技能名。它**只能删、不能加**——返回的名字必须与第一阶段候选完全一致，否则丢弃；
-   调用失败时回退到词法 top-1，因此过滤器永远不会让提示变差。
+1. **词法召回（网）**：`IDF × 鲜活度 × 重要度`，**默认下限 0.20**。它只回答“可能相关”，
+   刻意放宽——短而泛的提问（“帮我写个脚本连数据库”）与技能触发条件的字面重合很少，
+   高阈值会把这类真正需要记忆的场景静默漏掉。
+2. **LLM 精准裁决（判）**：把用户输入与候选（技能 + 负知识）一起交给模型，由它判断
+   “哪些会改变这次任务的做法”，并返回保留的 id；**只能删、不能加**（id 必须与候选完全一致）。
 
-这一步是为了解决实测噪声：排查 `graft_commit` 漂移时，`divergent-rebuild-probe` 因为共享
-「prepare / 产物 / 字段」而被词法召回，但它与当前任务无关。
+**安全兜底（fail-closed）**：低阈值 + 无裁决 = 污染，所以只要 LLM 不可用、超时或返回空，
+就**放弃注入**——词法候选只留在 `memory_search` 的 `candidates` 里供诊断，不会进入提示。
+`semanticFilter:false`（纯离线）则退回严格阈值 `0.55` 的 top-1，行为与旧版一致。
 
-三条实测得到的硬约束（都写进了代码与测试）：
+裁决 Prompt 的关键一条：*“会改变这次任务的做法”即适用*；字面触发词不要求逐字命中；
+但**不同主题**（比如会话交接 vs 数据库）必须拒绝；提问未指定技术栈时，保留能代表具体
+替代方案的候选，让模型去问用户，而不是自己猜。
 
-- **必须显式给 provider/model**：`llm.stream()` 没有 provider 会报
-  `no adapter registered for provider "undefined"`；过滤器静默回退会让人以为“过滤了但没效果”。
-  默认路由取宿主当前默认选择，可用 `filterProvider` / `filterModel` 覆盖。
-- **必须关掉推理**：实测推理模型在“3 个候选取哪个”这种小判定上会先烧掉 3627 字符推理，
-  然后撞上 max-tokens 一个字都不输出（`finish=max-tokens`）。过滤器强制 `reasoningEffort: off`。
-- **回退必须可见**：`memory_search` 返回 `filter: { attempted, applied, kept?, reason? }`。
-  `applied:false` + `reason` 说明过滤器没生效（模型超时/无 JSON），而不是“判定为无关”。
+三条实测硬约束仍然有效：
 
-延迟预算：pre-step 只给 4 秒（超时就发词法答案，不拖慢回合）；显式 `memory_search` 给 60 秒。
+- **必须显式给 provider/model**：`llm.stream()` 无 provider 会报
+  `no adapter registered for provider "undefined"`。默认路由取宿主当前默认选择，
+  可用 `filterProvider` / `filterModel` 覆盖。
+- **必须关掉推理**：实测推理模型在小判定上先烧 3627 字符推理，然后撞 max-tokens 一个字不输出。
+- **失败必须可见且关闭**：`memory_search` 返回 `filter: { attempted, applied, kept?, reason? }`
+  与 `candidates`；`applied:false` + `reason` 表示“没有注入”，而不是“判定为无关”。
+
+延迟预算：pre-step 给 4 秒（裁决来不及就这一轮不提示）；显式 `memory_search` 给 60 秒。
 
 ## 冲突互链（v0.3.0）
 
