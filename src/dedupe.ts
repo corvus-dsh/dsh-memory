@@ -1,0 +1,110 @@
+/**
+ * Dedupe gates for capability memory.
+ *
+ * Four gates, from hardest to softest (the user approved this order):
+ *   ① name — a SKILL.md name IS the identity; same kebab name = same skill
+ *   ② normalized exact — strip punctuation/numbers/whitespace, then compare
+ *   ③ Jaccard on 3-grams of `when` — catches "换了说法但同一个方法"
+ *   ④ conflict — same symptom with a different cause: keep BOTH and link them
+ *
+ * Gate ④ matters most for negative paths: two different causes for one symptom
+ * is information, not duplication. Silently merging them would teach a wrong fix.
+ */
+
+import { readdirSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
+
+export function normalizeForMatch(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[（(][^）)]*[）)]/gu, '')
+    .replace(/[^\p{L}\p{N}]+/gu, '')
+    .replace(/[0-9]+/gu, '')
+}
+
+export function trigrams(text: string): Set<string> {
+  const normalized = normalizeForMatch(text)
+  const out = new Set<string>()
+  if (normalized.length === 0) return out
+  const padded = `  ${normalized} `
+  for (let index = 0; index + 3 <= padded.length; index += 1) out.add(padded.slice(index, index + 3))
+  return out
+}
+
+export function jaccard(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 || b.size === 0) return 0
+  let intersection = 0
+  for (const item of a) if (b.has(item)) intersection += 1
+  return intersection / (a.size + b.size - intersection)
+}
+
+export interface SkillCandidate {
+  name: string
+  when: string
+  /** 1 when the normalized `when` is identical, else Jaccard of 3-grams. */
+  similarity: number
+  exact: boolean
+}
+
+function readWhen(path: string): string {
+  try {
+    return readFileSync(path, 'utf8').match(/^when:\s*(.+)$/mu)?.[1] ?? ''
+  } catch {
+    return ''
+  }
+}
+
+/** The closest existing skill, or undefined when nothing is remotely similar. */
+export function findSkillCandidate(skillsDir: string, when: string, threshold = 0.85): SkillCandidate | undefined {
+  const target = normalizeForMatch(when)
+  const grams = trigrams(when)
+  let best: SkillCandidate | undefined
+  let names: string[] = []
+  try {
+    names = readdirSync(skillsDir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+  } catch {
+    return undefined
+  }
+  for (const name of names) {
+    const existingWhen = readWhen(join(skillsDir, name, 'SKILL.md'))
+    if (existingWhen.length === 0) continue
+    if (normalizeForMatch(existingWhen) === target) return { name, when: existingWhen, similarity: 1, exact: true }
+    const score = jaccard(grams, trigrams(existingWhen))
+    if (score >= threshold && (best === undefined || score > best.similarity)) {
+      best = { name, when: existingWhen, similarity: score, exact: false }
+    }
+  }
+  return best
+}
+
+export interface NegativeRecord {
+  symptom: string
+  cause: string
+  avoid: string
+  evidence: number[]
+  conflictsWith?: number[]
+}
+
+export interface NegativePlan {
+  /** Indexes of existing negatives that share the symptom but differ in cause. */
+  conflicts: number[]
+  /** Whether an identical (symptom + cause) entry already exists. */
+  duplicate: boolean
+}
+
+/** Gate ②+④ for negative paths: exact duplicate vs. same-symptom-different-cause. */
+export function planNegative(existing: readonly NegativeRecord[], candidate: NegativeRecord): NegativePlan {
+  const symptom = normalizeForMatch(candidate.symptom)
+  const cause = normalizeForMatch(candidate.cause)
+  const conflicts: number[] = []
+  let duplicate = false
+  existing.forEach((record, index) => {
+    const sameSymptom = normalizeForMatch(record.symptom) === symptom
+    if (!sameSymptom) return
+    if (normalizeForMatch(record.cause) === cause) duplicate = true
+    else conflicts.push(index)
+  })
+  return { conflicts, duplicate }
+}
