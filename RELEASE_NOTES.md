@@ -1,3 +1,58 @@
+# dsh-memory v0.15.0 — 双时态记忆、取代裁决、来源分级（跨仓库统一版本号）
+
+**发布日期**：2026-11-03　**状态**：预发布（v0.8.x → v0.15.0）　**测试**：138/138（+11）
+
+> 版本号说明：本次把 `dsh-graft-slice` 与 `dsh-memory` 统一到 **v0.15.0**（`package.json` / `manifest.json` /
+> README 三处对齐），与「七道防线」同批发布。graft 侧记 `v0.14.0/v0.15.0`，memory 侧记 `v0.15.0`。
+
+---
+
+## 为什么做
+
+v0.8.x 解决了「哪条记忆能进这个会话」（工作区隔离 + 注入前防污染），但答不出三个更基本的问题：
+
+1. **它什么时候不再为真？** 旧做法只有「删除」和「保留」两种。删掉就毁掉审计线索，保留就会拿一条
+   已经过期的规则去指导今天的动作（真机样本：一条“立刻删除某脚本”的指令沿 5 代迁移全部留存）。
+2. **新规则是替代还是备选？** `conflicts_with` 只说“两者互斥，请问用户”；当用户其实已经拍板时，
+   并列提示变成每次都要重新问一遍。
+3. **这话是谁说的？** 用户原话、跑通过的工具结论、模型自己的归纳，此前在提示里长得一模一样。
+
+## 1. 双时态有效性
+
+- `SKILL.md` frontmatter 与 `negatives.jsonl` 记录新增 `valid_at` / `invalid_at` / `superseded_by`。
+- 检索新增**激活门**：`invalid_at` 为空或晚于当前时间才激活；被挡下的条数由 `debug.blockedByInvalid` 报告。
+- 旧记忆**不删除**。取代时 `invalid_at` = 继任者的 `valid_at`，互链，一对记录即一条时间线。
+- 合并（同名技能再写入）不会覆盖原有的 `valid_at` / `invalid_at`：改措辞不等于复活。
+
+## 2. 取代裁决（supersede）
+
+- `filter.ts` 的一次模型调用同时返回 `apply` 与 `supersede`；取代 id 与 apply 一样要过「候选列表白名单」，
+  幻觉 id 直接丢弃；两条候选的 `provenance` 由**候选表**带入判定，不信模型自述。
+- `store.applySupersede()` 执行落盘：旧记录 `invalid_at` + `superseded_by` + 正文「## ⚠️ 已被取代」，
+  新记录 `supersedes` + 正文「## 取代」。
+- 判定结果（含被拒绝的）追加到 `<memoryDir>/.memory-audit.jsonl`，带 query、双方 id、理由与来源标签。
+- **人工否决权**：`human` 来源的记忆不会被 `tool` / `inferred` 的推断失效 → `refused:human-loser-protected`。
+- 检索保持只读：判定在 `retrieve.ts` 产生，写入通过 `onSupersede` 回调交给调用方（pre-step 注入路径）；
+  手动 `memory_search` 预览**不落盘**，只报告“它会怎么做”。
+
+## 3. 来源可信度分级（provenance）
+
+- `deriveProvenance(evidence, events)`：引用里有真人 `user/message` → `human`；否则有成功 `tool/result` → `tool`；
+  否则 `inferred`。**不由抽取模型自报**。
+- 提示渲染：非 `human` 的技能追加 `[来源：工具推断，请核实]`，且该标记不会被长度上限裁掉。
+- 冲突消解：`preferHumanInConflict()` 让 `human` 一方占据主位；**没有冲突声明时不重排**（相关性的归相关性）。
+
+## 验证
+
+138/138（新增 11 条，`test/v015-bitemporal.test.mjs`）：窗口激活/失效、`invalid_at` 在未来仍有效、
+负知识同窗口、取代互链与审计、重复取代幂等、人工否决权（含反向允许）、裁决解析与幻觉 id 丢弃、
+pre-step 落盘 vs 预览只读、provenance 推导（含“用户优先于成功运行”）、提示标记与长度上限、
+冲突中 human 占主位而普通检索不重排。
+
+---
+
+# 以下为 v0.7.1 内容
+
 # dsh-memory v0.7.1 — 深水区：场景分类、使用效果闭环、版本冲突、证据迁移
 
 **发布日期**：2026-11-03　**状态**：预发布（v0.6.0 → v0.7.1）　**测试**：107/107（+11）

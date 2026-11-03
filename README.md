@@ -56,6 +56,68 @@ dsh --profile <name> --dump-config      # 应出现 dsh-memory 行
 | `semanticFilter` | 是否启用 LLM 精准裁决（默认 `true`；关掉则退化为严格词法检索） |
 | `filterProvider` / `filterModel` | 过滤调用使用的模型路由；默认取宿主当前默认选择（`agentDefaultModel.currentSelection()`） |
 
+## 已验证能力（v0.15.0 实战验收，2026-11-03）
+
+在**真实记忆库**（`~/.agents/skills` + profile 的 `data/dsh-memory`）上跑的一次完整剧本，用的是插件加载的同一份
+`lib/` 代码：
+
+| 步骤 | 观察到的结果 |
+|---|---|
+| 埋设种子 | 写入 `acceptance-pytest-x`（`provenance: tool`）与 `acceptance-pytest-v`（同场景、`pytest -v`） |
+| 制造冲突 | 两条技能同时被召回，提示里带上 `[来源：工具推断，请核实]`（**来源标记实测生效**） |
+| 取代裁决 | `applySupersede` 后：旧技能写入 `invalid_at` + `superseded_by` + 正文「## ⚠️ 已被取代」，新技能写入 `supersedes`，**互链成立**；`.memory-audit.jsonl` 记下 winner/loser/reason/query |
+| 取代后检索 | 只召回 `acceptance-pytest-x`；`blockedInvalid` 从 1 → 2（被取代的那条不再激活） |
+| 时间失效 | 一条 `invalid_at = 2026-10-02`（已过期）的 `human` 规则在**每一次检索里都没有出现** |
+| 人工否决权 | 用 `tool` 来源技能去取代那条 `human` 规则 → `applied=false / refused:human-loser-protected`，旧记录**零改动**，审计写 `supersede-refused` |
+
+复现脚本：`_scratch/acceptance-v015.mjs`（读真实库、调真实函数、打印前后对比与审计尾行）。
+
+## 双时态记忆、取代裁决与来源分级（v0.15.0）
+
+三条机制回答三个此前无法回答的问题：**这条记忆什么时候为真、什么时候不再为真**；**新规则是替代还是备选**；
+**这话是谁说的**。
+
+### 1. 双时态有效性（`valid_at` / `invalid_at` / `superseded_by`）
+
+每条记忆（`SKILL.md` frontmatter 与 `negatives.jsonl` 记录）都带一个有效性窗口：
+
+```yaml
+valid_at: 2026-11-03T12:00:00.000Z     # 从这一刻起为真（默认=写入时刻）
+invalid_at: 2026-11-04T09:30:00.000Z   # 从这一刻起不再为真（被取代时写入）
+superseded_by: pytest-fast             # 谁取代了它
+```
+
+检索的激活门只有一条：`invalid_at` 为空、或晚于当前时间的记忆才会被激活（`blockedByInvalid` 报告被挡掉几条）。
+**旧记忆不删除**——删掉就同时毁掉了审计线索和“当时我们相信什么”这个问题的答案。取代发生时，
+`invalid_at` 被写成继任者的 `valid_at`，两边互链，于是一对记录本身就是一条时间线。
+
+### 2. 取代裁决（supersede）
+
+`retrieve.ts` 的 LLM 裁决阶段除了 `apply`，还会回答一个**更窄**的问题：这些候选里，是否有一条因为另一条
+而**过时**？只有「同一件事 + 同一技术 + 照旧做就错了」才返回取代判定；仍是备选关系的，保持 `conflicts_with`
+并列提示——**错判的取代会销毁知识，错判的冲突只是多问一句**。
+
+- 写入由 `store.applySupersede()` 执行：旧记录打 `invalid_at` + `superseded_by` + 正文「## ⚠️ 已被取代」，
+  新记录打 `supersedes` + 正文「## 取代」（互链）。
+- 每一次判定（包括**被拒绝**的判定）都追加到 `<memoryDir>/.memory-audit.jsonl`；被拒绝的那半更有信息量：
+  它意味着某道护栏响了。
+- **人工否决权**：`inferred` / `tool` 来源的推断**不得**让 `human` 来源的记忆失效（`refused:human-loser-protected`）。
+  这条规则同时写在提示词和代码里——提示词是请求，代码是拒绝。
+
+### 3. 来源可信度分级（provenance）
+
+`human` / `tool` / `inferred` 由**证据**推导，不由抽取模型自述：
+
+| 级别 | 判据 | 提示中的表现 |
+|---|---|---|
+| `human` | 引用的 seq 里有真人写的 `user/message` | 不加标记（用户自己说的话不需要免责声明） |
+| `tool` | 引用里有成功的 `tool/result`（跑过且成立） | 追加 `[来源：工具推断，请核实]` |
+| `inferred` | 两者都没有（模型从叙述里归纳） | 追加 `[来源：工具推断，请核实]` |
+
+优先级：一句“总是用 pytest -x”即便随后被成功执行，也仍是 `human`——规则的权威在人，不在那次成功的运行。
+冲突消解时 `human` 一方占据主位（`preferHumanInConflict`）；**没有声明冲突时不做任何重排**，
+否则一条无关的人类记忆会压过一条相关的推断记忆，正好适得其反。
+
 ## 四层认知模型（v0.2.0）
 
 一次抽取不再直接产出“一句技能”，而是强制分成四层，并各自落盘：
@@ -236,7 +298,10 @@ CLI 直接用**本仓库自带的 zstd 读取器**读会话文件（DSH 的 v4 �
 - ✅ v0.2.0：四层认知模型（fact / experience / negative / skill）+ 结构化 SKILL.md（`when_to_use` / 执行步骤 / 验证标准）+ 两阶段检索（LLM 相关性过滤）
 - ✅ v0.3.x：冲突互链（`conflicts_with` + 双向警告）、产物优先抽取、互链重建
 - ✅ v0.4.0：两阶段检索改为低阈值召回（0.20）+ LLM 精准裁决（fail-closed）
-- ✅ v0.5.0：scope / aliases / 反向证据降权 / 冲突按新旧排序 / 14 天衰减 / 裁决缓存 / 乐观写入`n- ✅ v0.6.0：scene 场景路由 / 复合证据 sid@seq / 强反查（拒绝纯叙述）/ Fact·Experience 接入检索
+- ✅ v0.5.0：scope / aliases / 反向证据降权 / 冲突按新旧排序 / 14 天衰减 / 裁决缓存 / 乐观写入
+- ✅ v0.6.0：scene 场景路由 / 复合证据 sid@seq / 强反查（拒绝纯叙述）/ Fact·Experience 接入检索
+- ✅ v0.8.x：工作区物理隔离（写入记 `workspace`，读取端池级门禁，fail closed）+ 注入前 `scanThreat` 防污染
+- ✅ v0.15.0：**双时态有效性**（`valid_at` / `invalid_at` / `superseded_by`）+ **取代裁决**（LLM 判定 + 互链 + 审计）+ **来源分级**（human / tool / inferred）
 - ⏳ M4：飞轮计分（提示后成功加权、误命中降权）
 
 ## 测试

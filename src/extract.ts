@@ -61,6 +61,21 @@ export interface ExtractedExperience {
 
 export type MemoryScope = 'workspace' | 'project' | 'global'
 
+/**
+ * v0.15: how much this memory should be trusted, derived from its EVIDENCE — never
+ * from the extraction model's self-report.
+ *
+ *   human    — the procedure was stated by the user in their own words (a
+ *              `user/message` authored by a human is among the cited evidence);
+ *   tool     — it is grounded in a successful tool result: the agent ran something
+ *              and it worked;
+ *   inferred — neither: the model concluded it from assistant narration.
+ *
+ * The distinction is what the hint renders ("工具推断，请核实") and what conflict
+ * resolution protects: an inference must never invalidate what a human said.
+ */
+export type MemoryProvenance = 'human' | 'tool' | 'inferred'
+
 export interface ExtractedSkill {
   /** ASCII kebab-case, because that is what a SKILL.md name must be. */
   name: string
@@ -85,6 +100,22 @@ export interface ExtractedSkill {
   /** v0.7.1: outcome-loop weight. 1.0 = untested, lowered by failed use, raised
    *  by confirmed use. Optional so a v0.5/v0.6 SKILL.md stays readable. */
   confidence?: number
+  /** v0.15: trust tier. Absent on a legacy record = `inferred`. */
+  provenance?: MemoryProvenance
+  /**
+   * v0.15 bi-temporal validity.
+   *
+   * `validAt` is when the memory became true (its write time); `invalidAt` is when
+   * it STOPPED being true. A superseded memory is not deleted — deleting it would
+   * destroy the audit trail and the ability to answer "what did we believe then".
+   * Instead `invalidAt` is stamped with the successor's `validAt` and
+   * `supersededBy` names the successor, so the pair reads as a timeline.
+   */
+  validAt?: string
+  invalidAt?: string
+  supersededBy?: string
+  /** v0.15: the names this skill replaced (the other half of the mutual link). */
+  supersedes?: string[]
   evidence: EvidenceRef[]
 }
 
@@ -96,6 +127,11 @@ export interface ExtractedNegative {
   scope: MemoryScope
   /** v0.6: scene gate. */
   scene: MemoryScene
+  /** v0.15: same bi-temporal + trust fields as skills. */
+  provenance?: MemoryProvenance
+  validAt?: string
+  invalidAt?: string
+  supersededBy?: string
   evidence: EvidenceRef[]
 }
 
@@ -166,6 +202,12 @@ function asScope(value: unknown): MemoryScope {
 }
 
 const SCENE = /^[a-z][a-z0-9-]{1,23}$/
+
+/** v0.15: the model may propose a trust tier; the runner derives the final one. */
+export function asProvenance(value: unknown): MemoryProvenance | undefined {
+  const text = typeof value === 'string' ? value.trim().toLowerCase() : ''
+  return text === 'human' || text === 'tool' || text === 'inferred' ? (text as MemoryProvenance) : undefined
+}
 
 /** v0.6: scene must be a simple latin tag; anything else degrades to `general`. */
 export function asScene(value: unknown): MemoryScene {
@@ -321,6 +363,9 @@ export function sanitizeExtraction(raw: unknown, episode: Episode): ExtractionRe
       scope: asScope(item.scope),
       scene: asScene(item.scene),
       aliases: asTextList(item.aliases ?? item.alias, 3),
+      // v0.15: a HINT from the model, overridden by the runner's evidence-derived
+      // tier. The model is not the authority on how much its own output is trusted.
+      ...(asProvenance(item.provenance) === undefined ? {} : { provenance: asProvenance(item.provenance) }),
       evidence,
     })
   }
@@ -348,6 +393,7 @@ export function sanitizeExtraction(raw: unknown, episode: Episode): ExtractionRe
       avoid: avoid.slice(0, 200),
       scope: asScope(item.scope),
       scene: asScene(item.scene),
+      ...(asProvenance(item.provenance) === undefined ? {} : { provenance: asProvenance(item.provenance) }),
       evidence,
     })
   }

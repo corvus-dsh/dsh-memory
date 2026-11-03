@@ -37,3 +37,7 @@
         #
         # Turn it off only to inspect the unfiltered store in a diagnostic run.
         workspaceIsolation: true
+        # v0.15 双时态：检索只激活 invalid_at 为空或晚于当前时间的记忆；取代由
+        # retrieve 的 LLM 裁决阶段判定，落盘走 store.applySupersede（含人工否决权与
+        # <memoryDir>/.memory-audit.jsonl 审计）。无需配置开关——失效即不再召回。
+        # 注入提示中，非 human 来源会带 [来源：工具推断，请核实]。

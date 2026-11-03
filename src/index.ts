@@ -21,6 +21,39 @@ import type { EvidenceRef, ExtractionResult } from './extract.js'
 import { findSkillCandidate } from './dedupe.js'
 import { retrieve, renderHint, retrieveWithFilter, collectScenes } from './retrieve.js'
 import { currentWorkspaceOf, workspaceOfSession } from './workspace.js'
+import { applySupersede } from './store.js'
+import type { EvidenceRef, MemoryProvenance } from './extract.js'
+
+/**
+ * v0.15: derive the trust tier from the EVIDENCE, never from the model's opinion
+ * of itself.
+ *
+ *   human    — one of the cited seqs is a `user/message` a human wrote: the
+ *              procedure is the user's own statement;
+ *   tool     — a cited seq is a `tool/result`: the agent ran it and it worked;
+ *   inferred — neither: the model concluded it from narration.
+ *
+ * The order matters: a session where the user said "always run pytest -x" and the
+ * agent then ran it is `human`, because the authority for the rule is the person,
+ * not the successful run.
+ */
+export function deriveProvenance(evidence: readonly EvidenceRef[], events: readonly unknown[]): MemoryProvenance {
+  if (evidence.length === 0) return 'inferred'
+  const bySeq = new Map<number, { type: string; kind: string }>()
+  for (const raw of events) {
+    const event = raw as { seq?: number; type?: string; data?: any }
+    if (typeof event?.seq !== 'number' || typeof event.type !== 'string') continue
+    bySeq.set(event.seq, { type: event.type, kind: String(event.data?.source?.kind ?? '') })
+  }
+  let sawTool = false
+  for (const ref of evidence) {
+    const found = bySeq.get(Number(ref.seq))
+    if (found === undefined) continue
+    if (found.type === 'user/message' && found.kind === 'user') return 'human'
+    if (found.type === 'tool/result') sawTool = true
+  }
+  return sawTool ? 'tool' : 'inferred'
+}
 import { approveSuggestion, listSuggestions, queueSuggestion, rejectSuggestion } from './suggest.js'
 import {
   appendExperiences,
@@ -411,7 +444,11 @@ export async function harvest(ctx: ContextLike, config: MemoryConfig): Promise<H
         // v0.8: provenance for the isolation gate. Read from the session log
         // header, never from the extraction model, so a prompt cannot forge it.
         ...(workspaceOfSession(log).length === 0 ? {} : { workspace: workspaceOfSession(log) }),
+        // v0.15: one timestamp for everything this harvest writes, so a whole
+        // generation of memories shares one point on the timeline.
+        validAt: new Date().toISOString(),
       }
+      const harvestedEvents = ((log as any).events ?? []) as readonly unknown[]
       const written: Array<{ name: string; status: string }> = []
       let negatives = 0
       // v0.5 optimistic writes: the LLM call above can take a minute, and another
@@ -434,19 +471,34 @@ export async function harvest(ctx: ContextLike, config: MemoryConfig): Promise<H
             const conflicts = findConflicts(resolved.skillsDir, skill)
             const mergeInto = candidate !== undefined && !conflicts.some((conflict) => conflict.name === candidate.name)
             const target = mergeInto ? { ...skill, name: candidate!.name } : skill
+            // v0.15: the tier is per record, derived from THAT record's evidence.
+            const recordMeta = { ...meta, provenance: deriveProvenance(target.evidence, harvestedEvents) }
             if (mergeInto || resolved.autoApprove) {
-              written.push({ name: target.name, status: writeSkill(resolved.skillsDir, target, meta) })
+              written.push({ name: target.name, status: writeSkill(resolved.skillsDir, target, recordMeta) })
             } else {
-              queueSuggestion(resolved.memoryDir, 'skill', skill, meta)
+              queueSuggestion(resolved.memoryDir, 'skill', skill, recordMeta)
               queued += 1
               written.push({ name: skill.name, status: 'queued' })
             }
           }
           if (resolved.autoApprove) {
-            negatives = appendNegatives(resolved.memoryDir, extraction.negatives, meta)
+            // v0.15: negatives carry their own tier; the array shares one meta.
+            negatives = appendNegatives(
+              resolved.memoryDir,
+              extraction.negatives.map((negative) => ({
+                ...negative,
+                provenance: deriveProvenance(negative.evidence, harvestedEvents),
+              })),
+              meta,
+            )
           } else {
             for (const negative of extraction.negatives) {
-              queueSuggestion(resolved.memoryDir, 'negative', negative, meta)
+              queueSuggestion(
+                resolved.memoryDir,
+                'negative',
+                { ...negative, provenance: deriveProvenance(negative.evidence, harvestedEvents) },
+                meta,
+              )
               queued += 1
             }
           }
@@ -804,6 +856,16 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
           // way the store records it (session cwd), so a memory from another
           // repository never reaches the hint — even one that scores highest.
           ...(resolved.workspaceIsolation ? { workspace: currentWorkspaceOf(payload) } : {}),
+          // v0.15: the supersede verdict is PERSISTED here — this is the one path
+          // where a real turn is being served. `applySupersede` refuses a machine
+          // verdict against a human memory and appends the audit line; the manual
+          // `memory_search` preview stays read-only on purpose.
+          onSupersede: (decision) => {
+            const result = applySupersede(resolved.memoryDir, resolved.skillsDir, decision, { query: userText })
+            if (result.applied) {
+              ctx.logger?.info?.(`[dsh-memory] superseded ${decision.loser} by ${decision.winner}: ${decision.reason}`)
+            }
+          },
           ...(llm === undefined ? {} : { llm, ...resolveFilterTarget(ctx, resolved.filterProvider, resolved.filterModel) }),
         })
         const hint = renderHint(result)
