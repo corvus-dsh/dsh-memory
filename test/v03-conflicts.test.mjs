@@ -15,8 +15,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { findConflicts, isConflictingSkill, normalizeSkill, parseSkillFile, skillPath, writeSkill } from '../lib/store.js'
+import * as storeModule from '../lib/store.js'
 import { renderHint, retrieve } from '../lib/retrieve.js'
 import { selectApplicableSkills } from '../lib/filter.js'
+import { writeFileSync as atomicWriteForTest } from 'node:fs'
 
 const MYSQL = {
   name: 'mysql-query-pymysql',
@@ -187,6 +189,45 @@ test('conflict: harvest does NOT merge two methods that share one trigger', asyn
   const sqliteText = readFileSync(skillPath(skills, SQLITE.name), 'utf8')
   assert.match(mysqlText, new RegExp(`^conflicts_with: ${SQLITE.name}$`, 'mu'))
   assert.match(sqliteText, new RegExp(`^conflicts_with: ${MYSQL.name}$`, 'mu'))
+})
+
+test('conflict: testing vocabulary alone is NOT a conflict (measured false positive)', () => {
+  const { isConflictingSkill: conflicts, normalizeSkill: norm } = storeModule
+  const threshold = norm({
+    name: 'threshold-fixture-sizing',
+    title: '阈值型判定的样本量设计',
+    description: '为时效/阈值判定编写真正跨过阈值并能在真实数据上验证的测试。',
+    when: '当被测逻辑含阈值常量（如 500 事件、N 条记录）用于触发某判定时。',
+    steps: ['定位阈值常量', '造阈值 + 1 的 fixture', '等阈值与超阈值各一个用例'],
+    verify: ['超阈值触发、等阈值不触发'],
+    evidence: [1],
+  })
+  const sqliteTests = norm({
+    name: 'sqlite-wrapper-round-testing',
+    title: '按功能分轮扩充 SQLite 封装测试',
+    description: '按功能分轮扩充测试，并用真实文件库关闭重开验证持久化。',
+    when: '当你要为自写的 SQLite 封装编写测试集时。',
+    steps: ['按功能分轮加用例', '每轮全量跑绿', '关闭重开库验证持久化'],
+    verify: ['每一轮全量测试通过'],
+    evidence: [2],
+  })
+  assert.equal(conflicts(threshold, sqliteTests), false, 'shared 测试/验证 words must not link unrelated subjects')
+})
+
+test('conflict: rebuilding links removes stale edges and keeps real ones', async () => {
+  const { rebuildConflictLinks } = storeModule
+  const skills = dir()
+  writeSkill(skills, MYSQL, { sessionId: 's-a', boundarySeq: 9 })
+  writeSkill(skills, SQLITE, { sessionId: 's-b', boundarySeq: 12 })
+  writeSkill(skills, { ...UNRELATED, description: '提交漂移排查。', when: '当 graft_commit 返回 SOURCE_DRIFT 时' }, { sessionId: 's-c', boundarySeq: 30 })
+  // Simulate an edge written by an older, looser rule.
+  const bogus = readFileSync(skillPath(skills, UNRELATED.name), 'utf8')
+  atomicWriteForTest(skillPath(skills, UNRELATED.name), bogus.replace(/^(name: .+)$/mu, `$1\nconflicts_with: ${MYSQL.name}`))
+
+  const pairs = rebuildConflictLinks(skills)
+  assert.deepEqual(pairs, [{ a: MYSQL.name, b: SQLITE.name }])
+  assert.doesNotMatch(readFileSync(skillPath(skills, UNRELATED.name), 'utf8'), /conflicts_with/u)
+  assert.match(readFileSync(skillPath(skills, MYSQL.name), 'utf8'), new RegExp(`conflicts_with: ${SQLITE.name}$`, 'mu'))
 })
 
 test('conflict: the LLM filter is told to keep both sides of a fork', async () => {

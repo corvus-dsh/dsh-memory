@@ -50,16 +50,25 @@ function textOf(message: unknown): string {
   return parts.join('\n').trim()
 }
 
-/** The last paragraph of an assistant message — its conclusion, not its reasoning. */
+/**
+ * The CLOSING BLOCK of an assistant message, not just its last paragraph.
+ *
+ * Measured on a real session: the final message carried the deliverable table
+ * ("sqlite_crud.py — 连接管理 / 事务 / 分页 …"), the design decisions and the
+ * lessons. Keeping only the last paragraph captured "no blockers" — the memory
+ * then learned how the agent *reported*, not what it *built*. Three paragraphs
+ * (bounded) keep the deliverable in view without turning the episode into a
+ * transcript.
+ */
 function conclusionOf(text: string): string {
   const paragraphs = text
     .split(/\n{2,}/u)
     .map((paragraph) => paragraph.replace(/\s+/gu, ' ').trim())
     .filter((paragraph) => paragraph.length >= 20 && !/^[-*]\s/u.test(paragraph))
-  const last = paragraphs.at(-1) ?? ''
-  if (last.length > 0) return last.slice(0, 400)
+  const tail = paragraphs.slice(-3).join('\n')
+  if (tail.length > 0) return tail.slice(0, 1200)
   const firstLine = text.split(/\r?\n/u).map((line) => line.trim()).find((line) => line.length > 0) ?? ''
-  return firstLine.slice(0, 400)
+  return firstLine.slice(0, 1200)
 }
 
 export function segmentSession(sessionId: string, log: { events?: unknown[] }): Episode {
@@ -109,7 +118,9 @@ export function segmentSession(sessionId: string, log: { events?: unknown[] }): 
     }
   }
 
-  const keptConclusions = conclusions.slice(-40)
+  // 20 × 1200 chars worst case: enough for the closing summaries, still a bounded
+// prompt (the extractor's budget is 4000 output tokens).
+  const keptConclusions = conclusions.slice(-20)
   const keptErrors = errors.slice(-10)
   const evidence = [...new Set([...keptConclusions.map((item) => item.seq), ...keptErrors.map((item) => item.seq ?? 0)])].filter(
     (seq) => seq > 0,
