@@ -17,10 +17,15 @@ import { join } from 'node:path'
 import { appendNegatives, writeSkill } from '../lib/store.js'
 import { retrieve, retrieveCandidates, retrieveWithFilter, renderHint } from '../lib/retrieve.js'
 import { FILTER_SYSTEM_PROMPT, clearFilterCache, selectApplicableSkills } from '../lib/filter.js'
+import { clearSceneCache } from '../lib/retrieve.js'
 
 // v0.5: the verdict cache is process-wide; a test must not inherit another
 // test's adjudication for the same (query, candidates) pair.
-beforeEach(() => clearFilterCache())
+beforeEach(() => {
+  clearFilterCache()
+  // v0.7.1: the scene verdict is cached too; a test must not inherit another's.
+  clearSceneCache()
+})
 
 const RELEVANT = {
   name: 'boundary-seq-fix',
@@ -143,14 +148,16 @@ test('retrieveWithFilter: the lexical false friend is dropped by the model', asy
   assert.equal(result.skill?.id, 'boundary-seq-fix')
   assert.equal(result.alternatives, undefined, 'the noise skill must not ride along')
   assert.doesNotMatch(renderHint(result) ?? '', /divergent-rebuild-probe|逐段比对/u)
-  assert.equal(llm.counter.calls, 1, 'exactly one filter call')
+  assert.equal(llm.counter.calls, 2, 'scene classification + exactly one filter call')
 })
 
 test('retrieveWithFilter: even one weak candidate is adjudicated at the low floor', async () => {
   const { skills, memory } = store()
   const llm = fakeLlm('{"apply":[]}')
   const result = await retrieveWithFilter(memory, skills, 'SOURCE_DRIFT 边界 seq 校验失败', { llm })
-  assert.equal(llm.counter.calls, 1, 'the net is wide: nothing is injected without a verdict')
+  // v0.7.1: two calls — one scene classification for this (new) query, then the
+  // adjudication. Both are model calls, and the verdict is still fail-closed.
+  assert.equal(llm.counter.calls, 2, 'scene classification + adjudication, no raw injection')
   assert.equal(result.skill, undefined, 'a rejected candidate is not injected')
   assert.equal(result.filter?.applied, true)
   assert.equal(renderHint(result), undefined)

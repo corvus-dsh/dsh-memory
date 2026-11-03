@@ -103,12 +103,17 @@ test('store: facts and experiences land as seq-addressable JSONL', () => {
   // Same text again from the same session merges evidence instead of duplicating.
   assert.equal(appendFacts(dir, [{ text: '测试用例传了 100 条数据，而阈值也是 100', seq: 7 }], meta), 0)
   const fact = JSON.parse(readFileSync(join(dir, 'facts.jsonl'), 'utf8').trim())
-  assert.deepEqual(fact.evidence, [5, 7])
+  // v0.7.1: evidence is a composite pointer everywhere, so a fact stays
+  // resolvable after a generation hop (graft_read_result needs the session).
+  assert.deepEqual(fact.evidence, [
+    { sourceSessionId: 's1', seq: 5 },
+    { sourceSessionId: 's1', seq: 7 },
+  ])
   assert.equal(fact.sourceSessionId, 's1')
   assert.equal(fact.boundarySeq, 9)
   assert.equal(fact.hits, 2)
   const experience = JSON.parse(readFileSync(join(dir, 'experiences.jsonl'), 'utf8').trim())
-  assert.equal(experience.evidence[0], 5)
+  assert.deepEqual(experience.evidence[0], { sourceSessionId: 's1', seq: 5 })
 })
 
 test('store: negatives append as JSONL and threats are dropped', () => {

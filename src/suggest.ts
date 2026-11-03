@@ -12,12 +12,19 @@ import { join } from 'node:path'
 
 import type { ExtractedNegative, ExtractedSkill } from './extract.js'
 import { appendNegatives, atomicWrite, writeSkill } from './store.js'
+import type { SkillMeta } from './store.js'
 
 export interface Suggestion {
   id: string
   kind: 'skill' | 'negative'
   payload: ExtractedSkill | ExtractedNegative
-  meta: { sessionId: string; boundarySeq: number }
+  /**
+   * v0.8: the FULL write meta, including `workspace`. A suggestion is written
+   * later, by hand; if the workspace did not ride along in the queue, approving a
+   * reviewed skill would produce an unscoped memory that the isolation gate then
+   * refuses forever — reviewed and unusable at the same time.
+   */
+  meta: SkillMeta
   at: string
 }
 

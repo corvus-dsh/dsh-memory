@@ -82,6 +82,9 @@ export interface ExtractedSkill {
   aliases: string[]
   /** v0.7: operational (a tool did something) vs observational (a tool read). */
   evidenceKind?: 'operational' | 'observational'
+  /** v0.7.1: outcome-loop weight. 1.0 = untested, lowered by failed use, raised
+   *  by confirmed use. Optional so a v0.5/v0.6 SKILL.md stays readable. */
+  confidence?: number
   evidence: EvidenceRef[]
 }
 
@@ -115,7 +118,7 @@ export const EXTRACT_SYSTEM_PROMPT = [
   '',
   'HARD RULES:',
   '1. Never invent evidence. Every entry cites seqs listed in the episode; an entry with an unlisted seq is discarded. The runner re-opens the cited seq in the real session log and drops any skill whose evidence does not show the operation actually succeeding.',
-  '1b. Every entry (fact, experience, negative, skill) carries a `scene`: a short latin tag naming the domain, e.g. database, ui, plugin-dev, testing, session-ops, docs. Retrieval only activates memories of the query\'s scene, so a mislabelled scene hides the memory.',
+  '1b. Every entry (fact, experience, negative, skill) carries a `scene`: a short latin tag naming the domain, e.g. database, ui, plugin-dev, testing, session-ops, docs. The tag vocabulary is NOT a fixed list: reuse an existing tag when the memory clearly belongs to it, otherwise invent a short latin tag for the domain. Retrieval classifies the query into the same vocabulary, so a mislabelled scene hides the memory.',
   '2. A skill is a PROCEDURE, not a slogan. It needs at least 2 execution steps and at least 1 verification criterion. "样本必须超过阈值" alone is a REFUSAL, not a skill.',
   '2b. If the session BUILT a reusable artifact (a client, ORM, wrapper, migration, protocol), one of the two skills MUST be that artifact\'s core technique: driver/setup, connection and transaction shape, and the pitfall that shaped it. Process lessons may take the other slot. Do not reduce such a session to process lessons ("test in rounds") when the method itself is the reusable asset.',
   '3. A skill must state WHEN it applies, concretely enough that a fresh session can decide yes or no.',
@@ -405,6 +408,9 @@ export interface ExtractOptions {
    * summarised 240-char conclusion is not proof that the code ran.
    */
   verify?: (refs: readonly EvidenceRef[]) => { ok: boolean; observation?: boolean; reason?: string }
+  /** v0.7.1: scene tags already in the store, so the model reuses a domain name
+   *  instead of inventing a synonym for "database" on every harvest. */
+  scenes?: readonly string[]
 }
 
 /** One extraction call. Returns an empty result (with a reason) rather than throwing. */
@@ -433,6 +439,10 @@ export async function extractEpisode(
     return { facts: [], experiences: [], skills: [], negatives: [], dropped: ['llm service unavailable'], rawChars: 0, ok: false }
   }
   const input = renderEpisode(episode)
+  const sceneHint =
+    options.scenes === undefined || options.scenes.length === 0
+      ? ''
+      : `\n\nEXISTING SCENE TAGS in this memory store: ${options.scenes.slice(0, 12).join(', ')}. Reuse one of these when it fits; do not invent a second name for the same domain.`
   const timeoutMs = options.timeoutMs ?? 60_000
   let lastError = 'extraction failed'
   let lastRaw = ''
@@ -443,8 +453,8 @@ export async function extractEpisode(
         ...(options.model === undefined ? {} : { model: options.model }),
         system:
           attempt === 0
-            ? EXTRACT_SYSTEM_PROMPT
-            : `${EXTRACT_SYSTEM_PROMPT}\n\n上一次回复里没有 JSON 对象。只输出一个 JSON 对象本身：不要解释、不要代码围栏、不要前后缀。`,
+            ? `${EXTRACT_SYSTEM_PROMPT}${sceneHint}`
+            : `${EXTRACT_SYSTEM_PROMPT}${sceneHint}\n\n上一次回复里没有 JSON 对象。只输出一个 JSON 对象本身：不要解释、不要代码围栏、不要前后缀。`,
         messages: [{ role: 'user', content: [{ type: 'text', text: input }] }],
         maxTokens: 4000,
         ...(typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'

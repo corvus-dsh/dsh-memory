@@ -24,3 +24,16 @@
         semanticFilter: true
         # Strict bar, used only when semanticFilter is false (pure offline mode).
         retrievalThreshold: 0.55
+        # v0.8 WORKSPACE ISOLATION (on by default — do not turn off).
+        #
+        #   write side: every memory records the cwd of the session that produced
+        #     it — a `workspace:` field in SKILL.md frontmatter, and a `workspace`
+        #     field in negatives/facts/experiences. The value is read from the
+        #     session log header, never from the extraction model.
+        #   read side: a memory is eligible only when `scope: global`, or its
+        #     recorded workspace equals the asking turn's cwd. Foreign workspaces
+        #     AND unscoped legacy records are refused: fail closed, because the cost
+        #     of a wrong recall is a wrong ACTION.
+        #
+        # Turn it off only to inspect the unfiltered store in a diagnostic run.
+        workspaceIsolation: true

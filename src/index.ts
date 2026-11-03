@@ -19,15 +19,18 @@ import { resolveModelTarget, segmentSession } from './segment.js'
 import { extractEpisode } from './extract.js'
 import type { EvidenceRef, ExtractionResult } from './extract.js'
 import { findSkillCandidate } from './dedupe.js'
-import { retrieve, renderHint, retrieveWithFilter } from './retrieve.js'
+import { retrieve, renderHint, retrieveWithFilter, collectScenes } from './retrieve.js'
+import { currentWorkspaceOf, workspaceOfSession } from './workspace.js'
 import { approveSuggestion, listSuggestions, queueSuggestion, rejectSuggestion } from './suggest.js'
 import {
   appendExperiences,
   appendFacts,
   appendNegatives,
+  applySkillFeedback,
   defaultSkillsDir,
   findConflicts,
   markProcessed,
+  migrateBareEvidence,
   processedKey,
   readProcessed,
   recordCounterEvidence,
@@ -98,6 +101,17 @@ export interface MemoryConfig {
   /** Optional explicit route for the filter call; default is the host's current default selection. */
   filterProvider?: string
   filterModel?: string
+  /**
+   * v0.8 workspace isolation. Default TRUE and should stay true.
+   *
+   * Every memory written from a session records that session's cwd, and a
+   * retrieval only sees memories whose recorded workspace equals the current one
+   * (or that declare `scope: global`). Switching it off restores the old global
+   * pool — which is how a constraint from one project ("delete D:\X\repair-log.cjs")
+   * ended up injected into another. It exists as a switch only so a store can be
+   * inspected in its unfiltered state; it is not a tuning knob.
+   */
+  workspaceIsolation?: boolean
 }
 
 interface ContextLike {
@@ -157,6 +171,7 @@ function resolveConfig(ctx: ContextLike, config: MemoryConfig) {
     semanticFilter: config.semanticFilter !== false,
     filterProvider: typeof config.filterProvider === 'string' && config.filterProvider.length > 0 ? config.filterProvider : undefined,
     filterModel: typeof config.filterModel === 'string' && config.filterModel.length > 0 ? config.filterModel : undefined,
+    workspaceIsolation: config.workspaceIsolation !== false,
   }
 }
 
@@ -363,6 +378,9 @@ export async function harvest(ctx: ContextLike, config: MemoryConfig): Promise<H
         const target = resolveModelTarget(log as { session?: unknown; events?: unknown[] })
         const result = await extractEpisode(llm, episode, {
           ...target,
+          // v0.7.1: reuse the domains already in the store instead of minting a
+          // synonym for the same scene on every harvest.
+          scenes: collectScenes(resolved.memoryDir, resolved.skillsDir),
           // v0.6: no skill survives without a real, successful tool result behind
           // its evidence. `log` is the actual session, not the 240-char digest.
           verify: buildEvidenceVerifier(((log as any).events ?? []) as any[]),
@@ -387,7 +405,13 @@ export async function harvest(ctx: ContextLike, config: MemoryConfig): Promise<H
         }
         extraction = result
       }
-      const meta = { sessionId, boundarySeq: episode.boundarySeq }
+      const meta = {
+        sessionId,
+        boundarySeq: episode.boundarySeq,
+        // v0.8: provenance for the isolation gate. Read from the session log
+        // header, never from the extraction model, so a prompt cannot forge it.
+        ...(workspaceOfSession(log).length === 0 ? {} : { workspace: workspaceOfSession(log) }),
+      }
       const written: Array<{ name: string; status: string }> = []
       let negatives = 0
       // v0.5 optimistic writes: the LLM call above can take a minute, and another
@@ -592,6 +616,29 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
   })
 
   ctx.tools?.register({
+    name: 'memory_migrate_evidence',
+    description:
+      'One-shot legacy repair: attach a sourceSessionId to every bare-seq evidence pointer in SKILL.md, negatives.jsonl, facts.jsonl and experiences.jsonl. ' +
+      'When sessionId is omitted, the newest session in the handoff ledger is used. Explicit and auditable; never runs on activation.',
+    parameters: { type: 'object', properties: { sessionId: { type: 'string' } }, additionalProperties: false },
+    output: textOutput(),
+    execute: async (args: { sessionId?: string } = {}) => {
+      let sessionId = String(args.sessionId ?? '').trim()
+      if (sessionId.length === 0) {
+        const ledgers = readLedgers(resolved.graftDataDir)
+        const stamped = Object.values(ledgers.transferred)
+          .map((record) => ({ id: record.newSessionId, at: Number(record.at ?? 0) }))
+          .sort((left, right) => right.at - left.at)
+        sessionId = stamped[0]?.id ?? ledgers.retired.at(-1) ?? ''
+      }
+      if (sessionId.length === 0) {
+        return { error: 'no sessionId given and the handoff ledger is empty; pass sessionId explicitly' }
+      }
+      return migrateBareEvidence(resolved.memoryDir, resolved.skillsDir, sessionId)
+    },
+  })
+
+  ctx.tools?.register({
     name: 'memory_search',
     description:
       'Two-stage retrieval preview: lexical recall at a LOW floor (0.20), then one LLM adjudication that keeps only semantically applicable skills. ' +
@@ -602,14 +649,26 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
         query: { type: 'string' },
         threshold: { type: 'number' },
         semantic: { type: 'boolean' },
+        workspace: {
+          type: 'string',
+          description:
+            'Workspace to search as. Defaults to the current working directory; memories recorded in another workspace are excluded unless they declare scope: global.',
+        },
       },
       required: ['query'],
       additionalProperties: false,
     },
     output: textOutput(),
-    execute: async (args: { query: string; threshold?: number; semantic?: boolean }) => {
+    execute: async (args: { query: string; threshold?: number; semantic?: boolean; workspace?: string }) => {
       const query = String(args.query ?? '')
       const explicitThreshold = Number.isFinite(Number(args.threshold)) ? Number(args.threshold) : undefined
+      // v0.8: a manual search is still a read of memory, so it obeys the same
+      // gate. The caller may name the workspace explicitly; the default is where
+      // this plugin process runs, and an unscoped legacy memory stays invisible
+      // either way.
+      const gate = resolved.workspaceIsolation
+        ? { workspace: currentWorkspaceOf(undefined, typeof args.workspace === 'string' ? args.workspace : undefined) }
+        : {}
       // Default is the two-stage pipeline; `semantic:false` is the offline escape hatch.
       const wantSemantic = args.semantic !== false && llmAvailable && resolved.semanticFilter
       const llm = (() => {
@@ -623,15 +682,18 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
       const result = wantSemantic
         ? await retrieveWithFilter(resolved.memoryDir, resolved.skillsDir, query, {
             floor: explicitThreshold ?? resolved.floor,
+            ...gate,
             llm,
             ...resolveFilterTarget(ctx, resolved.filterProvider, resolved.filterModel),
           })
         : retrieve(resolved.memoryDir, resolved.skillsDir, query, {
             threshold: explicitThreshold ?? resolved.threshold,
+            ...gate,
           })
       const hint = renderHint(result)
       // `hint: undefined` is not lossless JSON: the ToolService validates the raw
       // value, not its stringified form, and rejects the whole call.
+      if (result.skill !== undefined) touchSkillUsage(resolved.skillsDir, result.skill.id)
       return { ...result, ...(hint === undefined ? {} : { hint }) }
     },
   })
@@ -652,6 +714,11 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
   // stored prohibition can be falsified by reality; turn-stopping is the host's
   // quiet boundary, so the sweep never competes with an in-flight step.
   // -------------------------------------------------------------------------
+  /**
+   * v0.7.1: skills whose hint was injected in the current turn, awaiting the
+   * outcome signal from turn-stopping. One turn, then discarded.
+   */
+  const pendingFeedback = new Map<string, { names: string[]; at: number }>()
   const counterSweptTo = new Map<string, number>()
   ctx.on?.('agent/turn-stopping', async (payload: any) => {
     try {
@@ -673,6 +740,24 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
       counterSweptTo.set(agentId, Number(events.at(-1)?.seq ?? from))
       if (result.updated.length > 0) {
         ctx.logger?.info?.(`[dsh-memory] counter-evidence recorded for ${result.updated.length} negative(s)`)
+      }
+      // v0.7.1 use-effect loop: a turn that finished cleanly confirms the skill
+      // it used; a turn that hit a failed tool result weakens it (confidence -0.1).
+      // This is the only path that can raise confidence automatically.
+      const pending = pendingFeedback.get(agentId)
+      if (pending !== undefined && pending.names.length > 0 && Date.now() - pending.at < 30 * 60_000) {
+        const errored = fresh.some(
+          (event) => event?.type === 'tool/result' && (event.data?.message?.isError === true || event.data?.error !== undefined),
+        )
+        const feedback = applySkillFeedback(resolved.skillsDir, pending.names, errored ? 'negative' : 'positive')
+        pendingFeedback.delete(agentId)
+        if (feedback.updated.length > 0) {
+          ctx.logger?.info?.(
+            `[dsh-memory] feedback ${errored ? 'negative' : 'positive'} for ${feedback.updated
+              .map((item) => `${item.name}@${item.confidence}`)
+              .join(', ')}`,
+          )
+        }
       }
     } catch {
       // The sweep is maintenance; it must never break the closing turn.
@@ -715,6 +800,10 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
           // A per-turn hint must stay cheap: a slow adjudicator costs the hint,
           // never the turn.
           timeoutMs: 4000,
+          // v0.8: the isolation gate. The workspace of THIS turn, resolved the same
+          // way the store records it (session cwd), so a memory from another
+          // repository never reaches the hint — even one that scores highest.
+          ...(resolved.workspaceIsolation ? { workspace: currentWorkspaceOf(payload) } : {}),
           ...(llm === undefined ? {} : { llm, ...resolveFilterTarget(ctx, resolved.filterProvider, resolved.filterModel) }),
         })
         const hint = renderHint(result)
@@ -722,6 +811,12 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
         // v0.5 decay bookkeeping: a recalled skill that is actually injected has
         // been used; its decay clock restarts.
         if (result.skill !== undefined) touchSkillUsage(resolved.skillsDir, result.skill.id)
+        // v0.7.1: remember what this turn was told, so turn-stopping can score the
+        // outcome (clean turn = confirmed, retried turn = weakened).
+        const feedbackNames = [result.skill?.id, ...(result.alternatives ?? []).map((hit) => hit.id)].filter(
+          (id): id is string => typeof id === 'string' && id.length > 0,
+        )
+        if (feedbackNames.length > 0) pendingFeedback.set(agentId, { names: [...new Set(feedbackNames)], at: Date.now() })
         const bestId =
           [result.skill?.id ?? '', ...(result.alternatives ?? []).map((hit) => hit.id), result.negative?.id ?? '']
             .filter((id) => id.length > 0)
@@ -757,7 +852,8 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
   try {
     ctx.logger?.info?.(
       `[dsh-memory] ready: ledger=${resolved.graftDataDir} memory=${resolved.memoryDir} skills=${resolved.skillsDir} ` +
-        `extractor=${resolved.extractor} autoApprove=${resolved.autoApprove} retrieval=${resolved.retrieval} semanticFilter=${resolved.semanticFilter}`,
+        `extractor=${resolved.extractor} autoApprove=${resolved.autoApprove} retrieval=${resolved.retrieval} semanticFilter=${resolved.semanticFilter} ` +
+        `workspaceIsolation=${resolved.workspaceIsolation}`,
     )
   } catch {
     // Logging must not block activation.

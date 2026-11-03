@@ -19,43 +19,90 @@
  * is not written at all; the reason is returned, never swallowed.
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 
 import type { EvidenceRef, ExtractedExperience, ExtractedFact, ExtractedNegative, ExtractedSkill } from './extract.js'
 import { jaccard, planNegative, trigrams } from './dedupe.js'
+import { normalizeWorkspace } from './workspace.js'
+import { scanThreat } from './threat.js'
 
 export function defaultSkillsDir(): string {
   return join(homedir(), '.agents', 'skills')
 }
 
+/** Windows holds a share lock while a reader has the file open; sleep briefly. */
+function sleepSync(ms: number): void {
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+  } catch {
+    // Fall back to a busy wait where SharedArrayBuffer is unavailable.
+    const end = Date.now() + ms
+    while (Date.now() < end) {
+      // spin
+    }
+  }
+}
+
+const TRANSIENT_RENAME = new Set(['EPERM', 'EACCES', 'EBUSY'])
+
+/**
+ * v0.7.1: tmp-file + rename, with a retry window for Windows share locks.
+ *
+ * The extreme-consistency run (5 reader processes against 1 writer) proved the
+ * rename can fail with EPERM while another process holds the destination open.
+ * An unguarded `renameSync` therefore turned a concurrent READ into a failed
+ * WRITE — the one failure mode an append-only ledger must not have. Retrying for
+ * a bounded window keeps the atomicity and makes concurrent reads harmless.
+ */
 export function atomicWrite(path: string, text: string): void {
   mkdirSync(dirname(path), { recursive: true })
   const tmp = `${path}.tmp-${process.pid}-${Date.now()}`
   writeFileSync(tmp, text, 'utf8')
-  renameSync(tmp, path)
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      renameSync(tmp, path)
+      return
+    } catch (error) {
+      const code = String((error as any)?.code ?? '')
+      if (!TRANSIENT_RENAME.has(code) || attempt >= 40) {
+        try {
+          rmSync(tmp, { force: true })
+        } catch {
+          // The next write's own tmp file is equally disposable.
+        }
+        throw error
+      }
+      sleepSync(5 + Math.min(50, attempt * 5))
+    }
+  }
 }
 
 /**
  * Same rule as the ecosystem's memory plugins: memory content is DATA, never an
  * instruction. Text that tries to rewrite the reader's rules is refused at the
  * write boundary, because a later prompt will happily quote it verbatim.
+ *
+ * v0.8.1: the patterns moved to `threat.ts` so the INJECTION boundary can apply
+ * the same rule to content that is already on disk (an older writer, a hand-edited
+ * file, another tool). Re-exported here because this is where callers know to
+ * look for it.
  */
-const THREAT = [
-  /ignore\s+(all\s+)?(previous|prior|earlier|above|your)\s+(instructions?|prompts?|rules?)/iu,
-  /disregard\s+(all\s+)?(previous|prior|earlier|above|your)\s+(instructions?|prompts?|rules?)/iu,
-  /忽略[^。\n]{0,16}(指令|指示|提示|规则)/u,
-  /无视[^。\n]{0,16}(指令|指示|提示|规则)/u,
-]
-
-export function scanThreat(text: string): string | undefined {
-  for (const pattern of THREAT) if (pattern.test(text)) return 'contains prompt-injection phrasing'
-  return undefined
-}
+export { scanThreat } from './threat.js'
 
 export function skillPath(skillsDir: string, name: string): string {
   return join(skillsDir, name, 'SKILL.md')
+}
+
+/**
+ * v0.8: the recorded workspace of an on-disk SKILL.md, canonicalized. Empty means
+ * the file predates the isolation guard (or was written without provenance), and
+ * retrieval treats that as "cannot prove it belongs here" — refused unless the
+ * skill declares `scope: global`.
+ */
+export function readSkillWorkspace(text: string): string {
+  return normalizeWorkspace(text.match(/^workspace:\s*(.+)$/mu)?.[1] ?? '')
 }
 
 function frontmatter(fields: Record<string, string | number>): string {
@@ -69,6 +116,13 @@ export interface SkillMeta {
   sessionId: string
   boundarySeq: number
   at?: string
+  /**
+   * v0.8: the cwd of the session this memory came from, recorded so retrieval can
+   * refuse to hand it to a different workspace. Provenance only — it is read from
+   * the session log header, never from the extraction model, and a merge without
+   * a workspace must NOT erase the one already on disk.
+   */
+  workspace?: string
 }
 
 /** What the review queue may still hold from v0.1: `when` + `how`, no verify. */
@@ -123,8 +177,16 @@ export function normalizeSkill(input: SkillInput | ExtractedSkill): ExtractedSki
     scope: scope === 'workspace' || scope === 'global' ? scope : 'project',
     scene: /^[a-z][a-z0-9-]{1,23}$/u.test(scene) ? scene : 'general',
     aliases,
+    confidence: clampConfidence((raw as any).confidence),
     evidence,
   }
+}
+
+/** v0.7.1: a feedback weight, kept in [0.2, 1.0]; a missing field is full trust. */
+export function clampConfidence(value: unknown): number {
+  const number = Number(value)
+  if (!Number.isFinite(number)) return 1
+  return Math.min(1, Math.max(0.2, Math.round(number * 100) / 100))
 }
 
 /**
@@ -274,6 +336,7 @@ export function parseSkillFile(text: string, name: string): ExtractedSkill {
   const evidence = parseEvidenceField(text.match(/^evidence:\s*(.+)$/mu)?.[1] ?? '', '')
   const scopeText = (text.match(/^scope:\s*(.+)$/mu)?.[1] ?? '').trim().toLowerCase()
   const sceneText = (text.match(/^scene:\s*(.+)$/mu)?.[1] ?? '').trim().toLowerCase()
+  const confidence = clampConfidence(text.match(/^confidence:\s*(.+)$/mu)?.[1])
   const aliases = (text.match(/^aliases:\s*(.+)$/mu)?.[1] ?? '').split(/,/u).map((item) => item.trim()).filter(Boolean)
   return {
     name,
@@ -285,6 +348,7 @@ export function parseSkillFile(text: string, name: string): ExtractedSkill {
     scope: scopeText === 'workspace' || scopeText === 'global' ? scopeText : 'project',
     scene: /^[a-z][a-z0-9-]{1,23}$/u.test(sceneText) ? sceneText : 'general',
     aliases,
+    confidence,
     evidence,
   }
 }
@@ -360,13 +424,19 @@ function renderSkill(
   conflicts: readonly SkillConflict[] = [],
 ): string {
   const now = meta.at ?? new Date().toISOString().slice(0, 10)
+  const workspace = normalizeWorkspace(meta.workspace)
   const fields: Record<string, string | number> = {
     name: skill.name,
     description: skill.description.slice(0, 160),
     when_to_use: skill.when.slice(0, 200),
     scope: skill.scope,
+    // v0.8: provenance for the isolation gate (see workspace.ts). Written even for
+    // a `global` skill: `global` decides ELIGIBILITY, the path stays on record for
+    // audit. Omitted only when the caller genuinely had no workspace.
+    ...(workspace.length === 0 ? {} : { workspace }),
     scene: skill.scene,
     ...(skill.aliases.length === 0 ? {} : { aliases: skill.aliases.join(', ') }),
+    confidence: clampConfidence(skill.confidence).toFixed(2),
     evidence: skill.evidence
       .map((ref) => (ref.sourceSessionId.length > 0 ? `${ref.sourceSessionId}@${ref.seq}` : String(ref.seq)))
       .join(','),
@@ -407,7 +477,78 @@ function renderSkill(
   ].join('\n')
 }
 
-/** Create or merge one skill. Returns `created`, `merged`, or `skipped:<reason>`. */
+/**
+ * v0.7.1: environment/version tokens that make two procedures NOT interchangeable.
+ *
+ * The failure this guards: "install pymysql on Python 3.8" and "use the stdlib
+ * driver on Python 3.12" share a trigger and both connect to MySQL, so the
+ * similarity gate merged them into one file — and the merged procedure ran on
+ * neither version. A version difference is evidence of an alternative, not of a
+ * synonym.
+ */
+const VERSION_TOKEN = /\b(python|py|node|nodejs|go|golang|java|rust|ruby|php|deno|bun|typescript|ts|dotnet|net)[\s_-]?v?(\d+(?:\.\d+)+)/giu
+const ENVIRONMENT_TOKEN = /\b(windows|win32|linux|ubuntu|debian|centos|macos|darwin|wsl|docker|alpine|arm64|x86[_-]?64|amd64)\b/giu
+
+export function environmentTokensOf(text: string): Set<string> {
+  const out = new Set<string>()
+  for (const match of text.toLowerCase().matchAll(VERSION_TOKEN)) {
+    const runtime = match[1] === 'py' ? 'python' : match[1] === 'nodejs' ? 'node' : match[1]
+    out.add(`${runtime}${match[2]}`)
+  }
+  for (const match of text.toLowerCase().matchAll(ENVIRONMENT_TOKEN)) out.add(match[1].replace(/[_-]/gu, ''))
+  return out
+}
+
+function triggerTokens(text: string): Set<string> {
+  const out = new Set<string>()
+  const lower = text.toLowerCase()
+  for (const match of lower.matchAll(/[a-z0-9][a-z0-9_-]{1,}/gu)) out.add(match[0])
+  for (const run of lower.match(/\p{Script=Han}+/gu) ?? []) {
+    if (run.length === 1) out.add(run)
+    for (let index = 0; index + 2 <= run.length; index += 1) out.add(run.slice(index, index + 2))
+  }
+  return out
+}
+
+function triggerSimilarity(left: string, right: string): number {
+  const a = triggerTokens(left)
+  const b = triggerTokens(right)
+  if (a.size === 0 || b.size === 0) return 0
+  let shared = 0
+  for (const token of a) if (b.has(token)) shared += 1
+  return shared / Math.min(a.size, b.size)
+}
+
+export interface EnvironmentDivergence {
+  previous: string[]
+  next: string[]
+}
+
+/**
+ * v0.7.1: same purpose, different named environment → DO NOT MERGE.
+ * Returns the two token sets when merging would erase a real difference.
+ */
+export function environmentDivergence(previous: ExtractedSkill, next: ExtractedSkill): EnvironmentDivergence | undefined {
+  const left = environmentTokensOf(`${previous.when} ${previous.steps.join(' ')}`)
+  const right = environmentTokensOf(`${next.when} ${next.steps.join(' ')}`)
+  if (left.size === 0 || right.size === 0) return undefined
+  // A shared runtime token means the procedures agree on the environment.
+  for (const token of left) if (right.has(token)) return undefined
+  if (triggerSimilarity(previous.when, next.when) < 0.5) return undefined
+  return { previous: [...left].slice(0, 4), next: [...right].slice(0, 4) }
+}
+
+/** A free kebab-case name, so a divergence keeps BOTH procedures on disk. */
+function uniqueSkillName(skillsDir: string, base: string): string {
+  for (let index = 2; index < 100; index += 1) {
+    const candidate = `${base}-${index}`
+    if (candidate.length > 48) break
+    if (!existsSync(skillPath(skillsDir, candidate))) return candidate
+  }
+  return `${base}-${Date.now().toString(36)}`.slice(0, 48)
+}
+
+/** Create or merge one skill. Returns `created`, `merged`, `conflicted:<env>` or `skipped:<reason>`. */
 export function writeSkill(skillsDir: string, input: SkillInput | ExtractedSkill, meta: SkillMeta): string {
   const skill = normalizeSkill(input)
   if (skill.steps.length === 0) return 'skipped:no execution steps'
@@ -426,6 +567,25 @@ export function writeSkill(skillsDir: string, input: SkillInput | ExtractedSkill
     // Merge: keep the earliest evidence, refresh the wording, count the use of
     // the *provenance* (sessions that confirmed it), never duplicate the file.
     const previousText = readFileSync(path, 'utf8')
+    // v0.8: a write with no workspace (a queued suggestion replayed later, an
+    // older caller) inherits the workspace already recorded. Otherwise a merge
+    // would silently launder a memory out of the workspace that produced it.
+    const previousWorkspace = readSkillWorkspace(previousText)
+    const writeMeta: SkillMeta =
+      normalizeWorkspace(meta.workspace).length > 0 || previousWorkspace.length === 0
+        ? meta
+        : { ...meta, workspace: previousWorkspace }
+    // v0.7.1: a version/environment difference is a CONFLICT, never a merge.
+    const previousSkill = parseSkillFile(previousText, skill.name)
+    const divergence = environmentDivergence(previousSkill, skill)
+    if (divergence !== undefined) {
+      const altName = uniqueSkillName(skillsDir, skill.name)
+      const conflict: SkillConflict = { name: skill.name, title: previousSkill.title }
+      const alternative: ExtractedSkill = { ...withSession, name: altName, confidence: 1 }
+      atomicWrite(skillPath(skillsDir, altName), renderSkill(alternative, writeMeta, undefined, [conflict]))
+      linkConflictBack(skillsDir, conflict, alternative)
+      return `conflicted:${divergence.previous.join(',')} vs ${divergence.next.join(',')}`
+    }
     const previousEvidence = parseEvidenceField(previousText.match(/^evidence:\s*(.+)$/mu)?.[1] ?? '', meta.sessionId)
     const evidenceKey = (ref: EvidenceRef): string => `${ref.sourceSessionId}@${ref.seq}`
     const merged = [...new Map([...previousEvidence, ...withSession.evidence].map((ref) => [evidenceKey(ref), ref])).values()]
@@ -433,8 +593,10 @@ export function writeSkill(skillsDir: string, input: SkillInput | ExtractedSkill
     const created = previousText.match(/^created:\s*(.+)$/mu)?.[1] ?? ''
     const lastUsed = previousText.match(/^last_used:\s*(.+)$/mu)?.[1] ?? undefined
     const lastValidated = previousText.match(/^last_validated:\s*(.+)$/mu)?.[1] ?? undefined
-    const mergedSkill: ExtractedSkill = { ...withSession, evidence: merged }
-    atomicWrite(path, renderSkill(mergedSkill, meta, { evidence: merged.length, sources: sources + 1, created, lastUsed, lastValidated }, conflicts))
+    // v0.7.1: repetition must not launder a skill that failed in use; keep the
+    // learned confidence across the merge.
+    const mergedSkill: ExtractedSkill = { ...withSession, evidence: merged, confidence: clampConfidence(previousSkill.confidence) }
+    atomicWrite(path, renderSkill(mergedSkill, writeMeta, { evidence: merged.length, sources: sources + 1, created, lastUsed, lastValidated }, conflicts))
     for (const conflict of conflicts) linkConflictBack(skillsDir, conflict, skill)
     return 'merged'
   }
@@ -494,6 +656,7 @@ function readJsonl(path: string): Array<Record<string, unknown>> {
 
 export function appendNegatives(memoryDir: string, negatives: ExtractedNegative[], meta: SkillMeta): number {
   if (negatives.length === 0) return 0
+  const workspace = normalizeWorkspace(meta.workspace)
   const path = join(memoryDir, 'negatives.jsonl')
   const existing = readJsonl(path)
   let appended = 0
@@ -528,6 +691,8 @@ export function appendNegatives(memoryDir: string, negatives: ExtractedNegative[
       boundarySeq: meta.boundarySeq,
       at: meta.at ?? new Date().toISOString(),
       hits: 1,
+      // v0.8: same isolation contract as SKILL.md.
+      ...(workspace.length === 0 ? {} : { workspace }),
       ...(plan.conflicts.length === 0 ? {} : { conflictsWith: plan.conflicts }),
     })
     appended += 1
@@ -541,11 +706,36 @@ export function appendNegatives(memoryDir: string, negatives: ExtractedNegative[
 interface LayerRecord {
   text: string
   scene?: string
-  evidence: number[]
+  /** v0.8: the cwd that produced this observation (isolation provenance). */
+  workspace?: string
+  /** v0.7.1: composite pointers; legacy rows may still hold bare numbers. */
+  evidence: Array<number | EvidenceRef>
   sourceSessionId: string
   boundarySeq: number
   at: string
   hits: number
+}
+
+/** Accept both pointer shapes and attach the fallback session to a bare seq. */
+function normalizeEvidenceRefs(value: unknown, fallbackSession: string): EvidenceRef[] {
+  const out: EvidenceRef[] = []
+  const raw = Array.isArray(value) ? value : []
+  for (const item of raw) {
+    let seq: number
+    let session: string
+    if (item !== null && typeof item === 'object') {
+      seq = Number((item as any).seq)
+      const id = typeof (item as any).sourceSessionId === 'string' ? String((item as any).sourceSessionId) : ''
+      session = id.length > 0 ? id : fallbackSession
+    } else {
+      seq = Number(item)
+      session = fallbackSession
+    }
+    if (!Number.isFinite(seq)) continue
+    if (out.some((ref) => ref.seq === seq && ref.sourceSessionId === session)) continue
+    out.push({ sourceSessionId: session, seq })
+  }
+  return out
 }
 
 /**
@@ -628,7 +818,7 @@ export function recordCounterEvidence(
   return { updated, scannedResults: successes.length }
 }
 
-/** v0.5: record that a recalled skill was actually used (drives decay). */
+/** v0.7: record that a recalled skill was actually used (drives decay). */
 export function touchSkillUsage(skillsDir: string, name: string, at?: string): boolean {
   const path = skillPath(skillsDir, name)
   if (!existsSync(path)) return false
@@ -645,7 +835,163 @@ export function touchSkillUsage(skillsDir: string, name: string, at?: string): b
   }
 }
 
-/** v0.5: new evidence re-validates a skill (cancels decay for 14 days). */
+export type SkillFeedback = 'positive' | 'negative'
+
+export interface FeedbackResult {
+  updated: Array<{ name: string; outcome: SkillFeedback; confidence: number }>
+  missing: string[]
+}
+
+/**
+ * v0.7.1: the use-effect loop.
+ *
+ * Extraction can only prove that a procedure was written down; it cannot prove
+ * the procedure still works. turn-stopping knows the outcome of the turn that
+ * actually used the skill: a clean turn (no failed tool result) confirms it, a
+ * turn that retried after an error weakens it. This is the ONLY automatic
+ * mechanism that can raise confidence — and it raises it by a small step, so a
+ * lucky turn cannot launder a bad skill.
+ */
+export function applySkillFeedback(
+  skillsDir: string,
+  names: readonly string[],
+  outcome: SkillFeedback,
+  at?: string,
+): FeedbackResult {
+  const stamp = at ?? new Date().toISOString()
+  const updated: FeedbackResult['updated'] = []
+  const missing: string[] = []
+  const seen = new Set<string>()
+  for (const raw of names) {
+    const name = String(raw ?? '').trim()
+    if (name.length === 0 || seen.has(name)) continue
+    seen.add(name)
+    const path = skillPath(skillsDir, name)
+    if (!existsSync(path)) {
+      missing.push(name)
+      continue
+    }
+    try {
+      let text = readFileSync(path, 'utf8')
+      const previous = clampConfidence(text.match(/^confidence:\s*(.+)$/mu)?.[1])
+      const next = outcome === 'positive' ? Math.min(1, Math.round((previous + 0.05) * 100) / 100) : Math.max(0.2, Math.round((previous - 0.1) * 100) / 100)
+      text = /^confidence:/mu.test(text)
+        ? text.replace(/^confidence:.*$/mu, `confidence: ${next.toFixed(2)}`)
+        : text.replace(/^(name:.*)$/mu, `$1\nconfidence: ${next.toFixed(2)}`)
+      text = /^last_feedback:/mu.test(text)
+        ? text.replace(/^last_feedback:.*$/mu, `last_feedback: ${outcome}`)
+        : text.replace(/^(name:.*)$/mu, `$1\nlast_feedback: ${outcome}`)
+      if (outcome === 'positive') {
+        // Confirmed in use = validated now; this restarts the decay clock.
+        text = /^last_validated:/mu.test(text)
+          ? text.replace(/^last_validated:.*$/mu, `last_validated: ${stamp}`)
+          : text.replace(/^(name:.*)$/mu, `$1\nlast_validated: ${stamp}`)
+      }
+      atomicWrite(path, text)
+      updated.push({ name, outcome, confidence: next })
+    } catch {
+      missing.push(name)
+    }
+  }
+  return { updated, missing }
+}
+
+export interface EvidenceMigrationResult {
+  sessionId: string
+  /** SKILL.md files whose `evidence:` tokens were rewritten. */
+  skills: Array<{ name: string; rewritten: number }>
+  negatives: number
+  facts: number
+  experiences: number
+  /** Entries that already carried `session@seq` (or a sourceSessionId). */
+  already: number
+}
+
+/**
+ * v0.7.1: ONE-SHOT legacy repair for the v0.5/v0.6 bare-seq era.
+ *
+ * Before the composite key, `evidence: 14926` was stored without a session id.
+ * After a generation hop that seq is meaningless: `graft_read_result` needs the
+ * session. The migration attaches the given session id to every bare pointer. It
+ * is explicit (a tool the user calls), never a silent rewrite on activation: a
+ * wrong attribution is worse than a visible missing one.
+ */
+export function migrateBareEvidence(memoryDir: string, skillsDir: string, sessionId: string): EvidenceMigrationResult {
+  const session = String(sessionId ?? '').trim()
+  if (session.length === 0) throw new Error('migrateBareEvidence: a sourceSessionId is required')
+  const result: EvidenceMigrationResult = { sessionId: session, skills: [], negatives: 0, facts: 0, experiences: 0, already: 0 }
+
+  for (const name of listSkillFiles(skillsDir)) {
+    const path = skillPath(skillsDir, name)
+    if (!existsSync(path)) continue
+    try {
+      let text = readFileSync(path, 'utf8')
+      const line = text.match(/^evidence:\s*(.+)$/mu)
+      if (line === null) continue
+      const tokens = line[1].split(/[,\s]+/u).filter(Boolean)
+      let rewritten = 0
+      let composite = 0
+      const next = tokens.map((token) => {
+        if (token.includes('@')) {
+          composite += 1
+          return token
+        }
+        rewritten += 1
+        return `${session}@${token}`
+      })
+      result.already += composite
+      if (rewritten === 0) continue
+      text = text.replace(/^evidence:.*$/mu, `evidence: ${next.join(',')}`)
+      atomicWrite(path, text)
+      result.skills.push({ name, rewritten })
+    } catch {
+      // A file that cannot be parsed keeps its pointers; it is reported elsewhere.
+    }
+  }
+
+  const migrateJsonl = (file: string, key: 'negatives' | 'facts' | 'experiences'): void => {
+    const path = join(memoryDir, file)
+    if (!existsSync(path)) return
+    const records = readJsonl(path)
+    let changed = 0
+    for (const record of records) {
+      const evidence = Array.isArray(record.evidence) ? record.evidence : []
+      let dirty = false
+      const merged: unknown[] = []
+      for (const item of evidence) {
+        if (item !== null && typeof item === 'object' && Number.isFinite(Number((item as any).seq))) {
+          if (typeof (item as any).sourceSessionId !== 'string' || String((item as any).sourceSessionId).length === 0) {
+            merged.push({ sourceSessionId: session, seq: Number((item as any).seq) })
+            dirty = true
+          } else {
+            merged.push(item)
+          }
+          result.already += 1
+          continue
+        }
+        const seq = Number(item)
+        if (Number.isFinite(seq)) {
+          merged.push({ sourceSessionId: session, seq })
+          dirty = true
+          continue
+        }
+        merged.push(item)
+      }
+      if (!dirty) continue
+      record.evidence = merged
+      if (typeof record.sourceSessionId !== 'string' || String(record.sourceSessionId).length === 0) record.sourceSessionId = session
+      changed += 1
+    }
+    if (changed > 0) atomicWrite(path, records.map((record) => JSON.stringify(record)).join('\n') + '\n')
+    result[key] = changed
+  }
+  migrateJsonl('negatives.jsonl', 'negatives')
+  migrateJsonl('facts.jsonl', 'facts')
+  migrateJsonl('experiences.jsonl', 'experiences')
+  return result
+}
+
+/** v0.7: new evidence re-validates a skill (cancels decay for 14 days). */
 export function markSkillValidated(skillsDir: string, name: string, at?: string): boolean {
   const path = skillPath(skillsDir, name)
   if (!existsSync(path)) return false
@@ -670,6 +1016,7 @@ function appendLayer(
   meta: SkillMeta,
 ): number {
   if (entries.length === 0) return 0
+  const workspace = normalizeWorkspace(meta.workspace)
   const path = join(memoryDir, file)
   const existing = readJsonl(path) as unknown as LayerRecord[]
   let appended = 0
@@ -678,8 +1025,12 @@ function appendLayer(
     if (scanThreat(entry.text) !== undefined) continue
     const same = existing.find((record) => record.text === entry.text)
     if (same !== undefined) {
-      const merged = [...new Set([...(Array.isArray(same.evidence) ? same.evidence.map(Number) : []), entry.seq])]
-      same.evidence = merged
+      // v0.7.1: evidence is composite everywhere, not just in SKILL.md.
+      const refs = normalizeEvidenceRefs(same.evidence, meta.sessionId)
+      if (!refs.some((ref) => ref.seq === entry.seq && ref.sourceSessionId === meta.sessionId)) {
+        refs.push({ sourceSessionId: meta.sessionId, seq: entry.seq })
+      }
+      same.evidence = refs
       same.hits = Number(same.hits ?? 0) + 1
       dirty = true
       continue
@@ -687,11 +1038,12 @@ function appendLayer(
     existing.push({
       text: entry.text,
       scene: /^[a-z][a-z0-9-]{1,23}$/u.test(String(entry.scene ?? '')) ? String(entry.scene) : 'general',
-      evidence: [entry.seq],
+      evidence: [{ sourceSessionId: meta.sessionId, seq: entry.seq }],
       sourceSessionId: meta.sessionId,
       boundarySeq: meta.boundarySeq,
       at: meta.at ?? new Date().toISOString(),
       hits: 1,
+      ...(workspace.length === 0 ? {} : { workspace }),
     })
     appended += 1
     dirty = true

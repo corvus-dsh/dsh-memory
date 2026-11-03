@@ -135,7 +135,12 @@ test('renderHint: one sentence, ≤120 chars, never imperative', () => {
 
 test('pre-step: the hint rides messages once per user turn, non-blocking', async () => {
   const { skills, memory } = dirs()
-  writeSkill(skills, skill, { sessionId: 's1', boundarySeq: 9 })
+  // v0.8: the pre-step gate only injects memories recorded in the SAME workspace.
+  // This fixture's payload carries no agent cwd, so the plugin resolves the
+  // workspace the same way a session would: the process working directory. The
+  // skill is written with that provenance, which is what a real harvest records
+  // (`session.cwd`). The refusal direction is covered in v08-workspace.test.mjs.
+  writeSkill(skills, skill, { sessionId: 's1', boundarySeq: 9, workspace: process.cwd() })
   const handlers = []
   const ctx = {
     paths: { data: memory },

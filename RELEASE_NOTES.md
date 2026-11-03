@@ -1,4 +1,56 @@
-# dsh-memory v0.6.0 — 场景隔离与证据溯源：反幻觉写入
+# dsh-memory v0.7.1 — 深水区：场景分类、使用效果闭环、版本冲突、证据迁移
+
+**发布日期**：2026-11-03　**状态**：预发布（v0.6.0 → v0.7.1）　**测试**：107/107（+11）
+
+---
+
+## 为什么做
+
+v0.7.0 让只读（read/grep）证据通过了强反查，但审计又指出三个会在真实使用中扩散的问题：
+场景路由靠词表，「搞个本地存储」命中不了 database；技能写下来后没有任何使用效果反馈，
+错了也一直是满分；触发条件相同但 Python 3.8 / 3.12 步骤不同的两条技能会被合并成一条，
+结果哪一版都跑不了。
+
+## 1. 场景分类改为一次极小 LLM 调用
+- `classifyScene()`：候选词表来自 `collectScenes()`（提取器自己产出的 scene，不写死）；
+  输出只接受词表内标签或 `general`，失败/超时/乱造词一律降级 `general`。
+- 查询 + 词表结果缓存 10 分钟；`general` 表示「没有明确领域」，**不设门**（召回失败不能
+  变成记忆消失）。
+- 旧 `inferScene()` 词表只保留给同步离线的 `retrieve()` 作确定性兜底，实时链路不再使用。
+
+## 2. 使用效果闭环（turn-stopping）
+- 本轮注入过哪些技能，pre-step 记下；turn-stopping 看本轮是否出现失败的 tool/result：
+  干净收尾 → `confidence +0.05` 且 `last_validated = now`；有报错重试 → `confidence -0.1`。
+- `confidence` 落进 SKILL.md frontmatter（缺失按 1.00），参与检索排序；下限 0.2，
+  失败不会让技能消失，只会让它排后面。
+
+## 3. 版本/环境差异禁止合并
+- `environmentDivergence()` 从 when + steps 抽 `python3.8 / node20 / windows / docker …`；
+  触发条件高度相似但环境 token 无交集 → **不合并**，写 `name-2` 并双向 `conflicts_with`。
+- 环境相同仍然正常合并，避免把防漂移写成「永不合并」。
+
+## 4. 裸 seq 存量迁移
+- 新工具 `memory_migrate_evidence`：把 SKILL.md / negatives / facts / experiences 里的
+  裸 seq 改写成 `{sourceSessionId, seq}`（或 `sid@seq`）；未给 sessionId 时取台账中
+  最新一次转移；幂等，二次运行为空操作。
+- Fact/Experience 落盘也改为复合证据，检索端两种形状都能读。
+
+## 5. Windows 并发读写的真实修复
+- 极限一致性测试（5 进程读 + 1 进程写）暴露：目标文件被读进程打开时，
+  `renameSync` 抛 `EPERM`，一次并发**读**会把写入打失败。
+- `atomicWrite()` 对 `EPERM/EACCES/EBUSY` 做有界重试（最多 40 次、退避 ≤55ms），
+  保持 tmp→rename 的原子性。
+
+## 验证
+- 107/107：新增 11 条（只读证据、日常措辞场景分类、分类失败降级、场景隔离、
+  3.8 vs 3.12 不合并、相同环境仍合并、正负反馈与下限、低置信降权、裸 seq 迁移幂等、
+  5 读 1 写无撕裂行）。
+- `node scripts/extreme-consistency.mjs`：11/11（进程级 5 读 1 写、只读工具提取、
+  3.8/3.12 冲突数据）。
+
+---
+
+# 以下为 v0.6.0 内容
 
 **发布日期**：2026-11-03　**状态**：预发布（v0.5.0 → v0.6.0）　**测试**：96/96
 
