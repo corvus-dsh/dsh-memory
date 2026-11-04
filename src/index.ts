@@ -19,7 +19,7 @@ import { resolveModelTarget, segmentSession } from './segment.js'
 import { extractEpisode } from './extract.js'
 import type { EvidenceRef, ExtractionResult } from './extract.js'
 import { findSkillCandidate } from './dedupe.js'
-import { retrieve, renderHint, retrieveWithFilter, collectScenes, extractTaskTerms, askAsksForFix, DEFAULT_RETRIEVAL_THRESHOLD } from './retrieve.js'
+import { retrieve, renderHint, retrieveWithFilter, collectScenes, extractTaskTerms, askAsksForFix, DEFAULT_RETRIEVAL_THRESHOLD, isolateHint } from './retrieve.js'
 import { applySkillArchive, listSkillSummaries, planSkillArchive, DEFAULT_SKILL_LIMIT } from './archive.js'
 import { currentWorkspaceOf, workspaceOfSession } from './workspace.js'
 import { applySupersede, listSkillRecords, quarantineWorkspaceMemory, readSkillBody } from './store.js'
@@ -1190,7 +1190,7 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
             {
               id: `memory-hint-${agentId || 'session'}-${now}`,
               role: 'user',
-              content: [{ type: 'text', text: hint }],
+              content: [{ type: 'text', text: isolateHint(hint) }],
               source: { kind: 'plugin:dsh-memory' },
             },
           ],
