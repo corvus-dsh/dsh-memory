@@ -17,6 +17,7 @@
  * lexical top-1 stands — the filter may improve a hint, never break it.
  */
 
+import { execFileSync } from 'node:child_process'
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -191,6 +192,14 @@ export interface MemoryHit {
   provenance?: MemoryProvenance
   sessionId?: string
   seq?: number
+  /** v0.32 P1: the graft generation this experience belongs to. */
+  generation?: number
+  /** v0.32 P1: the code commit it was extracted against. */
+  commitHash?: string
+  /** v0.32 P1: true when the current checkout is a DIFFERENT commit. */
+  commitDrift?: boolean
+  /** v0.32 P1: what the current checkout is at, for the hint's wording. */
+  currentCommit?: string
 }
 
 interface Document {
@@ -203,6 +212,9 @@ interface Document {
   scope?: string
   aliases?: string[]
   stale?: boolean
+  /** v0.32 P1: provenance for the commit-drift demotion. */
+  generation?: number
+  commitHash?: string
   lastValidated?: string
   updatedAt?: string
   confidence?: number
@@ -241,6 +253,56 @@ interface Scored {
   document: Document
   coverage: number
   score: number
+  /** v0.32 P1: set when the skill's commit no longer matches the checkout. */
+  commitDrift?: boolean
+  currentCommit?: string
+}
+
+/**
+ * v0.32 P1 — THE COMMIT A WORKSPACE IS AT, cached per minute.
+ *
+ * Retrieval runs on every pre-step, so this must stay cheap: one `git rev-parse` per
+ * workspace per minute, never per turn, and an empty string on any failure. An unknown
+ * commit means NO demotion — an unanswerable question must not silently mark every
+ * memory as stale.
+ */
+const commitCache = new Map<string, { at: number; hash: string }>()
+export const COMMIT_DRIFT_WEIGHT = 0.45
+
+export function currentCommitOf(workspace: string): string {
+  if (workspace.length === 0) return ''
+  const cached = commitCache.get(workspace)
+  const now = Date.now()
+  if (cached !== undefined && now - cached.at < 60_000) return cached.hash
+  let hash = ''
+  try {
+    const output = execFileSync('git', ['-C', workspace, 'rev-parse', 'HEAD'], {
+      encoding: 'utf8',
+      timeout: 1_500,
+      stdio: ['ignore', 'pipe', 'ignore'],
+      windowsHide: true,
+    })
+    const trimmed = String(output).trim().toLowerCase()
+    hash = /^[0-9a-f]{7,40}$/u.test(trimmed) ? trimmed : ''
+  } catch {
+    hash = ''
+  }
+  commitCache.set(workspace, { at: now, hash })
+  return hash
+}
+
+/** Test seam: forget cached commits. */
+export function clearCommitCache(): void {
+  commitCache.clear()
+}
+
+/** Same commit? Compare on the short prefix, because a file may record either form. */
+function sameCommit(left: string, right: string): boolean {
+  const a = left.toLowerCase()
+  const b = right.toLowerCase()
+  const width = Math.min(a.length, b.length)
+  if (width < 7) return false
+  return a.slice(0, width) === b.slice(0, width)
 }
 
 const CJK = /[\u4e00-\u9fff]/u
@@ -672,6 +734,12 @@ function skillDocuments(skillsDir: string, now: number): Document[] {
     // v0.7.1: use-effect loop weight. A skill that failed in real use ranks down.
     const confidenceValue = Number(text.match(/^confidence:\s*(.+)$/mu)?.[1] ?? '1')
     const confidence = Number.isFinite(confidenceValue) ? Math.min(1, Math.max(0.2, confidenceValue)) : 1
+    // v0.32 P1: the generation and the code commit this experience was extracted against.
+    // Both are provenance written by the store, never by the model.
+    const generationValue = Number(text.match(/^generation:\s*(\d+)$/mu)?.[1] ?? '')
+    const generation = Number.isFinite(generationValue) && generationValue > 0 ? generationValue : undefined
+    const commitText = (text.match(/^commitHash:\s*([0-9a-f]{7,40})$/mu)?.[1] ?? '').trim()
+    const commitHash = commitText.length > 0 ? commitText : undefined
     const evidenceRaw = text.match(/^evidence:\s*(.+)$/mu)?.[1] ?? ''
     const firstRef = evidenceRaw.split(/[,\s]+/u).filter(Boolean)[0] ?? ''
     const at = firstRef.lastIndexOf('@')
@@ -700,6 +768,8 @@ function skillDocuments(skillsDir: string, now: number): Document[] {
       ...(conflictsWith.length === 0 ? {} : { conflictsWith }),
       confidence,
       ...(stale ? { stale: true } : {}),
+      ...(generation === undefined ? {} : { generation }),
+      ...(commitHash === undefined ? {} : { commitHash }),
       ...(lastValidated === undefined ? {} : { lastValidated }),
       ...(updated === undefined ? {} : { updatedAt: updated }),
       tokens: new Set(
@@ -878,6 +948,11 @@ function scoreDocuments(
   scene?: string,
   gate?: WorkspaceGate,
   taskGate?: TaskAlignmentGate,
+  /**
+   * v1.0.2: the checkout this search runs against. Defaults to the workspace's own git
+   * HEAD (cached); tests pin it so drift can be asserted without a repository.
+   */
+  currentCommitOverride?: string,
 ): {
   terms: string[]
   scored: Scored[]
@@ -954,8 +1029,18 @@ function scoreDocuments(
     // Numerator is capped at the denominator: extra matches beyond the top-8 must
     // never push coverage above 1.
     const coverage = denominator === 0 ? 0 : Math.min(1, matched / denominator)
-    const score = Math.min(1, coverage * freshness(document.ageDays) * document.importance)
-    return { document, coverage, score }
+    /**
+     * v0.32 P1: an experience from ANOTHER COMMIT is demoted, never dropped. Dropping
+     * would repeat the "empty store" failure from the other side: the memory still names
+     * the subsystem and the failure mode, it just must not outrank something current.
+     */
+    const recorded = document.commitHash
+    const current =
+      recorded === undefined ? '' : (currentCommitOverride !== undefined ? currentCommitOverride : currentCommitOf(document.workspace ?? ''))
+    const drift = recorded !== undefined && current.length > 0 && !sameCommit(recorded, current)
+    const score =
+      Math.min(1, coverage * freshness(document.ageDays) * document.importance) * (drift ? COMMIT_DRIFT_WEIGHT : 1)
+    return { document, coverage, score, ...(drift ? { commitDrift: true, currentCommit: current } : {}) }
   })
   scored.sort((a, b) => b.score - a.score)
   return { terms, scored, blockedByWorkspace, blockedByThreat, blockedByInvalid, blockedByTask }
@@ -998,7 +1083,7 @@ function sameConflictDomain(left: { domain?: string }, right: { domain?: string 
   return a === 'general' || b === 'general'
 }
 
-function hitOf(document: Document, score: number): MemoryHit {
+function hitOf(document: Document, score: number, scored?: Scored): MemoryHit {
   return {
     kind: document.kind,
     id: document.id,
@@ -1021,6 +1106,10 @@ function hitOf(document: Document, score: number): MemoryHit {
     ...(document.validAt === undefined ? {} : { validAt: document.validAt }),
     ...(document.sessionId === undefined ? {} : { sessionId: document.sessionId }),
     ...(document.seq === undefined ? {} : { seq: document.seq }),
+    ...(document.generation === undefined ? {} : { generation: document.generation }),
+    ...(document.commitHash === undefined ? {} : { commitHash: document.commitHash }),
+    ...(scored?.commitDrift === true ? { commitDrift: true } : {}),
+    ...(scored?.currentCommit === undefined ? {} : { currentCommit: scored.currentCommit }),
   }
 }
 
@@ -1066,12 +1155,13 @@ export function retrieveCandidates(
       ...(options.taskTerms === undefined ? {} : { terms: options.taskTerms }),
       ...(options.taskAlignment === undefined ? {} : { enabled: options.taskAlignment }),
     },
+    options.currentCommit,
   )
   const out: MemoryHit[] = []
   for (const item of scored) {
     if (options.kind !== undefined && item.document.kind !== options.kind) continue
     if (item.score < threshold) continue
-    out.push(hitOf(item.document, item.score))
+    out.push(hitOf(item.document, item.score, item))
     if (out.length >= limit) break
   }
   return out
@@ -1192,6 +1282,7 @@ export function retrieve(
       ...(options.taskAlignment === undefined ? {} : { enabled: options.taskAlignment }),
       ...(options.taskFixIntent === undefined ? {} : { askIsFixIntent: options.taskFixIntent }),
     },
+    options.currentCommit,
   )
   const blocked = {
     ...(blockedByWorkspace > 0 ? { blockedByWorkspace } : {}),
@@ -1205,15 +1296,17 @@ export function retrieve(
   const debug = { terms: terms.length, matched: Math.round(best.coverage * terms.length), ...blocked }
   const above = (kind: DocumentKind): Scored[] => scored.filter((item) => item.document.kind === kind && item.score >= threshold)
   // v0.15: a conflict is resolved in favour of the human-sourced side.
-  const skills = preferHumanInConflict(above('skill').map((item) => hitOf(item.document, item.score)))
+  const skills = preferHumanInConflict(above('skill').map((item) => hitOf(item.document, item.score, item)))
   const negatives = above('negative')
   const facts = above('fact')
   const experiences = above('experience')
   return {
     ...(skills.length === 0 ? {} : { skill: skills[0] }),
-    ...(negatives.length === 0 ? {} : { negative: hitOf(negatives[0].document, negatives[0].score) }),
-    ...(facts.length === 0 ? {} : { fact: hitOf(facts[0].document, facts[0].score) }),
-    ...(experiences.length === 0 ? {} : { experience: hitOf(experiences[0].document, experiences[0].score) }),
+    ...(negatives.length === 0 ? {} : { negative: hitOf(negatives[0].document, negatives[0].score, negatives[0]) }),
+    ...(facts.length === 0 ? {} : { fact: hitOf(facts[0].document, facts[0].score, facts[0]) }),
+    ...(experiences.length === 0
+      ? {}
+      : { experience: hitOf(experiences[0].document, experiences[0].score, experiences[0]) }),
     ...(skills.length <= 1 ? {} : { alternatives: skills.slice(1, 3) }),
     debug,
   }
@@ -1236,6 +1329,11 @@ export interface FilterOptions {
   /** v0.8: the asking session's workspace. Memories from another workspace are
    *  removed from the pool before scoring, so they cannot be injected at all. */
   workspace?: string
+  /**
+   * v1.0.2: the checkout this search runs against (short or full hash). Defaults to the
+   * workspace's git HEAD, cached for a minute; tests pin it to assert commit drift.
+   */
+  currentCommit?: string
   /**
    * v0.20: the current task's distinctive terms (from the user's own ask).
    *
@@ -1516,6 +1614,18 @@ export function renderHint(result: RetrieveResult): string | undefined {
     parts.push(`经验回查：上次${where}得到「${clipTitle(experience.detail ?? experience.title, 40)}」`)
   }
   if (parts.length === 0) return undefined
+  /**
+   * v0.32 P1 — A SKILL FROM ANOTHER COMMIT IS DATED EVIDENCE, AND SAYS SO.
+   *
+   * Passing the workspace gate is not enough: an experience extracted against commit A
+   * read exactly like a fresh one after the code moved to B. The warning is BOLD and
+   * comes BEFORE the claim, because a trailing footnote reads as a comment on a fact
+   * while a prefix changes how the whole sentence is read.
+   */
+  const drift =
+    result.skill !== undefined && result.skill.commitDrift === true
+      ? `**[此经验来自第 ${result.skill.generation ?? '?'} 代的旧提交 ${String(result.skill.commitHash ?? '').slice(0, 7)}，当前为 ${String(result.skill.currentCommit ?? '').slice(0, 7) || '未知'}，请谨慎使用]** `
+      : ''
   const staleWarning = result.skill?.stale === true ? '注意：此技能较久未被验证，请结合当前环境谨慎使用。' : ''
   // v0.17: the trust tier is a PREFIX, not a footnote.
   //
@@ -1538,7 +1648,7 @@ export function renderHint(result: RetrieveResult): string | undefined {
     result.skill === undefined
       ? ''
       : `；需要具体步骤时调用 skill_read("${result.skill.id}")`
-  const text = `${trustPrefix}（记忆提示：${parts.join('；')}${bodyPointer}。${staleWarning}）`
+  const text = `${drift}${trustPrefix}（记忆提示：${parts.join('；')}${bodyPointer}。${staleWarning}）`
   // v0.8.1: the last gate. Every field above comes from the store, and the store
   // is already filtered — but this is the exact string that enters a prompt, so it
   // is the one place where "the filter upstream did its job" is worth re-checking.

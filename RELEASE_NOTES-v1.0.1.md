@@ -32,3 +32,26 @@ Expected property name or '}' in JSON at position 4 (line 2 column 3)
 
 - `client.js`（面板）：**刷新页面**即可。
 - `lib/`（过滤器）：需要重启宿主。
+
+---
+
+# 追加：v1.0.1 的第二批改动
+
+## 面板：参数形状探测
+
+`gateway/input-invalid | field=agentId` —— `remote.commands.execute` 的第一个参数被网关拒绝过，之前的 `JSON.stringify` 兜底把它伪装成成功。桥接现在按序探测 `{id}` / 裸 id / `{agentId}`，记住成功的形状，失败时只报 `code`+`field`。
+
+## 特性：Skill 的代次与 commit 降权
+
+- `SKILL.md` frontmatter 记录 `generation` 与 `commitHash`（graft 目标表 + `git rev-parse HEAD`，绝不来自模型；非法格式不写）；
+- 检索时 commit 与当前 HEAD 不一致 → **分数 ×0.45**（不丢弃），并在提示最前面加粗：
+  `[此经验来自第 N 代的旧提交 xxxxxxx，当前为 yyyyyyy，请谨慎使用]`；
+- commit 读不到 → 不降权（无法回答的问题不能把记忆全标成过期）。
+
+## 特性：健康徽章
+
+记忆控制台顶部同样有绿/琥珀/红三档徽章，红色时会写明「宿主通道未连通」与其原因。
+
+## 测试
+
+`248 / 248`（+6 代次/commit 降权）。串行全量：`node --test --test-concurrency=1 test/*.test.mjs`。

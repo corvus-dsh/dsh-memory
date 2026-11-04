@@ -10,7 +10,7 @@
  * ONE sentence; it is a hint, never a gate.
  */
 
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -19,7 +19,7 @@ import { resolveModelTarget, segmentSession } from './segment.js'
 import { extractEpisode } from './extract.js'
 import type { EvidenceRef, ExtractionResult } from './extract.js'
 import { findSkillCandidate } from './dedupe.js'
-import { retrieve, renderHint, retrieveWithFilter, collectScenes, extractTaskTerms, askAsksForFix, DEFAULT_RETRIEVAL_THRESHOLD, isolateHint } from './retrieve.js'
+import { retrieve, renderHint, retrieveWithFilter, collectScenes, extractTaskTerms, askAsksForFix, DEFAULT_RETRIEVAL_THRESHOLD, isolateHint, currentCommitOf } from './retrieve.js'
 import { applySkillArchive, listSkillSummaries, planSkillArchive, DEFAULT_SKILL_LIMIT } from './archive.js'
 import { currentWorkspaceOf, workspaceOfSession } from './workspace.js'
 import { applySupersede, listSkillRecords, quarantineWorkspaceMemory, readSkillBody } from './store.js'
@@ -505,6 +505,27 @@ export async function harvest(ctx: ContextLike, config: MemoryConfig): Promise<H
         // v0.15: one timestamp for everything this harvest writes, so a whole
         // generation of memories shares one point on the timeline.
         validAt: new Date().toISOString(),
+        /**
+         * v1.0.2 — THE GENERATION AND THE COMMIT THIS EXPERIENCE BELONGS TO.
+         *
+         * Read from the graft target store and from git — never from the model. Without
+         * them a skill extracted against commit A reads exactly as authoritative after the
+         * code moved to B; with them retrieval can demote it and the hint can say so.
+         */
+        ...(() => {
+          const workspace = workspaceOfSession(log)
+          const commitHash = workspace.length === 0 ? '' : currentCommitOf(workspace)
+          return commitHash.length === 0 ? {} : { commitHash }
+        })(),
+        ...(() => {
+          try {
+            const parsed = JSON.parse(readFileSync(join(resolved.graftDataDir, '.graft-targets.json'), 'utf8'))
+            const generation = Number(parsed?.[sessionId]?.generation)
+            return Number.isFinite(generation) && generation > 0 ? { generation: Math.trunc(generation) } : {}
+          } catch {
+            return {}
+          }
+        })(),
       }
       const harvestedEvents = ((log as any).events ?? []) as readonly unknown[]
       /**

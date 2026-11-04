@@ -97,6 +97,7 @@ window.__ModuleLoader__.load({
 .mc-ok{color:#047857;white-space:pre-wrap}
 .mc-select{border:1px solid var(--dsw-alias-border-secondary,rgba(128,128,128,.3));background:var(--dsw-alias-bg-layer-2,rgba(128,128,128,.1));border-radius:7px;padding:5px 9px;color:inherit;font:inherit;max-width:340px}
 .mc-sw[disabled]{opacity:.45;cursor:not-allowed}
+.mc-badge{font-size:11px;padding:2px 7px;border-radius:999px;border:1px solid var(--dsw-alias-border-secondary,rgba(128,128,128,.3))}
 .mc-crash{margin:24px;padding:16px 18px;border:1px solid #b91c1c;border-radius:10px;background:rgba(185,28,28,.08);color:#b91c1c;font:13px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif}
 .mc-crash h3{margin:0 0 8px;font-size:14px}
 .mc-crash pre{margin:8px 0 0;white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,Consolas,monospace;font-size:11.5px;opacity:.9}
@@ -155,6 +156,24 @@ window.__ModuleLoader__.load({
           node = inner
         }
         return decision
+      }
+
+      /** Which call shape the host accepted last time, so a working contract costs one call. */
+      let workingShape = undefined
+
+      /** v0.32 P1: a gateway rejection has a code and a field — print them, not a JSON blob. */
+      const describeRejection = (value) => {
+        if (value !== null && value !== undefined && typeof value === 'object') {
+          const failure = value.error !== null && typeof value.error === 'object' ? value.error : undefined
+          if (failure !== undefined) {
+            const code = typeof failure.code === 'string' ? failure.code : 'error'
+            const details = failure.details !== null && typeof failure.details === 'object' ? failure.details : undefined
+            const field = details !== undefined && typeof details.field === 'string' ? ` field=${details.field}` : ''
+            return `${code}${field}`
+          }
+          if (value.ok === false) return 'ok:false（无错误码）'
+        }
+        return `无法识别的返回形状：${safeSlice(value, 200)}`
       }
 
       /**
@@ -337,28 +356,44 @@ window.__ModuleLoader__.load({
            * command name and value; the pseudo-id is a constant, and the UI states plainly
            * that these are global settings. No session is invented as a REAL one.
            */
-          try {
-            const settled = await commands.execute(effectiveAgent, effectiveLine, [], undefined)
-            /**
-             * v0.32 P0 — THE COMMAND ENVELOPE IS NOT THE PANEL STATE.
-             *
-             * `commands.execute` resolves to a CommandExecution `{ kind, text }`, not to
-             * `{ result: CommandExecution }`. Looking only at `.result` made the bridge
-             * stringify the envelope and report `ok: true`, so the panel's state became
-             * `{ kind: 'success', text: '{"skills":6,…}' }` — an object with no `skills`,
-             * no `ledger`, no `workspace`.
-             *
-             * Live symptoms, all from this one line: 记忆库 "0 条", 工作区 "(未知)",
-             * 台账 "正在读取…", every switch OFF and un-flippable, while the write toast
-             * said "已保存到全局配置" because the Host really had persisted it.
-             */
-            const execution = unwrapExecution(settled)
-            if (execution !== undefined) {
-              return { ok: execution.kind !== 'error', text: execution.text, via: 'remote.commands.execute', raw: settled }
+          /**
+           * v0.32 P1 — THE FIRST ARGUMENT IS PROBED, NOT ASSUMED.
+           *
+           * Live failure: `gateway/input-invalid`, `field=agentId` on `commands/execute`.
+           * The generated proxy does not document whether it wants the Agent object or the
+           * bare id, and every shape the panel tried was rejected — which is why the
+           * console never read anything. Probe in order, remember the winner, and treat a
+           * rejection as a rejection (never as state).
+           */
+          const targetId =
+            typeof effectiveAgent.id === 'string' && effectiveAgent.id.length > 0 ? effectiveAgent.id : GLOBAL_AGENT_ID
+          const shapes = [
+            { name: 'agent-object', build: (id) => [{ id }, effectiveLine, [], undefined] },
+            { name: 'id-string', build: (id) => [id, effectiveLine, [], undefined] },
+            { name: 'agentId-object', build: (id) => [{ agentId: id }, effectiveLine, [], undefined] },
+          ]
+          const ordered =
+            workingShape === undefined
+              ? shapes
+              : [shapes.find((shape) => shape.name === workingShape), ...shapes.filter((shape) => shape.name !== workingShape)]
+          for (const shape of ordered) {
+            if (shape === undefined) continue
+            try {
+              const settled = await commands.execute(...shape.build(targetId))
+              const execution = unwrapExecution(settled)
+              if (execution !== undefined) {
+                workingShape = shape.name
+                return {
+                  ok: execution.kind !== 'error',
+                  text: execution.text,
+                  via: `remote.commands.execute(${shape.name})`,
+                  raw: settled,
+                }
+              }
+              failures.push(`${shape.name}: ${describeRejection(settled)}`)
+            } catch (error) {
+              failures.push(`${shape.name}: ${String((error && error.message) || error)}`)
             }
-            failures.push(`remote.commands.execute: 无法识别的返回形状（期望 { kind, text }）：${safeSlice(settled)}`)
-          } catch (error) {
-            failures.push(`remote.commands.execute: ${String((error && error.message) || error)}`)
           }
         } else {
           failures.push('remote.commands 不可用（inject 未生效或宿主未挂载）')
@@ -937,10 +972,39 @@ window.__ModuleLoader__.load({
             ? '未能从宿主读取状态（原因见下方红色卡片）；开关显示的是默认值，不是真实配置。'
             : '正在读取…'
 
+      /**
+       * v0.32 P2 — A HEALTH BADGE, because every failure this panel has had looked the
+       * same: plausible numbers that never move. Red = no Host data (or the Host said it
+       * degraded); amber = data without the auxiliary reads; green = real Host state.
+       */
+      const health =
+        phase === 'ready' && state.degraded !== true
+          ? state.ledger === undefined && state.sessions === undefined
+            ? { level: 'amber', text: '已连通 · 部分数据缺失', hint: '宿主返回了状态，但台账/会话列表为空，请点「刷新」。' }
+            : { level: 'green', text: '宿主通道正常', hint: `桥接通道：${via || '（未知）'}` }
+          : {
+              level: 'red',
+              text: phase === 'loading' ? '正在读取…' : '宿主通道未连通',
+              hint: `${String(error || state?.degradedReason || '尚未拿到宿主状态').slice(0, 300)}`,
+            }
+      const healthColor = health.level === 'green' ? '#16a34a' : health.level === 'amber' ? '#b45309' : '#b91c1c'
+
       return h('div', { className: 'mc-root' }, [
         h('style', { key: 'css' }, CSS),
         h('div', { key: 'head' }, [
-          h('h2', { key: 't', className: 'mc-h', style: { fontSize: '16px' } }, '记忆控制台 · dsh-memory'),
+          h('div', { key: 'row', style: { display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' } }, [
+            h('h2', { key: 't', className: 'mc-h', style: { fontSize: '16px', margin: 0 } }, '记忆控制台 · dsh-memory'),
+            h(
+              'span',
+              {
+                key: 'health',
+                className: 'mc-badge',
+                title: health.hint,
+                style: { color: healthColor, borderColor: healthColor, fontWeight: 600 },
+              },
+              `${health.level === 'green' ? '●' : health.level === 'amber' ? '▲' : '●'} ${health.text}`,
+            ),
+          ]),
           h('p', { key: 's', className: 'mc-sub' }, summary),
         ]),
         /**

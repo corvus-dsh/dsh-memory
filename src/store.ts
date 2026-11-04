@@ -252,6 +252,16 @@ export interface SkillMeta {
    * extraction model's self-report.
    */
   provenance?: MemoryProvenance
+  /**
+   * v0.32 P1 — the GENERATION and the CODE COMMIT this experience was extracted against.
+   *
+   * A skill is a claim about a codebase at a moment in time. Without these two, the
+   * next generation inherits "the fix is X" long after X was replaced, and the hint
+   * reads exactly as authoritative as a fresh one. Both are provenance: read from the
+   * graft target store and from git, never from the extraction model.
+   */
+  generation?: number
+  commitHash?: string
   /** v0.15: bi-temporal start. Defaults to `at` (the write time). */
   validAt?: string
 }
@@ -634,6 +644,17 @@ function renderSkill(
   if (previous?.supersededBy !== undefined && previous.supersededBy.length > 0) fields.superseded_by = previous.supersededBy
   if (previous?.supersedes !== undefined && previous.supersedes.length > 0) fields.supersedes = previous.supersedes.join(',')
   fields.provenance = previous?.provenance !== undefined && previous.provenance.length > 0 ? previous.provenance : meta.provenance ?? 'inferred'
+  /**
+   * v0.32 P1: the generation and the commit the experience belongs to. Written only when
+   * the caller actually knows them — an invented commit would be worse than no commit,
+   * because retrieval treats a mismatch as "this is old" and a missing value as "unknown".
+   */
+  if (typeof meta.generation === 'number' && Number.isFinite(meta.generation) && meta.generation > 0) {
+    fields.generation = Math.trunc(meta.generation)
+  }
+  if (typeof meta.commitHash === 'string' && /^[0-9a-f]{7,40}$/u.test(meta.commitHash)) {
+    fields.commitHash = meta.commitHash
+  }
   // v0.5 decay bookkeeping: a fresh write is also a fresh validation.
   fields.last_validated = previous?.lastValidated !== undefined && previous.lastValidated.length > 0 ? previous.lastValidated : now
   fields.last_used = previous?.lastUsed !== undefined && previous.lastUsed.length > 0 ? previous.lastUsed : now

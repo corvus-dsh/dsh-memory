@@ -210,8 +210,8 @@ const canWrite = state !== null && state !== undefined
 
 | 仓库 | 结果 |
 |---|---|
-| `dsh-graft-slice` | **527 / 527 通过** |
-| `dsh-memory` | **238 / 238 通过**（v0.32：+2 pre-step/memory_search 工作区解析，+4 过滤器 effort/预算重试，+1 控制台作用域） |
+| `dsh-graft-slice` | **538 / 538 通过** |
+| `dsh-memory` | **248 / 248 通过**（v1.0.2：+6 代次/commit 降权；此前 +2 工作区解析、+4 过滤器 effort/预算、+2 控制台） |
 
 `dsh-memory` 连续 3 次全量运行零失败（此前多进程锁测试在满载下偶发，已通过放宽 barrier 预算至 60s 修正——锁超时退出码 3、丢记录退出码 0，二者仍可区分）。
 
