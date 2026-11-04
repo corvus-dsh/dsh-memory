@@ -1453,7 +1453,7 @@ window.__ModuleLoader__.load({
     return {
       // v0.22: 'remote' and 'remote.commands' are SERVICES; the Cordis property guard
       // reads exactly this array. `dsh.client.inject` orders loading, it grants nothing.
-      inject: ['slots', 'remote', 'remote.commands'],
+      inject: ['slots', 'remote', 'remote.commands', 'remote.session'],
       apply(ctx) {
         // v0.24: build the bridge PER SLOT INSTANCE so it can read `useSessions` from
         // the root-scoped `main` slot props. Building it once here froze it before any
