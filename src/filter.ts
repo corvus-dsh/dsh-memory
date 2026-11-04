@@ -249,7 +249,38 @@ export async function selectApplicableSkillsDetailed(
     const detail = raw.replace(/\s+/gu, ' ').slice(0, 160) || `(empty; finish=${finishKind}, reasoningChars=${reasoningChars})`
     throw new Error(`filter reply had no JSON: ${detail}`)
   }
-  const parsed = JSON.parse(raw.slice(start, end + 1))
+  /**
+   * v0.32 P1 — SALVAGE THE `apply` LIST WHEN THE ENVELOPE IS NOT STRICT JSON.
+   *
+   * Measured on `qiniu/deepseek-v4.1-flash`: with room in the budget it answers, but
+   * sometimes with a JSON *dialect* — a comment line, a trailing comma, a bare
+   * identifier — and the whole verdict was thrown away:
+   *
+   *   filter reply had no JSON / Expected property name or '}' at position 4
+   *
+   * The hint then degraded to strict lexical recall for no reason at all. Recovery is
+   * narrow ON PURPOSE: only quoted ids inside `"apply": [...]` are read, and each one
+   * still has to match a candidate stage 1 actually produced. `supersede` is a WRITE
+   * decision and is only ever taken from strictly parsed JSON, so a sloppy envelope can
+   * cost us precision on the hint but can never retire a memory.
+   */
+  const salvageApply = (text: string): string[] => {
+    const match = /"apply"\s*:\s*\[([^\]]*)\]/u.exec(text)
+    if (match === null) return []
+    return [...match[1].matchAll(/"([^"\\]*(?:\\.[^"\\]*)*)"/gu)].map((entry) => entry[1])
+  }
+
+  let parsed: any
+  try {
+    parsed = JSON.parse(raw.slice(start, end + 1))
+  } catch (error) {
+    const salvaged = salvageApply(raw)
+    if (salvaged.length === 0) {
+      const detail = raw.replace(/\s+/gu, ' ').slice(0, 160) || `(empty; finish=${finishKind}, reasoningChars=${reasoningChars})`
+      throw new Error(`filter reply was not JSON and nothing could be salvaged: ${detail}`)
+    }
+    parsed = { apply: salvaged, supersede: [], salvaged: true }
+  }
   // Anti-hallucination gate: only ids that stage 1 actually produced survive.
   // Order follows the candidate ranking (stage-1 score), not the model's wording.
   const allowed = new Map(candidates.map((candidate) => [candidate.id.toLowerCase(), candidate.id]))

@@ -16,7 +16,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { clearFilterCache, selectApplicableSkills } from '../lib/filter.js'
+import { clearFilterCache, selectApplicableSkills, selectApplicableSkillsDetailed } from '../lib/filter.js'
 
 function hit(id, when) {
   return { kind: 'skill', id, title: id, score: 0.9, when }
@@ -98,4 +98,52 @@ test('v0.32 filter: a caller that pins its own effort gets exactly one attempt',
   )
   assert.equal(state.calls, 1, 'an explicit effort is an explicit decision; do not silently override it')
   assert.deepEqual(state.efforts, ['high'])
+})
+
+/**
+ * v0.32 P1 — A JSON DIALECT IS NOT A VERDICT LOSS.
+ *
+ * Measured live: `Expected property name or '}' in JSON at position 4 (line 2 column 3)`
+ * — the model answered with a comment or a trailing comma, and the entire adjudication
+ * was discarded, degrading the hint to strict lexical recall.
+ */
+function replyingWith(text) {
+  return {
+    async *stream() {
+      yield { type: 'text-delta', text }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    },
+  }
+}
+
+test('v0.32 filter: a malformed envelope still yields the apply list (ids validated)', async () => {
+  clearFilterCache()
+  const reply = '{\n  // 只有一个命中\n  "apply": ["relevant", "hallucinated"],\n  "supersede": []\n}'
+  const verdict = await selectApplicableSkillsDetailed(replyingWith(reply), '连数据库', [hit('relevant', 'w1')], {
+    bypassCache: true,
+    reasoningEffort: 'high',
+  })
+  assert.deepEqual(verdict.apply, ['relevant'], 'the real id survives; the invented one is dropped')
+})
+
+test('v0.32 filter: a malformed envelope can never retire a memory', async () => {
+  clearFilterCache()
+  const reply = '{"apply": ["relevant"], "supersede": [{"winner":"relevant","loser":"noise","reason":"x"}],}'
+  const verdict = await selectApplicableSkillsDetailed(replyingWith(reply), '连数据库', [hit('relevant', 'w1'), hit('noise', 'w2')], {
+    bypassCache: true,
+    reasoningEffort: 'high',
+  })
+  assert.deepEqual(verdict.apply, ['relevant'])
+  assert.deepEqual(verdict.supersede, [], 'supersede is a WRITE: only strictly parsed JSON may carry it')
+})
+
+test('v0.32 filter: an unsalvageable reply still throws (fail closed)', async () => {
+  clearFilterCache()
+  await assert.rejects(
+    () => selectApplicableSkills(replyingWith('我无法判断这些技能是否适用。'), '连数据库', [hit('relevant', 'w1')], {
+      bypassCache: true,
+      reasoningEffort: 'high',
+    }),
+    /had no JSON|nothing could be salvaged/u,
+  )
 })

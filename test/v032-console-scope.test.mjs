@@ -35,3 +35,23 @@ test('v0.32 console: withTimeout is factory-scoped, so the toggle handlers resol
   const writeBody = bundle.slice(firstWriteAt, firstWriteAt + 4000)
   assert.match(writeBody, /withTimeout\(bridge\.set/u, 'the write path still goes through the bounded helper')
 })
+
+/**
+ * v0.32 P0 — the command envelope must be unwrapped, never stringified as state.
+ * Same defect as the graft console; the live symptoms were "记忆库 0 条", "(未知)"
+ * workspace, and "台账 正在读取…" while six skills sat on disk.
+ */
+test('v0.32 console: the command envelope is unwrapped, never stringified as state', () => {
+  assert.match(bundle, /const execution = unwrapExecution\(settled\)/u, 'the reply goes through the unwrapper')
+  assert.doesNotMatch(
+    bundle,
+    /ok: true, text: JSON\.stringify\(settled\)/u,
+    'the old "stringify whatever came back and call it success" fallback must be gone',
+  )
+  const bridgeAt = bundle.indexOf('function makeBridge(')
+  const unwrapAt = bundle.indexOf('const unwrapExecution = (value) =>')
+  const callAt = bundle.indexOf('const execution = unwrapExecution(settled)')
+  assert.ok(bridgeAt > 0 && unwrapAt > 0 && callAt > 0, 'bridge, unwrapper and call site all present')
+  assert.ok(unwrapAt > bridgeAt, 'the unwrapper is inside makeBridge (the harness lifts that function out)')
+  assert.ok(unwrapAt < callAt, 'and is defined before the call that uses it')
+})

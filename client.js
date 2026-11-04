@@ -40,6 +40,11 @@ window.__ModuleLoader__.load({
      * live page showed it as a red `remote.commands.execute` card plus the "these are
      * the plugin defaults" line.
      */
+    /**
+     * v0.32 P1 — the envelope helpers live INSIDE makeBridge (only it uses them, and
+     * the bridge is unit-tested by lifting it out of this bundle). `withTimeout` stays
+     * at factory scope because the renderer needs it too.
+     */
     const withTimeout = (promise, ms, label) =>
       new Promise((resolve) => {
         let settled = false
@@ -98,6 +103,60 @@ window.__ModuleLoader__.load({
 `
 
     function makeBridge(ctx, host, slotProps) {
+      /**
+       * v0.32 P1 — PEELING THE COMMAND ENVELOPE.
+       *
+       * `commands.execute` resolves to a CommandExecution `{ kind, text }`, not to
+       * `{ result: { kind, text } }`. The old code looked only at `.result` and then
+       * fell back to `JSON.stringify(settled)` with `ok: true`, so the panel's state
+       * became the ENVELOPE: no `skills`, no `ledger`, no `workspace`.
+       *
+       * Live symptoms from that one line: "记忆库 0 条", 工作区 "(未知)", 台账 "正在
+       * 读取…", every switch OFF and un-flippable — while the write toast said
+       * "已保存到全局配置" because the Host really had persisted it.
+       */
+      const tryParse = (text) => {
+        try {
+          return JSON.parse(text)
+        } catch {
+          return undefined
+        }
+      }
+
+      const safeSlice = (value, limit) => {
+        const cap = typeof limit === 'number' ? limit : 600
+        try {
+          const text = typeof value === 'string' ? value : JSON.stringify(value)
+          if (typeof text !== 'string') return String(value)
+          return text.length > cap ? `${text.slice(0, cap)}…` : text
+        } catch {
+          return '(无法序列化的返回值)'
+        }
+      }
+
+      const unwrapExecution = (value) => {
+        let node = value
+        let decision = undefined
+        for (let depth = 0; depth < 3 && decision === undefined; depth += 1) {
+          if (node === null || node === undefined) return undefined
+          if (typeof node === 'string') {
+            const parsed = tryParse(node)
+            if (parsed === undefined) return undefined
+            node = parsed
+            continue
+          }
+          if (typeof node !== 'object') return undefined
+          if (typeof node.text === 'string') {
+            decision = { kind: typeof node.kind === 'string' ? node.kind : 'success', text: node.text }
+            break
+          }
+          const inner = node.result !== undefined ? node.result : node.value !== undefined ? node.value : node.execution
+          if (inner === undefined) return undefined
+          node = inner
+        }
+        return decision
+      }
+
       /**
        * v0.24 — `gateway/arguments-invalid` on `commands/execute`, AND the stuck
        * "正在读取…".
@@ -280,10 +339,24 @@ window.__ModuleLoader__.load({
            */
           try {
             const settled = await commands.execute(effectiveAgent, effectiveLine, [], undefined)
-            const text = settled && settled.result && typeof settled.result.text === 'string' ? settled.result.text : undefined
-            if (text !== undefined) return { ok: settled.result.kind !== 'error', text, via: 'remote.commands.execute' }
-            if (settled !== undefined) return { ok: true, text: JSON.stringify(settled), via: 'remote.commands.execute' }
-            failures.push('remote.commands.execute: returned undefined (the command name did not resolve)')
+            /**
+             * v0.32 P0 — THE COMMAND ENVELOPE IS NOT THE PANEL STATE.
+             *
+             * `commands.execute` resolves to a CommandExecution `{ kind, text }`, not to
+             * `{ result: CommandExecution }`. Looking only at `.result` made the bridge
+             * stringify the envelope and report `ok: true`, so the panel's state became
+             * `{ kind: 'success', text: '{"skills":6,…}' }` — an object with no `skills`,
+             * no `ledger`, no `workspace`.
+             *
+             * Live symptoms, all from this one line: 记忆库 "0 条", 工作区 "(未知)",
+             * 台账 "正在读取…", every switch OFF and un-flippable, while the write toast
+             * said "已保存到全局配置" because the Host really had persisted it.
+             */
+            const execution = unwrapExecution(settled)
+            if (execution !== undefined) {
+              return { ok: execution.kind !== 'error', text: execution.text, via: 'remote.commands.execute', raw: settled }
+            }
+            failures.push(`remote.commands.execute: 无法识别的返回形状（期望 { kind, text }）：${safeSlice(settled)}`)
           } catch (error) {
             failures.push(`remote.commands.execute: ${String((error && error.message) || error)}`)
           }
