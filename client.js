@@ -85,10 +85,22 @@ window.__ModuleLoader__.load({
        * — the supported selector for live sessions from a root panel. No `list()`
        * anywhere, and no invented agent.
        */
+      /**
+       * v0.26: the hook is ATTACHED by the component, because it arrives as a PROP.
+       *
+       * The `inject` callback for a root-scoped slot receives NO arguments (its
+       * `InjectParams` tuple is empty), so reading `slotProps.useSessions` there always
+       * produced `undefined`. The hook is a standard selector delivered to the COMPONENT,
+       * which forwards it here through `attach()`.
+       */
+      let sessionsHook = (() => {
+        if (slotProps === undefined || slotProps === null) return undefined
+        return typeof slotProps.useSessions === 'function' ? slotProps.useSessions : undefined
+      })()
+
       const sessionIdsFromProps = () => {
         try {
-          if (slotProps === undefined || slotProps === null) return []
-          const useSessions = slotProps.useSessions
+          const useSessions = sessionsHook
           if (typeof useSessions !== 'function') return []
           const snapshot = useSessions((value) => value)
           if (snapshot === undefined || snapshot === null) return []
@@ -226,6 +238,15 @@ window.__ModuleLoader__.load({
          * sessions() is synchronous and pure (it reads the injected snapshot), so the
          * panel can call it on every render without a round trip.
          */
+        /**
+         * v0.26: the component hands over the `useSessions` hook it received.
+         *
+         * Until this is called, `sessions()` is empty and `canWrite()` is false, so no
+         * request is attempted — the reported fix.
+         */
+        attach: (hook) => {
+          if (typeof hook === 'function') sessionsHook = hook
+        },
         sessions: () => listSessions(),
         /** Is there an agent right now? Decides read-only mode vs. interactive. */
         canWrite: () => agentOf() !== undefined,
@@ -344,7 +365,19 @@ window.__ModuleLoader__.load({
       }
     }
 
-    function MemoryConsole({ bridge }) {
+    function MemoryConsole({ bridge, useSessions }) {
+      /**
+       * v0.26: hand the selector to the bridge BEFORE anything can request.
+       *
+       * Runs during render, above every effect, so by the time `refresh` can fire the
+       * bridge already knows how to list sessions. With no hook the bridge stays empty
+       * and NO request is made — which is the reported fix.
+       */
+      try {
+        if (bridge !== undefined && typeof bridge.attach === 'function') bridge.attach(useSessions)
+      } catch {
+        // A bridge that cannot attach is a bridge that will report "no session".
+      }
       const [state, setState] = React.useState(null)
       const [error, setError] = React.useState('')
       const [notice, setNotice] = React.useState('')
@@ -414,6 +447,36 @@ window.__ModuleLoader__.load({
         const run = async () => {
           if (bridge === undefined) {
             if (alive) { setError('桥接未注入（slot inject 缺失）'); setBusy(false) }
+            return
+          }
+          /**
+           * v0.26 P0 — THE AGENT GUARD, BEFORE ANY REQUEST.
+           *
+           * This is the bug the user reported: the panel rendered its read-only UI
+           * correctly, and then the background fetch STILL went out with an undefined
+           * agent, so the gateway rejected it and the red `remote.commands.execute` card
+           * appeared over a panel that was already correctly saying "read only".
+           *
+           * The UI state was right; the traffic was not. So the guard belongs HERE, at
+           * the single choke point every request passes through, not in the renderer:
+           *
+           *   if no agent -> do not send, do not clear the data, do not raise an error.
+           *
+           * An error is also wrong here. "Nobody has picked a session yet" is a
+           * NORMAL state on a root-scoped panel, not a failure, and printing it in red
+           * teaches the user to ignore red.
+           */
+          const agentReady = (() => {
+            try {
+              if (picked.length > 0) return true
+              return bridge !== undefined && typeof bridge.canWrite === 'function' && bridge.canWrite() === true
+            } catch {
+              return false
+            }
+          })()
+          if (!agentReady) {
+            // Deliberately NOT an error: show the skeleton, wait for a choice.
+            if (alive) { setBusy(false); setError('') }
             return
           }
           if (alive) setBusy(true)
@@ -713,7 +776,7 @@ window.__ModuleLoader__.load({
             {
               name: 'main',
               key: PANEL_KEY,
-              inject: (props) => ({ bridge: makeBridge(ctx, host, props) }),
+              inject: () => ({ bridge: makeBridge(ctx, host) }),
             },
             withBoundary(MemoryConsole),
           ),
