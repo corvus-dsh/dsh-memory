@@ -1277,7 +1277,28 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
   const lastTaskBlocks = new Map<string, number>()
 
   const memoryConsoleState = (agentId: string): Record<string, unknown> => {
-    const workspace = liveWorkspaceOf(agentId)
+    /**
+     * v0.32 P1 — A ROOT-SCOPED PANEL HAS NO SESSION, BUT THE STORE STILL HAS ONE.
+     *
+     * The client sends the constant placeholder id (`dsh-memory-console-global`) when no
+     * session is bound. `sessions.get(placeholder)` is undefined, so the workspace read
+     * "(未知)" even though a session was open in this window — the panel then labelled
+     * every memory as belonging to nowhere. Falling back to the newest LIVE session is
+     * the same rule the graft console uses for its "most recent" default, and it is only
+     * used to LABEL and to scope a read, never to write.
+     */
+    const newestLiveSessionId = (): string => {
+      try {
+        const sessions = ctx.get?.('sessions') as any
+        const list = typeof sessions?.list === 'function' ? sessions.list() : undefined
+        if (!Array.isArray(list) || list.length === 0) return ''
+        const last = list[list.length - 1]
+        return typeof last?.id === 'string' ? last.id : ''
+      } catch {
+        return ''
+      }
+    }
+    const workspace = liveWorkspaceOf(agentId) || liveWorkspaceOf(newestLiveSessionId())
     const skills = listSkillRecords(resolved.skillsDir)
     const scenes = [...new Set(skills.map((skill) => skill.scene))].sort()
     const active = skills.filter((skill) => skill.invalidAt.length === 0 || Date.parse(skill.invalidAt) > Date.now())
