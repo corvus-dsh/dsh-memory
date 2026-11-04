@@ -183,9 +183,25 @@ window.__ModuleLoader__.load({
         return ids
       }
 
+      /**
+       * v0.28: a shape-valid Agent for a session-independent command.
+       *
+       * `Agent` is `{ id: SessionId }`; the gateway checks the SHAPE and never the
+       * existence. The Host side of `/memory-console-global` reads nothing from it. So a
+       * placeholder is honest here — it is not a pretend session, it is the parameter the
+       * contract demands for a request that has no session.
+       */
+      const GLOBAL_AGENT_ID = 'dsh-memory-console-global'
+
       const callHost = async (line, preferredId) => {
         const failures = []
         const agent = agentOf(preferredId)
+        /**
+         * v0.28 P0: when no session is known and the caller is a READ, redirect to the
+         * global command rather than refusing. Writes never take this path.
+         */
+        const isWrite = /-set|-clear/u.test(line)
+        const effectiveLine = agent === undefined && !isWrite && line === '/memory-console' ? '/memory-console-global' : line
         const commands = (() => {
           try {
             const remote = ctx && ctx.get ? ctx.get('remote') : undefined
@@ -197,11 +213,32 @@ window.__ModuleLoader__.load({
         })()
 
         if (commands && typeof commands.execute === 'function') {
-          if (agent === undefined) {
-            failures.push('没有可用的活动会话：agent 参数必填，伪造会被 gateway 拒绝')
+          /**
+           * v0.28 P0 — GLOBAL READS ALWAYS RUN; WRITES STILL NEED A REAL SESSION.
+           *
+           * The gateway validates `agent` by SHAPE (`{ id: string }`), never by
+           * existence — which is why `gateway/arguments-invalid` appeared for `undefined`
+           * and never for a well-formed id.
+           *
+           * READS through `/memory-console-global` read nothing from the agent, so a
+           * shape-valid placeholder is sound and the panel finally gets its global data
+           * (knobs, totals, scenes, ledger) with no session open.
+           *
+           * WRITES are different in kind: `/memory-console-set` records WHO changed a
+           * knob, and an invented id would make that audit a lie. They still require a
+           * real session and are refused without one.
+           */
+          const isWrite = /-set|-clear/u.test(line)
+          const target = agent !== undefined && agent !== null
+            ? agent
+            : isWrite
+              ? undefined
+              : { id: GLOBAL_AGENT_ID }
+          if (target === undefined) {
+            failures.push('写入需要一个确定的会话（当前没有活动会话），已阻止发送')
           } else {
             try {
-              const settled = await commands.execute(agent, line, [], undefined)
+              const settled = await commands.execute(target, effectiveLine, [], undefined)
               const text = settled && settled.result && typeof settled.result.text === 'string' ? settled.result.text : undefined
               if (text !== undefined) return { ok: settled.result.kind !== 'error', text, via: 'remote.commands.execute' }
               if (settled !== undefined) return { ok: true, text: JSON.stringify(settled), via: 'remote.commands.execute' }
@@ -553,6 +590,23 @@ window.__ModuleLoader__.load({
            * render and captured here; switching a session re-runs this effect because
            * `sessionKey` is a dependency.
            */
+          /**
+           * v0.28 P0 — NO DEAD END: ALWAYS FETCH, AND LABEL WHAT YOU FETCHED.
+           *
+           * v0.26 refused to send anything without an agent, which stopped the abandoned
+           * gateway call but ALSO stopped the global data (knobs, totals, scenes, ledger)
+           * from ever loading. The user then saw a permanent "只读" with no numbers — a
+           * correct guard producing a useless panel.
+           *
+           * The distinction that was missing:
+           *
+           *   session-scoped reads  -> need an agent; block without one
+           *   global reads          -> need nothing; ALWAYS run
+           *
+           * The bridge already redirects an agent-less `/memory-console` to
+           * `/memory-console-global`, so simply making the request is enough. What must
+           * never happen is a WRITE in that state.
+           */
           const target = picked.length > 0
             ? picked
             : activeFromHook !== ''
@@ -560,14 +614,9 @@ window.__ModuleLoader__.load({
               : liveSessions.length > 0
                 ? liveSessions[liveSessions.length - 1]
                 : ''
-          const agentReady = target.length > 0
-          if (!agentReady) {
-            // Deliberately NOT an error: show the skeleton, wait for a choice.
-            if (alive) { setBusy(false); setError('') }
-            return
-          }
           if (alive) setBusy(true)
           try {
+            // No agent: the bridge sends the GLOBAL command with a shape-valid placeholder.
             const reply = await withTimeout(bridge.state(target), 12_000, '读取控制台状态')
             if (!alive) return
             setVia(String((reply && reply.via) || ''))
@@ -663,10 +712,43 @@ window.__ModuleLoader__.load({
        * and since that used to happen inside an effect, it never updated. `liveSessions`
        * is recomputed on every render and therefore follows a session switch.
        */
-      const sessions = liveSessions
-      /** The session this panel will act on, resolved the same way the bridge does. */
+      /**
+       * v0.28 P0 — WHERE THE SESSION LIST ACTUALLY COMES FROM, in priority order.
+       *
+       *   1. THE HOST PAYLOAD. `state.sessions` is produced by `sessions.list()` on the
+       *      Host, which is the only place that method exists. This is authoritative and
+       *      works even when the Client exposes nothing.
+       *   2. THE HOOK. `useSessions`, when the owner actually projects something.
+       *   3. Nothing.
+       *
+       * v0.27 relied on (2) alone. On this sidebar it returns an empty list, so the
+       * selector never appeared even though a session was plainly open — the panel was
+       * asking the one party that could not answer.
+       */
+      const hostSessions = state !== null && state !== undefined && Array.isArray(state.sessions)
+        ? state.sessions
+            .map((entry) => (entry && typeof entry.sessionId === 'string' ? entry.sessionId : typeof entry === 'string' ? entry : ''))
+            .filter((id) => id.length > 0)
+        : []
+      const sessions = hostSessions.length > 0 ? hostSessions : liveSessions
+      /** Where the list came from, so the UI can say it honestly. */
+      const sessionSource = hostSessions.length > 0 ? 'host' : liveSessions.length > 0 ? 'hook' : 'none'
+      /** The session this panel will act on. */
       const effectiveSession = picked.length > 0 ? picked : activeFromHook !== '' ? activeFromHook : sessions.length > 0 ? sessions[sessions.length - 1] : ''
-      const canWrite = effectiveSession.length > 0
+      /**
+       * v0.28: the switches are GLOBAL, so they are usable whenever the Host is reachable.
+       *
+       * v0.26 gated them on `effectiveSession`, which made sense when every command was
+       * session-scoped. But `/memory-console-set` writes the profile patch — it is a
+       * workspace-wide setting that has nothing to do with which session is open. Locking
+       * it behind a session is what kept the panel inert in global mode.
+       *
+       * `canWrite` now means "the panel can talk to the Host at all". Session-scoped
+       * controls (the watermark view) are greyed separately.
+       */
+      const canWrite = state !== null && state !== undefined
+      /** A session exists to scope session-only controls against. */
+      const hasSession = effectiveSession.length > 0
 
       /**
        * v0.24: THREE states, not two.
@@ -717,15 +799,25 @@ window.__ModuleLoader__.load({
               key: 'rf',
               type: 'button',
               className: 'mc-btn',
-              disabled: busy || !canWrite,
+              disabled: busy,
               onClick: refresh,
-              title: canWrite ? '立即重新拉取状态' : '只读状态下没有可拉取的目标会话',
+              title: '立即重新拉取状态（全局数据不需要会话）',
             }, busy ? '读取中…' : '刷新'),
           ]),
           h('p', { key: 's', className: 'mc-sub' },
             sessions.length === 0
-              ? '当前没有活动会话。面板处于只读模式：可以查看记忆库总量，但开关不可调节。打开一个会话后这里会更新。'
-              : `命令会以会话 ${effectiveSession} 的身份执行。切换下拉框会立即重新读取。`),
+              /**
+               * v0.28: GLOBAL MODE is a real mode, not a degraded dead end.
+               *
+               * Everything above this line — the knobs, the corpus totals, the scenes,
+               * the ledger epoch — is session-INDEPENDENT and is already loaded. Only the
+               * live per-session part needs a session. So the message says what works,
+               * and the switches below stay ENABLED because they are global settings.
+               */
+              ? '全局模式：以下开关作用于整个记忆库（与具体会话无关），可以直接调节并落盘。会话级的水位/选择在打开会话后出现。'
+              : `命令会以会话 ${effectiveSession} 的身份执行（列表来源：${sessionSource === 'host' ? '宿主 sessions.list' : 'useSessions'}）。切换会立即重新读取。`),
+          // The selector is rendered whenever a list exists — from EITHER source, which is
+          // the entire point of v0.28.
           sessions.length === 0
             ? null
             : h('div', { key: 'r', className: 'mc-row' }, [
@@ -736,14 +828,13 @@ window.__ModuleLoader__.load({
                   value: picked,
                   'aria-label': '目标会话',
                   onChange: (event) => {
-                    // Selecting is a deliberate act: take it, and refetch immediately.
                     setPicked(String(event.target.value || ''))
                     setState(null)
                     setError('')
                     setTick((value) => value + 1)
                   },
                 }, [
-                  h('option', { key: '', value: '' }, sessions.length > 0 ? `（默认：${effectiveSession}）` : '（最新一个）'),
+                  h('option', { key: '', value: '' }, `（默认：${effectiveSession}）`),
                   ...sessions.map((id) => h('option', { key: id, value: id }, id)),
                 ]),
               ]),

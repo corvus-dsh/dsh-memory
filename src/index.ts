@@ -1278,6 +1278,39 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
       },
       scenes,
       skills,
+      /**
+       * v0.28 P0: EVERY LIVE SESSION, produced where `sessions.list()` actually exists.
+       *
+       * The panel needs this to render its session selector. The CLIENT cannot enumerate
+       * sessions — its `sessions` service has no `list()`, and `useSessions` only projects
+       * what the owner chose to publish, which on a root-scoped panel can be nothing at
+       * all. The HOST has the list, so it is shipped with the state instead of being
+       * guessed at on the other side of the wire.
+       */
+      sessions: (() => {
+        try {
+          const sessions = ctx.get?.('sessions') as any
+          if (sessions === undefined || sessions === null || typeof sessions.list !== 'function') return []
+          const out: Array<{ sessionId: string; cwd: string }> = []
+          for (const agent of sessions.list() as any[]) {
+            const sessionId = typeof agent?.id === 'string' ? agent.id : ''
+            if (sessionId.length === 0) continue
+            let cwd = ''
+            try {
+              const live = sessions.get?.(sessionId) as any
+              const header = live?.header
+              if (header !== null && typeof header === 'object' && typeof header.cwd === 'string') cwd = header.cwd
+              else if (typeof live?.cwd === 'string') cwd = live.cwd
+            } catch {
+              cwd = ''
+            }
+            out.push({ sessionId, cwd })
+          }
+          return out
+        } catch {
+          return []
+        }
+      })(),
       // v0.18: the panel answers "why has nothing been harvested?" — a refused
       // ledger shows up here instead of looking like an empty one.
       ledger: (() => {
@@ -1316,6 +1349,30 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
       handler: async (invocation: any) => ({
         kind: 'success' as const,
         text: JSON.stringify(memoryConsoleState(String(invocation?.agent?.id ?? ''))),
+      }),
+    })
+    /**
+     * v0.28 P0 — A COMMAND THAT NEEDS NO SESSION, AND ITS OWN SESSION LIST.
+     *
+     * The panel could not obtain an agent from a root-scoped sidebar. Every attempt to
+     * resolve one on the CLIENT side failed, because the Client `sessions` service has
+     * no `list()` and `useSessions` only projects what the owner decided to publish.
+     *
+     * But most of what the console shows does not depend on a session at all: the knobs,
+     * the skill catalogue, the scenes, the ledger epoch, the memory totals. Only the
+     * "which session am I acting on" part does.
+     *
+     * So this command answers the GLOBAL question, and returns the session list the
+     * panel needs to offer a choice. The `agent` argument the gateway demands is supplied
+     * by the caller purely to satisfy the contract; nothing here reads it.
+     */
+    commands.register({
+      name: 'memory-console-global',
+      description:
+        '读取不依赖具体会话的记忆库状态，并附上全部活动会话列表。Read the session-independent memory state plus the live session list.',
+      handler: async () => ({
+        kind: 'success' as const,
+        text: JSON.stringify(memoryConsoleState('')),
       }),
     })
     commands.register({
