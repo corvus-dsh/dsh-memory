@@ -62,29 +62,82 @@ window.__ModuleLoader__.load({
 .mc-crash pre{margin:8px 0 0;white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,Consolas,monospace;font-size:11.5px;opacity:.9}
 `
 
-    function makeBridge(ctx, host) {
+    function makeBridge(ctx, host, slotProps) {
       /**
-       * v0.22: `remote.commands.execute(agent, line, attachments, signal)`.
+       * v0.24 — `gateway/arguments-invalid` on `commands/execute`, AND the stuck
+       * "正在读取…".
        *
-       * The earlier version passed `(method, args, ...)`, which is not the signature:
-       * the Remote takes the receiving Agent first and a complete `/name args` line
-       * second. It also needs `inject: ['remote', 'remote.commands']` — the service
-       * keys, not the package name in `dsh.client` — or the Cordis guard throws
-       * `cannot get property "remote.commands" without inject`.
+       * The Host registers `commands.execute(agent, line, attachments, signal)` where
+       * `agent` is typed `Agent` = `{ id: SessionId }`: required, and validated. The
+       * gateway rejects anything else with exactly the error the panel was showing.
+       *
+       * `agentOf()` used to do `ctx.get('sessions').list()`. The CLIENT `sessions`
+       * service has NO `list()` method — its face is retain / using / retainInfo /
+       * refreshProjections / search / fork / scope / binding. `list()` belongs to the
+       * HOST store, a different object in a different process. So the call yielded
+       * `undefined` on every render, `execute(undefined, …)` was rejected, and the
+       * rejection surfaced as a red card (memory) or as a panel that never left the
+       * loading line (graft).
+       *
+       * The fix asks the SLOT first: `main` is root-scoped, so it receives `useSessions`
+       * — the supported selector for live sessions from a root panel. No `list()`
+       * anywhere, and no invented agent.
        */
+      const sessionIdsFromProps = () => {
+        try {
+          if (slotProps === undefined || slotProps === null) return []
+          const useSessions = slotProps.useSessions
+          if (typeof useSessions !== 'function') return []
+          const snapshot = useSessions((value) => value)
+          if (snapshot === undefined || snapshot === null) return []
+          const list = Array.isArray(snapshot)
+            ? snapshot
+            : Array.isArray(snapshot.sessions)
+              ? snapshot.sessions
+              : Array.isArray(snapshot.list)
+                ? snapshot.list
+                : []
+          const ids = []
+          for (const entry of list) {
+            const id =
+              typeof entry === 'string'
+                ? entry
+                : entry && typeof entry.id === 'string'
+                  ? entry.id
+                  : typeof entry?.sessionId === 'string'
+                    ? entry.sessionId
+                    : ''
+            if (id.length > 0) ids.push(id)
+          }
+          return ids
+        } catch {
+          return []
+        }
+      }
+
+      /** One valid `{ id }` agent, or undefined with the reason recorded by the caller. */
       const agentOf = () => {
+        const ids = sessionIdsFromProps()
+        if (ids.length > 0) return { id: ids[ids.length - 1] }
         try {
           const sessions = ctx.get ? ctx.get('sessions') : undefined
-          const list = sessions && typeof sessions.list === 'function' ? sessions.list() : undefined
-          const first = Array.isArray(list) && list.length > 0 ? list[0] : undefined
-          if (first !== undefined) return first
+          if (sessions && typeof sessions.list === 'function') {
+            const list = sessions.list()
+            if (Array.isArray(list) && list.length > 0) {
+              const first = list[0]
+              const id = typeof first === 'string' ? first : first && typeof first.id === 'string' ? first.id : ''
+              if (id.length > 0) return { id }
+            }
+          }
         } catch {
-          // A missing sessions service is not fatal: the call reports it.
+          // Reported as "no session", which is the accurate statement.
         }
         return undefined
       }
+
       const callHost = async (line) => {
         const failures = []
+        const agent = agentOf()
         const commands = (() => {
           try {
             const remote = ctx && ctx.get ? ctx.get('remote') : undefined
@@ -94,16 +147,23 @@ window.__ModuleLoader__.load({
             return undefined
           }
         })()
+
         if (commands && typeof commands.execute === 'function') {
-          try {
-            const settled = await commands.execute(agentOf(), line, [], undefined)
-            const text = settled && settled.result && typeof settled.result.text === 'string' ? settled.result.text : undefined
-            if (text !== undefined) return { ok: settled.result.kind !== 'error', text, via: 'remote.commands.execute' }
-            if (settled !== undefined) return { ok: true, text: JSON.stringify(settled), via: 'remote.commands.execute' }
-            failures.push('remote.commands.execute: returned undefined (the command name did not resolve)')
-          } catch (error) {
-            failures.push(`remote.commands.execute: ${String((error && error.message) || error)}`)
+          if (agent === undefined) {
+            failures.push('没有可用的活动会话：agent 参数必填，伪造会被 gateway 拒绝')
+          } else {
+            try {
+              const settled = await commands.execute(agent, line, [], undefined)
+              const text = settled && settled.result && typeof settled.result.text === 'string' ? settled.result.text : undefined
+              if (text !== undefined) return { ok: settled.result.kind !== 'error', text, via: 'remote.commands.execute' }
+              if (settled !== undefined) return { ok: true, text: JSON.stringify(settled), via: 'remote.commands.execute' }
+              failures.push('remote.commands.execute: returned undefined (the command name did not resolve)')
+            } catch (error) {
+              failures.push(`remote.commands.execute: ${String((error && error.message) || error)}`)
+            }
           }
+        } else {
+          failures.push('remote.commands 不可用（inject 未生效或宿主未挂载）')
         }
         // The dynamic-package RPC: only present when this bundle runs as a DYNAMIC
         // package. An installed client module receives `require` alone.
@@ -259,14 +319,47 @@ window.__ModuleLoader__.load({
 
       React.useEffect(() => {
         let alive = true
+        /**
+         * v0.24: a HARD timeout on the fetch.
+         *
+         * The bridge awaits a Remote call. If the gateway never settles — a broken
+         * connection, a channel that is mounted but not answering — the await never
+         * returns and `busy` stays true forever, so the panel spins with no way to
+         * recover. Twelve seconds is longer than any healthy round trip and short
+         * enough that a user sees a real answer either way.
+         */
+        const withTimeout = (promise, ms, label) =>
+          new Promise((resolve) => {
+            let settled = false
+            const timer = setTimeout(() => {
+              if (settled) return
+              settled = true
+              resolve({ ok: false, via: 'timeout', text: `${label} 超时（${ms}ms 内宿主没有回应）` })
+            }, ms)
+            Promise.resolve(promise).then(
+              (value) => {
+                if (settled) return
+                settled = true
+                clearTimeout(timer)
+                resolve(value)
+              },
+              (error) => {
+                if (settled) return
+                settled = true
+                clearTimeout(timer)
+                resolve({ ok: false, via: 'none', text: String((error && error.message) || error) })
+              },
+            )
+          })
+
         const run = async () => {
           if (bridge === undefined) {
-            if (alive) setError('桥接未注入（slot inject 缺失）')
+            if (alive) { setError('桥接未注入（slot inject 缺失）'); setBusy(false) }
             return
           }
           if (alive) setBusy(true)
           try {
-            const reply = await bridge.state()
+            const reply = await withTimeout(bridge.state(), 12_000, '读取控制台状态')
             if (!alive) return
             setVia(String((reply && reply.via) || ''))
             if (!reply || !reply.ok) {
@@ -331,14 +424,31 @@ window.__ModuleLoader__.load({
       const ledger = state !== null && state !== undefined && state.ledger ? state.ledger : undefined
       const shown = scene === '*' ? skills : skills.filter((skill) => skill.scene === scene)
 
+      /**
+       * v0.24: THREE states, not two.
+       *
+       * "no data yet" and "went and got it, and it failed" must not render the same
+       * line. The panel used to say 正在读取… whenever state was null — including after
+       * a hard failure — which is a permanent spinner that reports nothing and looks
+       * like a hang. `phase` makes the difference explicit:
+       *
+       *   loading  -> 正在读取…      (a fetch is in flight RIGHT NOW)
+       *   failed   -> 读取失败        (it returned, with an error; the card shows why)
+       *   ready    -> the real summary
+       */
+      const phase = state !== null && state !== undefined ? 'ready' : busy ? 'loading' : error.length > 0 ? 'failed' : 'loading'
+      const summary =
+        phase === 'ready'
+          ? `工作区 ${state.workspace || '(未知)'} · 存储 ${state.skillsDir || '(未知)'}`
+          : phase === 'failed'
+            ? '未能从宿主读取状态（原因见下方红色卡片）；开关显示的是默认值，不是真实配置。'
+            : '正在读取…'
+
       return h('div', { className: 'mc-root' }, [
         h('style', { key: 'css' }, CSS),
         h('div', { key: 'head' }, [
           h('h2', { key: 't', className: 'mc-h', style: { fontSize: '16px' } }, '记忆控制台 · dsh-memory'),
-          h('p', { key: 's', className: 'mc-sub' },
-            state === null || state === undefined
-              ? '正在读取…'
-              : `工作区 ${state.workspace || '(未知)'} · 存储 ${state.skillsDir || '(未知)'}`),
+          h('p', { key: 's', className: 'mc-sub' }, summary),
         ]),
         error ? h('div', { key: 'e', className: 'mc-card mc-err' }, error) : null,
         notice ? h('div', { key: 'n', className: 'mc-card mc-ok' }, notice) : null,
@@ -474,9 +584,18 @@ window.__ModuleLoader__.load({
       // reads exactly this array. `dsh.client.inject` orders loading, it grants nothing.
       inject: ['slots', 'remote', 'remote.commands'],
       apply(ctx) {
-        const bridge = makeBridge(ctx, host)
+        // v0.24: build the bridge PER SLOT INSTANCE so it can read `useSessions` from
+        // the root-scoped `main` slot props. Building it once here froze it before any
+        // session existed, which is how every call went out with an undefined agent.
         ctx.slots.inject('main', () =>
-          ctx.slots.register({ name: 'main', key: PANEL_KEY, inject: () => ({ bridge }) }, withBoundary(MemoryConsole)),
+          ctx.slots.register(
+            {
+              name: 'main',
+              key: PANEL_KEY,
+              inject: (props) => ({ bridge: makeBridge(ctx, host, props) }),
+            },
+            withBoundary(MemoryConsole),
+          ),
         )
         ctx.slots.inject('sidebar.panellist', () =>
           ctx.slots.register({ name: 'sidebar.panellist', id: PANEL_KEY, order: 61, label: () => '记忆' }, withBoundary(SidebarEntry)),
