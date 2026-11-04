@@ -197,11 +197,29 @@ window.__ModuleLoader__.load({
         const failures = []
         const agent = agentOf(preferredId)
         /**
-         * v0.28 P0: when no session is known and the caller is a READ, redirect to the
-         * global command rather than refusing. Writes never take this path.
+         * v0.30 P0 — PURE GLOBAL MODE: a READ never depends on a session.
+         *
+         * v0.28 redirected an agent-less read to `/memory-console-global`, but still
+         * needed a real agent for the write path and for any read where *some* session
+         * happened to be resolvable. That left the panel's behaviour dependent on state
+         * it cannot control — and on a root-scoped sidebar, that state is usually absent.
+         *
+         * Now the rule is unconditional:
+         *
+         *   - EVERY read goes to `/memory-console-global` with a shape-valid placeholder
+         *     agent. The Host command reads nothing from `agent`, and the gateway only
+         *     validates the SHAPE (`{ id: string }`), so this is sound rather than a
+         *     pretence.
+         *   - EVERY write goes to the real command with the same placeholder. The knobs
+         *     are PROFILE settings (`configEditor.edit` writes `cordis.patch.yml`), and
+         *     they are not attributable to a session, so requiring one was always wrong.
+         *
+         * The placeholder is a constant, so two panels cannot disagree about which
+         * pseudo-session they are acting as.
          */
         const isWrite = /-set|-clear/u.test(line)
-        const effectiveLine = agent === undefined && !isWrite && line === '/memory-console' ? '/memory-console-global' : line
+        const effectiveLine = isWrite ? line : line === '/memory-console' ? '/memory-console-global' : line
+        const effectiveAgent = agent !== undefined && agent !== null ? agent : { id: GLOBAL_AGENT_ID }
         const commands = (() => {
           try {
             const remote = ctx && ctx.get ? ctx.get('remote') : undefined
@@ -214,38 +232,27 @@ window.__ModuleLoader__.load({
 
         if (commands && typeof commands.execute === 'function') {
           /**
-           * v0.28 P0 — GLOBAL READS ALWAYS RUN; WRITES STILL NEED A REAL SESSION.
+           * v0.30 P0 — writes take the placeholder too.
            *
-           * The gateway validates `agent` by SHAPE (`{ id: string }`), never by
-           * existence — which is why `gateway/arguments-invalid` appeared for `undefined`
-           * and never for a well-formed id.
+           * v0.28 refused a write without a real session, on the reasoning that a knob
+           * change records WHO made it. That reasoning was wrong for these knobs: they are
+           * PROFILE settings written by `configEditor.edit` into `cordis.patch.yml`, and
+           * they belong to the workspace, not to a conversation. Requiring a session made
+           * the panel inert in exactly the case the user hit — global mode with nothing
+           * open — and the "有数据但无法点击" deadlock followed.
            *
-           * READS through `/memory-console-global` read nothing from the agent, so a
-           * shape-valid placeholder is sound and the panel finally gets its global data
-           * (knobs, totals, scenes, ledger) with no session open.
-           *
-           * WRITES are different in kind: `/memory-console-set` records WHO changed a
-           * knob, and an invented id would make that audit a lie. They still require a
-           * real session and are refused without one.
+           * The audit argument still has force, so the plugin's own audit line records the
+           * command name and value; the pseudo-id is a constant, and the UI states plainly
+           * that these are global settings. No session is invented as a REAL one.
            */
-          const isWrite = /-set|-clear/u.test(line)
-          const target = agent !== undefined && agent !== null
-            ? agent
-            : isWrite
-              ? undefined
-              : { id: GLOBAL_AGENT_ID }
-          if (target === undefined) {
-            failures.push('写入需要一个确定的会话（当前没有活动会话），已阻止发送')
-          } else {
-            try {
-              const settled = await commands.execute(target, effectiveLine, [], undefined)
-              const text = settled && settled.result && typeof settled.result.text === 'string' ? settled.result.text : undefined
-              if (text !== undefined) return { ok: settled.result.kind !== 'error', text, via: 'remote.commands.execute' }
-              if (settled !== undefined) return { ok: true, text: JSON.stringify(settled), via: 'remote.commands.execute' }
-              failures.push('remote.commands.execute: returned undefined (the command name did not resolve)')
-            } catch (error) {
-              failures.push(`remote.commands.execute: ${String((error && error.message) || error)}`)
-            }
+          try {
+            const settled = await commands.execute(effectiveAgent, effectiveLine, [], undefined)
+            const text = settled && settled.result && typeof settled.result.text === 'string' ? settled.result.text : undefined
+            if (text !== undefined) return { ok: settled.result.kind !== 'error', text, via: 'remote.commands.execute' }
+            if (settled !== undefined) return { ok: true, text: JSON.stringify(settled), via: 'remote.commands.execute' }
+            failures.push('remote.commands.execute: returned undefined (the command name did not resolve)')
+          } catch (error) {
+            failures.push(`remote.commands.execute: ${String((error && error.message) || error)}`)
           }
         } else {
           failures.push('remote.commands 不可用（inject 未生效或宿主未挂载）')
@@ -723,19 +730,21 @@ window.__ModuleLoader__.load({
       const write = async (key, value) => {
         try {
           /**
-           * v0.27: the write carries the SAME session the panel is showing.
-           *
-           * `picked` empty means "the default", and the bridge resolves that identically
-           * to `effectiveSession` below (hook's active -> newest live). Passing the
-           * resolved id when we have one keeps the write and the display in agreement
-           * even if the default shifts between renders.
+           * v0.30 P0: a write is a GLOBAL write. No session is needed, because the knob
+           * lives in the profile patch rather than in a conversation. The bridge supplies
+           * a constant placeholder so the gateway's shape check is satisfied, and the
+           * Host's `configEditor.edit` decides where it lands.
            */
-          const reply = await bridge.set(key, value, picked.length > 0 ? picked : undefined)
+          const reply = await withTimeout(bridge.set(key, value), 3_000, '写入配置')
           setVia(String((reply && reply.via) || ''))
           if (!reply || !reply.ok) { setError(String((reply && reply.text) || '写入失败')); return }
-          setNotice(String(reply.text || ''))
+          // A visible confirmation the user asked for by name: "已保存到全局配置".
+          setNotice('已保存到全局配置')
           setError('')
+          // Optimistic: show the new value immediately so the switch does not bounce
+          // back while the refetch is in flight.
           setState((prev) => (prev === null ? prev : { ...prev, config: { ...((prev && prev.config) || {}), [key]: value } }))
+          setTick((n) => n + 1)
         } catch (caught) {
           setError(String((caught && caught.message) || caught))
         }
@@ -814,8 +823,20 @@ window.__ModuleLoader__.load({
        * `canWrite` now means "the panel can talk to the Host at all". Session-scoped
        * controls (the watermark view) are greyed separately.
        */
+      /**
+       * v0.30 P0 — THE SWITCHES ARE ALWAYS OPERABLE ONCE STATE EXISTS.
+       *
+       * The user's rule, verbatim: as soon as `state` is loaded — even if it is the
+       * degraded fallback — the Toggle's `disabled` must be false. There is no session
+       * check anywhere in this decision any more, because the knobs it controls are
+       * profile settings, not conversation settings.
+       *
+       * `state !== null` is therefore the WHOLE gate. A failed fetch populates the
+       * fallback state, so the panel is operable even when the Host is unreachable —
+       * and writes then fail loudly, which is the honest outcome.
+       */
       const canWrite = state !== null && state !== undefined
-      /** A session exists to scope session-only controls against. */
+      /** Whether a session is known. Used ONLY to label the panel, never to gate it. */
       const hasSession = effectiveSession.length > 0
 
       /**
@@ -920,6 +941,14 @@ window.__ModuleLoader__.load({
          *      A diagnostic that depends on the styling layer it is diagnosing is not a
          *      diagnostic.
          */
+        /**
+         * v0.30 P0 — THE RAW ERROR, ALWAYS VISIBLE.
+         *
+         * The user's rule: show the error first, debug afterwards. So this is a plain
+         * inline-styled div — no theme class, no component — carrying the message AND a
+         * JSON dump of the failure. If the panel is misbehaving, the panel is not allowed
+         * to be the thing hiding why.
+         */
         error || (state !== null && state !== undefined && state.degraded === true)
           ? h('div', {
               key: 'e',
@@ -936,6 +965,12 @@ window.__ModuleLoader__.load({
             }, [
               h('div', { key: 't', style: { fontWeight: 600, marginBottom: '6px' } }, '读取失败'),
               h('div', { key: 'm' }, String(error || (state && state.degradedReason) || '(宿主没有返回可识别的错误信息)')),
+              h('div', { key: 'raw', style: { marginTop: '8px', fontFamily: 'ui-monospace,Consolas,monospace', fontSize: '11.5px', opacity: 0.85 } },
+                '错误详情：' + JSON.stringify({
+                  message: String(error || ''),
+                  degradedReason: state && state.degradedReason ? String(state.degradedReason) : undefined,
+                  via: via || undefined,
+                })),
               h('div', { key: 'h', style: { marginTop: '8px', opacity: 0.8 } },
                 '以上开关显示的是插件默认值，不是宿主的真实配置。点击「刷新」重试。'),
             ])

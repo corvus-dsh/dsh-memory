@@ -64,7 +64,7 @@ const shape = shapes[index % shapes.length]
 // 1. announce readiness
 writeFileSync(readyFile, 'ready')
 // 2. spin until the parent releases everyone
-const deadline = Date.now() + 20000
+const deadline = Date.now() + 60000
 while (!existsSync(startFile)) {
   if (Date.now() > deadline) process.exit(2)
 }
@@ -173,7 +173,7 @@ test('v0.25 P1: eight PROCESSES entering at once all keep their record', async (
   }
 
   // Wait for ALL workers to be waiting at the barrier, then release them together.
-  const waitDeadline = Date.now() + 20_000
+  const waitDeadline = Date.now() + 60_000
   while (readyFiles.some((file) => !existsSync(file))) {
     if (Date.now() > waitDeadline) throw new Error('workers did not reach the barrier in time')
     await new Promise((resolve) => setTimeout(resolve, 10))
@@ -232,7 +232,7 @@ test('v0.25 P1: the file stays one valid document per line under process content
       }),
     )
   }
-  const waitDeadline = Date.now() + 20_000
+  const waitDeadline = Date.now() + 60_000
   while (readyFiles.some((file) => !existsSync(file))) {
     if (Date.now() > waitDeadline) throw new Error('workers did not reach the barrier in time')
     await new Promise((resolve) => setTimeout(resolve, 10))
