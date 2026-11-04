@@ -265,6 +265,15 @@ window.__ModuleLoader__.load({
           cachedSessionId = fromProps[fromProps.length - 1]
           return cachedSessionId
         }
+        /**
+         * v1.0.5 — `sessionController.list()` is agent-free, so the panel can enumerate
+         * sessions itself; that id is what `commands.execute` resolves.
+         */
+        const listed = await listHostSessions()
+        if (listed.length > 0) {
+          cachedSessionId = listed[0]
+          return cachedSessionId
+        }
         try {
           const sessions = ctx.get ? ctx.get('sessions') : undefined
           if (sessions && typeof sessions.search === 'function') {
@@ -289,6 +298,46 @@ window.__ModuleLoader__.load({
           // No sessions face: report "no id" rather than inventing one.
         }
         return ''
+      }
+
+      /** v1.0.5: session ids from the Host — `remote.session.list({})`, agent-free. */
+      const listHostSessions = async () => {
+        const remote = (() => {
+          try {
+            return ctx.get ? ctx.get('remote') : undefined
+          } catch {
+            return undefined
+          }
+        })()
+        const namespaces = [remote && remote.session, remote && remote.sessionController].filter(Boolean)
+        for (const namespace of namespaces) {
+          if (typeof namespace.list !== 'function') continue
+          try {
+            const reply = await namespace.list({}, undefined)
+            const ids = collectSessionIds(reply)
+            if (ids.length > 0) return ids
+          } catch {
+            // Try the next namespace spelling.
+          }
+        }
+        return []
+      }
+
+      const collectSessionIds = (reply) => {
+        const items = (() => {
+          if (Array.isArray(reply)) return reply
+          if (reply === null || typeof reply !== 'object') return []
+          if (Array.isArray(reply.items)) return reply.items
+          if (reply.value && Array.isArray(reply.value.items)) return reply.value.items
+          if (Array.isArray(reply.sessions)) return reply.sessions
+          return []
+        })()
+        const ids = []
+        for (const item of items) {
+          const id = typeof item === 'string' ? item : item && typeof item.sessionId === 'string' ? item.sessionId : item && typeof item.id === 'string' ? item.id : ''
+          if (id.length > 0 && !ids.includes(id)) ids.push(id)
+        }
+        return ids
       }
 
       /** One valid `{ id }` agent, or undefined with the reason recorded by the caller. */
