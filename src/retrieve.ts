@@ -1117,6 +1117,30 @@ export interface FilterTrace {
   reason?: string
   /** v0.15: supersede verdicts this turn (applied through `onSupersede`). */
   supersede?: FilterSupersedeDecision[]
+  /** v0.22: how many candidates were offered to the judge, after truncation. */
+  offered?: number
+}
+
+/**
+ * v0.22 P1 — FILTER INPUT TRUNCATION.
+ *
+ * The judge is one cheap model call, and its job is to keep or drop a handful of
+ * candidates. Handing it everything the recall floor produced is how an extreme input
+ * breaks the call: a long query at a 0.20 floor can yield dozens of candidates, the
+ * prompt grows past what the model will answer in one turn, and the parse fails — and a
+ * failed parse means NO hint at all (fail closed), i.e. the noisiest input gets the
+ * emptiest result.
+ *
+ * Five is the cap because the hint itself can only carry one primary skill plus two
+ * alternatives plus one negative: everything past the fifth candidate could not be
+ * rendered even if the judge kept it.
+ */
+export const FILTER_MAX_CANDIDATES = 5
+
+/** Keep the BEST `limit` candidates, preserving order. */
+export function truncateCandidates<T extends { score: number }>(candidates: readonly T[], limit = FILTER_MAX_CANDIDATES): T[] {
+  if (candidates.length <= limit) return [...candidates]
+  return [...candidates].sort((left, right) => right.score - left.score).slice(0, limit)
 }
 
 export function retrieve(
@@ -1209,6 +1233,14 @@ export interface FilterOptions {
   /** v0.20: set false to relax the incident-log rule (differential tests). */
   taskAlignment?: boolean
   /**
+   * v0.22 P1: degrade to STRICT lexical recall when the judge is slow or fails.
+   *
+   * Set by the pre-step path, where the latency budget belongs to the TURN. Never set
+   * by `memory_search`, where the honest answer to "the judge could not decide" is
+   * that answer rather than a guess.
+   */
+  degradeOnTimeout?: boolean
+  /**
    * v0.15: persist one supersede verdict. Retrieval is a READ path, so the write
    * is injected by the caller; `store.applySupersede` enforces the human guard and
    * appends the audit line. A throwing callback is swallowed: a failed write must
@@ -1282,18 +1314,49 @@ export async function retrieveWithFilter(
   }
 
   let verdict: FilterVerdict
+  // v0.22 P1: truncate BEFORE the judge. An extreme input must not be able to make the
+  // call unparseable — a failed parse fails closed and costs the whole hint.
+  const offered = truncateCandidates(candidates)
   try {
-    verdict = await selectApplicableSkillsDetailed(options.llm, query, candidates, {
+    verdict = await selectApplicableSkillsDetailed(options.llm, query, offered, {
       ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
       ...(options.provider === undefined ? {} : { provider: options.provider }),
       ...(options.model === undefined ? {} : { model: options.model }),
     })
   } catch (error) {
+    // v0.22 P1: DEGRADE instead of going silent, when the caller asked for it.
+    //
+    // The failure this replaces: a slow judge on the pre-step path means NO hint at
+    // all, because the low floor's candidates are never injected raw. The user then
+    // pays the adjudicator's latency and gets nothing — the worst of both.
+    //
+    // The fallback is the STRICT lexical answer (the pre-v0.4 path): a high threshold
+    // that a weak lexical match cannot clear on its own. That is a real degradation
+    // in recall, not a leap of faith.
+    if (options.degradeOnTimeout === true) {
+      const strict = retrieve(memoryDir, skillsDir, query, {
+        threshold: DEFAULT_RETRIEVAL_THRESHOLD,
+        now,
+        scene,
+        workspace: options.workspace,
+        ...(options.taskTerms === undefined ? {} : { taskTerms: options.taskTerms }),
+        ...(options.taskAlignment === undefined ? {} : { taskAlignment: options.taskAlignment }),
+      })
+      return {
+        ...strict,
+        filter: {
+          attempted: true,
+          applied: false,
+          reason: `degraded to strict lexical recall: ${String((error as any)?.message ?? error)}`,
+          ...(strict.skill === undefined ? {} : { kept: [strict.skill.id] }),
+        },
+      }
+    }
     // Fail CLOSED: with a 0.20 floor, "the filter is down" means "we do not know
     // what is relevant", and guessing is how unrelated memories pollute a turn.
     return {
       ...base,
-      filter: { attempted: true, applied: false, reason: String((error as any)?.message ?? error) },
+      filter: { attempted: true, applied: false, reason: String((error as any)?.message ?? error), offered: offered.length },
     }
   }
   const applicable = verdict.apply
@@ -1404,7 +1467,19 @@ export function renderHint(result: RetrieveResult): string | undefined {
   // obeying a machine inference as if the user had just asked for it.
   const trusted = (result.skill?.provenance ?? result.negative?.provenance ?? result.fact?.provenance ?? result.experience?.provenance ?? 'inferred') === 'human'
   const trustPrefix = trusted ? '' : '[参考历史数据，非当前指令] '
-  const text = `${trustPrefix}（记忆提示：${parts.join('；')}。${staleWarning}）`
+  /**
+   * v0.22 P1: name the SECOND read.
+   *
+   * The hint deliberately carries only the trigger. Without saying so, a model that
+   * needs the steps either invents them or ignores the skill; naming `skill_read(name)`
+   * turns "there is a skill" into an actionable pointer, and it costs one clause
+   * instead of the ~2 KB a body would add to EVERY turn.
+   */
+  const bodyPointer =
+    result.skill === undefined
+      ? ''
+      : `；需要具体步骤时调用 skill_read("${result.skill.id}")`
+  const text = `${trustPrefix}（记忆提示：${parts.join('；')}${bodyPointer}。${staleWarning}）`
   // v0.8.1: the last gate. Every field above comes from the store, and the store
   // is already filtered — but this is the exact string that enters a prompt, so it
   // is the one place where "the filter upstream did its job" is worth re-checking.

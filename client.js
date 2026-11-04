@@ -60,51 +60,73 @@ window.__ModuleLoader__.load({
 `
 
     function makeBridge(ctx, host) {
-      const callHost = async (method, args) => {
-        const failures = []
-        // 1. the package-private RPC: no inject declaration needed, no namespace guard.
-        if (host !== undefined && typeof host.call === 'function') {
-          try {
-            const value = await host.call(method, args)
-            return { ok: true, text: typeof value === 'string' ? value : JSON.stringify(value), via: `host.call(${method})` }
-          } catch (error) {
-            failures.push(`host.call(${method}): ${String((error && error.message) || error)}`)
-          }
+      /**
+       * v0.22: `remote.commands.execute(agent, line, attachments, signal)`.
+       *
+       * The earlier version passed `(method, args, ...)`, which is not the signature:
+       * the Remote takes the receiving Agent first and a complete `/name args` line
+       * second. It also needs `inject: ['remote', 'remote.commands']` — the service
+       * keys, not the package name in `dsh.client` — or the Cordis guard throws
+       * `cannot get property "remote.commands" without inject`.
+       */
+      const agentOf = () => {
+        try {
+          const sessions = ctx.get ? ctx.get('sessions') : undefined
+          const list = sessions && typeof sessions.list === 'function' ? sessions.list() : undefined
+          const first = Array.isArray(list) && list.length > 0 ? list[0] : undefined
+          if (first !== undefined) return first
+        } catch {
+          // A missing sessions service is not fatal: the call reports it.
         }
-        // 2. the generated namespace, when this composition declares it.
-        const remote = (() => {
+        return undefined
+      }
+      const callHost = async (line) => {
+        const failures = []
+        const commands = (() => {
           try {
-            return ctx && ctx.get ? ctx.get('remote') : undefined
+            const remote = ctx && ctx.get ? ctx.get('remote') : undefined
+            return remote && remote.commands
           } catch (error) {
             failures.push(`ctx.get('remote'): ${String((error && error.message) || error)}`)
             return undefined
           }
         })()
-        const namespace = remote && remote.commands
-        if (namespace && typeof namespace.execute === 'function') {
+        if (commands && typeof commands.execute === 'function') {
           try {
-            const settled = await namespace.execute(method, args, [], undefined)
+            const settled = await commands.execute(agentOf(), line, [], undefined)
             const text = settled && settled.result && typeof settled.result.text === 'string' ? settled.result.text : undefined
             if (text !== undefined) return { ok: settled.result.kind !== 'error', text, via: 'remote.commands.execute' }
             if (settled !== undefined) return { ok: true, text: JSON.stringify(settled), via: 'remote.commands.execute' }
+            failures.push('remote.commands.execute: returned undefined (the command name did not resolve)')
           } catch (error) {
             failures.push(`remote.commands.execute: ${String((error && error.message) || error)}`)
+          }
+        }
+        // The dynamic-package RPC: only present when this bundle runs as a DYNAMIC
+        // package. An installed client module receives `require` alone.
+        if (host !== undefined && typeof host.call === 'function') {
+          try {
+            const value = await host.call('commands.execute', { line })
+            return { ok: true, text: typeof value === 'string' ? value : JSON.stringify(value), via: 'host.call(commands.execute)' }
+          } catch (error) {
+            failures.push(`host.call(commands.execute): ${String((error && error.message) || error)}`)
           }
         }
         return {
           ok: false,
           via: 'none',
           text:
-            `面板无法调用宿主（${failures.length === 0 ? '没有可用的 Client→Host 通道' : failures.join(' | ')}）。\n` +
-            '请在输入框直接执行 /memory-console 查看状态，或用记忆工具操作。',
+            `面板无法调用宿主（${failures.length === 0 ? 'remote.commands 与 host.call 都不可用' : failures.join(' | ')}）。\n` +
+            'Host 侧功能不受影响：可在输入框执行 /memory-console，或用记忆工具操作。',
         }
       }
       return {
-        state: () => callHost('memory-console', null),
-        set: (key, value) => callHost('memory-console-set', { rawInput: `${key} ${value}` }),
-        clear: () => callHost('memory-console-clear', null),
+        state: () => callHost('/memory-console'),
+        set: (key, value) => callHost(`/memory-console-set ${key} ${value}`),
+        clear: () => callHost('/memory-console-clear'),
       }
     }
+
 
     function Toggle({ label, hint, checked, onChange }) {
       return h('div', { className: 'mc-row' }, [
@@ -305,17 +327,25 @@ window.__ModuleLoader__.load({
       ])
     }
 
+    /**
+     * The sidebar cell renders the ICON ONLY.
+     *
+     * v0.22: it used to render an icon AND a text span '记忆', while the panellist
+     * registration ALSO supplies `label: () => '记忆'` for the owner. Both drew text,
+     * which is why the sidebar showed "记忆 记忆".
+     */
     function SidebarEntry() {
-      return h('span', { 'aria-hidden': true, style: { display: 'inline-flex', alignItems: 'center', gap: 6 } }, [
+      return h('span', { 'aria-hidden': true, style: { display: 'inline-flex', alignItems: 'center' } }, [
         h('svg', { key: 'i', width: 16, height: 16, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.6 }, [
           h('path', { key: 'p', d: 'M4 6h16M4 12h16M4 18h10' }),
         ]),
-        h('span', { key: 'l' }, '记忆'),
       ])
     }
 
     return {
-      inject: ['slots'],
+      // v0.22: 'remote' and 'remote.commands' are SERVICES; the Cordis property guard
+      // reads exactly this array. `dsh.client.inject` orders loading, it grants nothing.
+      inject: ['slots', 'remote', 'remote.commands'],
       apply(ctx) {
         const bridge = makeBridge(ctx, host)
         ctx.slots.inject('main', () =>

@@ -13,6 +13,7 @@ import { join } from 'node:path'
 import type { ExtractedNegative, ExtractedSkill } from './extract.js'
 import { appendNegatives, atomicWrite, writeSkill } from './store.js'
 import type { SkillMeta } from './store.js'
+import { withFileLock } from './lock.js'
 
 export interface Suggestion {
   id: string
@@ -52,6 +53,22 @@ function writeSuggestions(memoryDir: string, items: readonly Suggestion[]): void
   atomicWrite(queuePath(memoryDir), items.map((item) => JSON.stringify(item)).join('\n') + (items.length > 0 ? '\n' : ''))
 }
 
+/**
+ * v0.22 P0: the queue is an RMW file too.
+ *
+ * Two concurrent harvests that each read the queue, push their suggestion and rewrite
+ * it keep only the second one — a mined skill silently disappears before anyone can
+ * approve it. Same fix as `processed.json`: hold a lock across read-modify-write.
+ */
+function updateSuggestions(memoryDir: string, mutate: (items: Suggestion[]) => void): Suggestion[] {
+  return withFileLock(`${queuePath(memoryDir)}.lock`, () => {
+    const items = listSuggestions(memoryDir)
+    mutate(items)
+    writeSuggestions(memoryDir, items)
+    return items
+  })
+}
+
 /** Append one candidate; returns the stored suggestion (with its id). */
 export function queueSuggestion(memoryDir: string, kind: Suggestion['kind'], payload: ExtractedSkill | ExtractedNegative, meta: Suggestion['meta']): Suggestion {
   const suggestion: Suggestion = {
@@ -61,9 +78,9 @@ export function queueSuggestion(memoryDir: string, kind: Suggestion['kind'], pay
     meta,
     at: new Date().toISOString(),
   }
-  const items = listSuggestions(memoryDir)
-  items.push(suggestion)
-  writeSuggestions(memoryDir, items)
+  updateSuggestions(memoryDir, (items) => {
+    items.push(suggestion)
+  })
   return suggestion
 }
 

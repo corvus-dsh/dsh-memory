@@ -27,6 +27,7 @@ import type { EvidenceRef, ExtractedExperience, ExtractedFact, ExtractedNegative
 import { jaccard, planNegative, trigrams } from './dedupe.js'
 import { normalizeWorkspace } from './workspace.js'
 import { scanThreat } from './threat.js'
+import { withFileLock } from './lock.js'
 
 export function defaultSkillsDir(): string {
   return join(homedir(), '.agents', 'skills')
@@ -1501,6 +1502,31 @@ export function processedKey(sessionId: string, boundarySeq: number): string {
   return `${sessionId}:${boundarySeq}`
 }
 
+/**
+ * v0.22 P0: read-modify-write a JSON array under a FILE LOCK.
+ *
+ * `atomicWrite` closes the torn-read window; it does not close the lost-update
+ * window. Two harvests that both read `processed.json`, add their own key and write
+ * back will keep only the second key — the first session looks unprocessed and gets
+ * mined again. The lock is what makes the RMW a single step.
+ */
+function updateJsonArrayFile(path: string, mutate: (keys: Set<string>) => void): void {
+  mkdirSync(dirname(path), { recursive: true })
+  withFileLock(`${path}.lock`, () => {
+    const keys = (() => {
+      try {
+        const parsed = JSON.parse(readFileSync(path, 'utf8'))
+        if (!Array.isArray(parsed)) return new Set<string>()
+        return new Set(parsed.filter((value): value is string => typeof value === 'string'))
+      } catch {
+        return new Set<string>()
+      }
+    })()
+    mutate(keys)
+    atomicWrite(path, JSON.stringify([...keys], null, 2) + '\n')
+  })
+}
+
 export function readProcessed(memoryDir: string): Set<string> {
   const path = join(memoryDir, 'processed.json')
   try {
@@ -1512,10 +1538,27 @@ export function readProcessed(memoryDir: string): Set<string> {
   }
 }
 
+/**
+ * Record that a session boundary was mined.
+ *
+ * v0.22 P0: locked RMW. The previous version read, mutated in memory and replaced the
+ * whole file, so a concurrent harvest's key vanished. `processed.json` is the ONLY
+ * guard against mining the same boundary twice, which makes a lost key a duplicate
+ * skill, not a cosmetic counter.
+ *
+ * Pass `{ expected: false }` to make this a no-op when the boundary is already
+ * recorded — that is what a retry-after-failure needs, and it must not resurrect a
+ * cursor another writer already advanced.
+ */
 export function markProcessed(memoryDir: string, key: string): void {
-  const keys = readProcessed(memoryDir)
-  keys.add(key)
-  atomicWrite(join(memoryDir, 'processed.json'), JSON.stringify([...keys], null, 2) + '\n')
+  updateJsonArrayFile(join(memoryDir, 'processed.json'), (keys) => {
+    keys.add(key)
+  })
+}
+
+/** v0.22: is this boundary already recorded? A READ, safe without the lock. */
+export function isProcessed(memoryDir: string, key: string): boolean {
+  return readProcessed(memoryDir).has(key)
 }
 
 export interface MemoryStats {
@@ -1559,4 +1602,59 @@ function readdirNames(dir: string): string[] {
   return readdirSync(dir, { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
     .map((entry) => entry.name)
+}
+
+/**
+ * v0.22 P1 — PROGRESSIVE DISCLOSURE: the body is a SECOND read, not part of the hint.
+ *
+ * THE BUDGET PROBLEM
+ *
+ * A SKILL.md is a procedure: frontmatter, 执行步骤, 验证标准, pitfalls. The hint that
+ * rides a pre-step is a single line, and it deliberately carries only the trigger —
+ * `when_to_use` — because that is what decides "is this skill about my task".
+ *
+ * Injecting the body as well would spend the context budget of EVERY turn on every
+ * recalled skill, whether or not the model acts on it: measured on this store, the
+ * four largest skills are ~2.4 KB each, so three recalls per turn would cost ~7 KB of
+ * a 32k window — paid before anyone decides the skill applies.
+ *
+ * So the body is read ON DEMAND: the hint names the skill, and `skill_read(name)`
+ * returns the procedure when the model has decided it wants it.
+ *
+ * Read-only, and it applies the same injection scan as retrieval: a body that was
+ * poisoned on disk must not reach a prompt through this path either.
+ */
+export interface SkillBody {
+  name: string
+  title: string
+  when: string
+  /** The markdown body, frontmatter stripped. */
+  body: string
+  /** Character count of `body`, so a caller can decide before reading. */
+  chars: number
+}
+
+export function readSkillBody(skillsDir: string, name: string): SkillBody | undefined {
+  // The name is a directory under skillsDir; refuse anything that could escape it.
+  if (typeof name !== 'string' || name.length === 0) return undefined
+  if (name.includes('/') || name.includes('\\') || name.includes('..')) return undefined
+  const path = skillPath(skillsDir, name)
+  let text = ''
+  try {
+    text = readFileSync(path, 'utf8')
+  } catch {
+    return undefined
+  }
+  // The same rule the write gate and the retrieval gate apply: stored memory is DATA,
+  // and text that tries to rewrite the reader's rules is refused at THIS boundary too.
+  if (scanThreat(text) !== undefined) return undefined
+  const field = (key: string): string => (text.match(new RegExp(`^${key}:\\s*(.+)$`, 'mu'))?.[1] ?? '').trim()
+  const body = text.replace(/^---[\s\S]*?---\u0000?/u, '').replace(/^---[\s\S]*?---\r?\n/u, '').trim()
+  return {
+    name,
+    title: (text.match(/^#\s+(.+)$/mu)?.[1] ?? name).trim(),
+    when: field('when_to_use') || field('when'),
+    body,
+    chars: body.length,
+  }
 }
