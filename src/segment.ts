@@ -39,11 +39,28 @@ export interface Episode {
 }
 
 /**
- * Sources that are NOT the user speaking and never carry capability lessons.
- * Same discipline as the graft plugin's `isHumanAuthored` (hard constraint 8):
- * an injected instruction must never become an extracted "skill".
+ * v0.32 P2: only a literal `kind: 'user'` is a HUMAN message.
+ *
+ * The old rule was a DENYLIST (`INJECTED_KIND`) of producer kinds observed so
+ * far. DSH 0.2.2's `MessageSourceMap` already ships more producers than that
+ * list covered — `working-directory`, `ptc-mode`, `tool-registry`,
+ * `skill-invocation`, `compact-checkpoint`, `cordis-host-runner`,
+ * `team-message`, `user-question-reply`, `goal`, `plan-mode`, `schedule`,
+ * `session-reference`, `webhook` — and a denylist is guaranteed to miss the
+ * NEXT `producerKind()` value too.
+ *
+ * The contract is one-sided: every producer kind is NOT the user. So the check
+ * is an ALLOWLIST. A new kind is treated as injected by default (fail closed),
+ * which is the only safe direction for something that may become a "skill".
+ *
+ * Note the 0.2.2 map's `user-rpc` source still carries `kind: 'user'` (with an
+ * `rpcId`), so real user input is not lost.
  */
-const INJECTED_KIND = /^(?:runtime-context|time-context|skill-catalog|system-prompt|user-approval|model-selection|agent-message|subagent-settled|plugin:)/u
+export const HUMAN_SOURCE_KIND = 'user'
+
+export function isHumanSourceKind(kind: unknown): boolean {
+  return kind === HUMAN_SOURCE_KIND
+}
 
 function textOf(message: unknown): string {
   if (message === null || typeof message !== 'object') return ''
@@ -123,7 +140,8 @@ export function segmentSession(sessionId: string, log: { events?: unknown[] }): 
     }
     if (event.type === 'user/message') {
       const kind = event.data?.source?.kind
-      if (typeof kind === 'string' && INJECTED_KIND.test(kind)) continue
+      // v0.32 P2: allowlist, not denylist — an unknown producer is injected.
+      if (!isHumanSourceKind(kind)) continue
       // The user's own words are not mined for skills in M1; the goal of the
       // session is already in its log and reachable by seq.
       continue

@@ -1,5 +1,11 @@
 # 0.2.2-rc.1 兼容性修复报告
 
+> **2026-11-04 追加（真机切片后）**：本报告第 4.2 节明确写过「未在真机跑过完整切片」。真机执行后发现了两个本审计未覆盖的缺陷：
+> - **P0**：0.2.2 的 `sessions.prepare()` 返回**只读** Session；在 `enter()` + `announce()` 之前调用 `append()` 会抛 `cannot append outside a SessionStore`。旧实现用 `prepared.append()` 构造磁带，物理点火因此彻底失败。
+> - **P1**：交接看板的「⏭️ 待开始」列在若干形状下会回退到旧 prose / 旧 todo，而不是最新一次 `todo_write`。
+>
+> 两者均已修复并有回归测试；详见 `P0-P1-P2-修复报告-2026-11-04.md`。本报告其余结论仍然有效。
+
 **运行时**：0.2.2-rc.1（`plugin_manager list_version_exemptions` 实测确认）
 **审计方式**：以 `cordis_inspect_query` 读取**实时契约**为准，不以升级说明为准——说明写「改了什么」，检查写「现在是什么」。
 **自报无豁免**：`exemptions: {}`，两个插件均满足运行时版本要求。
@@ -204,8 +210,8 @@ const canWrite = state !== null && state !== undefined
 
 | 仓库 | 结果 |
 |---|---|
-| `dsh-graft-slice` | **508 / 508 通过** |
-| `dsh-memory` | **229 / 229 通过**（+3，本轮新增） |
+| `dsh-graft-slice` | **527 / 527 通过** |
+| `dsh-memory` | **238 / 238 通过**（v0.32：+2 pre-step/memory_search 工作区解析，+4 过滤器 effort/预算重试，+1 控制台作用域） |
 
 `dsh-memory` 连续 3 次全量运行零失败（此前多进程锁测试在满载下偶发，已通过放宽 barrier 预算至 60s 修正——锁超时退出码 3、丢记录退出码 0，二者仍可区分）。
 
@@ -217,8 +223,20 @@ const canWrite = state !== null && state !== undefined
 |---|---|
 | UI 面板加载全局配置 | 端到端测试：真 Host 命令 + 真 bridge，`sessions.list()` 返回空时读到 14/8 个配置字段 |
 | 开关可点且持久化 | 同上，`disabled=0`，写入触发 Host 侧 `configEditor.edit` 一次 |
-| `graft_prepare` / `graft_commit` 链路 | 508 条测试覆盖，含冷校验与回滚；**未在真机跑过完整切片** |
-| `dsh-memory` 检索注入生效 | 229 条测试覆盖检索链路；**未在真机观察真实 hint** |
+| `graft_prepare` / `graft_commit` 链路 | 526 条测试覆盖，含冷校验与回滚；真机切片已跑通（见 `COMPAT-0.2.2-rc.1.md` §4.3） |
+| `dsh-memory` 检索注入生效 | 236 条测试覆盖检索链路；**真机 hint 尚未观测到**——已定位为 v0.32 的 P0（见下） |
+
+### 4.3 P0（v0.32）：检索注入在生产路径上静默失效
+
+2026-11-04 20:20，用户在另一个工作区的会话里提问「切片写入失败 … 怎么修」，**没有任何记忆提示**。逐层查证后确认是三个叠加原因，前两个是真缺陷：
+
+1. **store 里没有这条知识**：`memory_harvest` 从未跑过（`processed: 0`），`~/.agents/skills` 里只有 3 条 `acceptance-*` 测试夹具。→ 已执行 harvest，新增 3 条技能 / 6 facts / 6 experiences / 5 negatives。
+2. **隔离门把 workspace 解析成了宿主进程目录**（P0，已修）：0.2.2 的 `agent/pre-step` 只给 `{ agent: Agent }`，而 `Agent` 的契约是 `{ readonly id: SessionId }`——**没有 cwd**。`currentWorkspaceOf(payload)` 于是一路回落到 `process.cwd()`（Electron 应用目录），`D:/持久层能力架构` 与它永不相等，**所有 project 级记忆被拒**，症状恰好是「没有注入」。`memory_search` 同病（实测默认调用 `blockedByWorkspace: 18`＝全部）。
+   - 修复：新增 `sessionWorkspaceOf(agentId)`，用 `sessions.get(id)` + `workingDirectory.get(session)` / `session.header.cwd` 解析真实工作区；pre-step 与 `memory_search`（`exec.agent.id`）都走它，解析不到才回落到旧路径，且仍然 fail-closed。
+   - 测试双写改真：旧测试传的是 `{ id, cwd }`——宿主从不这样发，所以测试常绿而功能常死。
+3. **过滤器被 provider 拒绝**（已修）：`reasoningEffort: 'off'` 在 `qiniu / deepseek-v4.1-flash` 上直接报 `does not support reasoning effort "off"`，每次裁决都抛错 → 每轮退化为严格词法召回。修复：命中该错误时**去掉该字段重试一次**（显式指定 effort 时不重试）。
+
+**设计边界（不是缺陷）**：`scope: project` 的记忆只在录制它的工作区可见。在 `设备情况` 这类别的仓库里问本项目的问题，即使上面三条全修好也不会注入——要跨仓库，必须显式写 `scope: global`。
 
 ---
 

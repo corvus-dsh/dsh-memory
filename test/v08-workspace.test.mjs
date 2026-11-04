@@ -184,34 +184,87 @@ test('v0.8: workspaceOfSession reads the log header, never the model', () => {
   assert.equal(workspaceOfSession({ session: { cwd: WORKSPACE_A } }), A)
 })
 
-test('v0.8 pre-step: a foreign skill is not injected, the local one is', async () => {
-  const { skills, memory } = dirs()
-  writeSkill(skills, { ...skill, name: 'from-b' }, { sessionId: 's1', boundarySeq: 9, workspace: WORKSPACE_B })
+/**
+ * v0.32 REGRESSION — the payload shape that made the gate eat everything.
+ *
+ * Measured on 0.2.2-rc.1: `agent/pre-step` delivers `{ agent: Agent }` where
+ * `Agent` is `{ readonly id: SessionId }` — NO cwd, NO workspace. The old test
+ * below passed `{ id, cwd }`, which the host never sends; it stayed green while
+ * production resolved the workspace from `process.cwd()` (the app directory) and
+ * refused every project-scoped memory. The doubles here now match the contract.
+ */
+function harness({ memory, skills, sessions }) {
   const handlers = []
+  const tools = []
   const ctx = {
     paths: { data: memory },
-    tools: { register: () => {} },
+    tools: { register: (definition) => tools.push(definition) },
     on: (event, handler) => handlers.push({ event, handler }),
     get: (name) => {
-      if (name !== 'llm') return undefined
-      return {
-        async *stream() {
-          yield { type: 'text-delta', text: JSON.stringify({ apply: ['from-b'] }) }
-          yield { type: 'finish', reason: { kind: 'stop' } }
-        },
+      if (name === 'llm') {
+        return {
+          async *stream() {
+            yield { type: 'text-delta', text: JSON.stringify({ apply: ['from-b'] }) }
+            yield { type: 'finish', reason: { kind: 'stop' } }
+          },
+        }
       }
+      if (name === 'sessions') return { get: (id) => sessions.get(id) }
+      if (name === 'workingDirectory') return { get: (session) => session?.header?.cwd ?? '' }
+      return undefined
     },
     sessionQuery: { readSession: async () => undefined },
   }
+  return { ctx, handlers, tools }
+}
+
+test('v0.8 pre-step: a foreign skill is not injected, the local one is', async () => {
+  const { skills, memory } = dirs()
+  writeSkill(skills, { ...skill, name: 'from-b' }, { sessionId: 's1', boundarySeq: 9, workspace: WORKSPACE_B })
+  const sessions = new Map([
+    ['aA', { header: { cwd: WORKSPACE_A } }],
+    ['aB', { header: { cwd: WORKSPACE_B } }],
+  ])
+  const { ctx, handlers } = harness({ memory, skills, sessions })
   const { apply } = await import('../lib/index.js')
   apply(ctx, { memoryDir: memory, skillsDir: skills, retrieval: true, retrievalFloor: 0.2 })
   const handler = handlers.find((item) => item.event === 'agent/pre-step')?.handler
   assert.ok(handler !== undefined)
 
   const messages = [{ role: 'user', content: [{ type: 'text', text: '改动迁移逻辑，怎么证明修复有效？' }] }]
-  const fromA = await handler({ agent: { id: 'aA', cwd: WORKSPACE_A }, messages }, async () => ({ kind: 'enter', messages }))
+  // The REAL 0.2.2 payload: an Agent that carries only an id.
+  const fromA = await handler({ agent: { id: 'aA' }, messages }, async () => ({ kind: 'enter', messages }))
   assert.doesNotMatch(JSON.stringify(fromA), /记忆提示/u, 'a B-project memory must not reach an A-project turn')
 
-  const fromB = await handler({ agent: { id: 'aB', cwd: WORKSPACE_B }, messages }, async () => ({ kind: 'enter', messages }))
-  assert.match(JSON.stringify(fromB), /记忆提示/u, 'the producing workspace still gets its hint')
+  const fromB = await handler({ agent: { id: 'aB' }, messages }, async () => ({ kind: 'enter', messages }))
+  assert.match(JSON.stringify(fromB), /记忆提示/u, 'the producing workspace still gets its hint — resolved from the SESSION')
+})
+
+test('v0.32 pre-step: an unreadable session fails closed instead of inheriting process.cwd()', async () => {
+  const { skills, memory } = dirs()
+  writeSkill(skills, { ...skill, name: 'from-b' }, { sessionId: 's1', boundarySeq: 9, workspace: WORKSPACE_B })
+  const { ctx, handlers } = harness({ memory, skills, sessions: new Map() })
+  const { apply } = await import('../lib/index.js')
+  apply(ctx, { memoryDir: memory, skillsDir: skills, retrieval: true, retrievalFloor: 0.2 })
+  const handler = handlers.find((item) => item.event === 'agent/pre-step')?.handler
+  const messages = [{ role: 'user', content: [{ type: 'text', text: '改动迁移逻辑，怎么证明修复有效？' }] }]
+  const unknown = await handler({ agent: { id: 'ghost' }, messages }, async () => ({ kind: 'enter', messages }))
+  assert.doesNotMatch(JSON.stringify(unknown), /记忆提示/u, 'no session cwd means "unknown workspace", never "any workspace"')
+})
+
+test('v0.32 memory_search: the default workspace is the CALLING session, not the app directory', async () => {
+  const { skills, memory } = dirs()
+  writeSkill(skills, { ...skill, name: 'from-b' }, { sessionId: 's1', boundarySeq: 9, workspace: WORKSPACE_B })
+  const sessions = new Map([['aB', { header: { cwd: WORKSPACE_B } }]])
+  const { ctx, tools } = harness({ memory, skills, sessions })
+  const { apply } = await import('../lib/index.js')
+  apply(ctx, { memoryDir: memory, skillsDir: skills, retrieval: true, retrievalFloor: 0.2 })
+  const search = tools.find((item) => item.name === 'memory_search')
+  assert.ok(search !== undefined, 'memory_search registered')
+
+  const viaSession = await search.execute({ query: QUERY }, { agent: { id: 'aB' } })
+  assert.equal(viaSession.skill?.id, 'from-b', 'the calling session resolves the gate, with no workspace argument')
+
+  const noAgent = await search.execute({ query: QUERY }, undefined)
+  assert.equal(noAgent.skill, undefined, 'no calling agent -> process.cwd() -> fail closed, never "anywhere"')
 })

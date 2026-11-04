@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { readLedgers } from '../lib/ledger.js'
-import { segmentSession } from '../lib/segment.js'
+import { isHumanSourceKind, segmentSession } from '../lib/segment.js'
 
 test('ledger: missing files mean "no ledgers", never an error', () => {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-mem-ledger-'))
@@ -73,6 +73,65 @@ test('segment: injected user messages are skipped, conclusions and errors kept',
   assert.equal(episode.errors[0].tool, 'pwsh')
   assert.deepEqual([...episode.evidence].sort((a, b) => a - b), [3, 5])
   assert.ok(episode.toolNames.includes('pwsh'))
+})
+
+test('segment: 0.2.2 producer kinds are injected by default (allowlist, not denylist)', () => {
+  // The full 0.2.2 `MessageSourceMap` producer set plus the project's own
+  // plugin namespace. `user-rpc` is the only structured source that still
+  // carries `kind: 'user'`; it is intentionally human.
+  const human = ['user']
+  const producers = [
+    'runtime-context',
+    'time-context',
+    'skill-catalog',
+    'system-prompt',
+    'user-approval',
+    'model-selection',
+    'agent-message',
+    'subagent-settled',
+    'working-directory',
+    'ptc-mode',
+    'tool-registry',
+    'skill-invocation',
+    'compact-checkpoint',
+    'cordis-host-runner',
+    'team-message',
+    'user-question-reply',
+    'goal',
+    'plan-mode',
+    'schedule',
+    'session-reference',
+    'webhook',
+    'plugin:graft-replay',
+    // A kind introduced after this build must not become "human" by omission.
+    'future-producer-kind',
+    undefined,
+    null,
+    42,
+  ]
+  for (const kind of human) assert.equal(isHumanSourceKind(kind), true, kind)
+  for (const kind of producers) assert.equal(isHumanSourceKind(kind), false, String(kind))
+})
+
+test('segment: a producer kind missing from the old denylist never becomes a conclusion source', () => {
+  const events = [
+    { type: 'user/message', seq: 1, data: { source: { kind: 'goal' }, content: [{ type: 'text', text: '伪造的结论，不能成为技能' }] } },
+    { type: 'user/message', seq: 2, data: { source: { kind: 'future-producer-kind' }, content: [{ type: 'text', text: '未知生产者，也必须按注入处理' }] } },
+    {
+      type: 'assistant/message',
+      seq: 3,
+      data: {
+        message: {
+          role: 'assistant',
+          source: { kind: 'model' },
+          content: [{ type: 'text', text: '真正由助手写下的结论，足够长以至于可以进入证据集。' }],
+        },
+      },
+    },
+  ]
+  const episode = segmentSession('s3', { events })
+  assert.equal(episode.conclusions.length, 1)
+  assert.equal(episode.conclusions[0].seq, 3)
 })
 
 test('segment: evidence only contains seqs that actually exist', () => {

@@ -31,6 +31,39 @@ window.__ModuleLoader__.load({
     const h = React.createElement
     const PANEL_KEY = 'memory-console'
 
+    /**
+     * v0.32 P0 — FACTORY SCOPE, NOT EFFECT SCOPE.
+     *
+     * Same defect as the graft console: this helper lived inside the fetch effect while
+     * `write` is a component-scope closure, so every toggle threw
+     * `ReferenceError: withTimeout is not defined` and no knob was ever written. The
+     * live page showed it as a red `remote.commands.execute` card plus the "these are
+     * the plugin defaults" line.
+     */
+    const withTimeout = (promise, ms, label) =>
+      new Promise((resolve) => {
+        let settled = false
+        const timer = setTimeout(() => {
+          if (settled) return
+          settled = true
+          resolve({ ok: false, via: 'timeout', text: `${label} 超时（${ms}ms 内宿主没有回应）` })
+        }, ms)
+        Promise.resolve(promise).then(
+          (value) => {
+            if (settled) return
+            settled = true
+            clearTimeout(timer)
+            resolve(value)
+          },
+          (error) => {
+            if (settled) return
+            settled = true
+            clearTimeout(timer)
+            resolve({ ok: false, via: 'none', text: String((error && error.message) || error) })
+          },
+        )
+      })
+
     const CSS = `
 .mc-root{display:flex;flex-direction:column;gap:16px;padding:20px 24px;height:100%;overflow:auto;color:var(--dsw-alias-text-primary,inherit);font:13px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
 .mc-card{border:1px solid var(--dsw-alias-border-secondary,rgba(128,128,128,.25));border-radius:10px;padding:14px 16px;background:var(--dsw-alias-bg-layer-1,transparent)}
@@ -577,37 +610,9 @@ window.__ModuleLoader__.load({
       React.useEffect(() => {
         let alive = true
         /**
-         * v0.24: a HARD timeout on the fetch.
-         *
-         * The bridge awaits a Remote call. If the gateway never settles — a broken
-         * connection, a channel that is mounted but not answering — the await never
-         * returns and `busy` stays true forever, so the panel spins with no way to
-         * recover. Twelve seconds is longer than any healthy round trip and short
-         * enough that a user sees a real answer either way.
+         * `withTimeout` is defined at FACTORY scope (v0.32) — it used to be local to
+         * this effect, which broke every `write` handler with a ReferenceError.
          */
-        const withTimeout = (promise, ms, label) =>
-          new Promise((resolve) => {
-            let settled = false
-            const timer = setTimeout(() => {
-              if (settled) return
-              settled = true
-              resolve({ ok: false, via: 'timeout', text: `${label} 超时（${ms}ms 内宿主没有回应）` })
-            }, ms)
-            Promise.resolve(promise).then(
-              (value) => {
-                if (settled) return
-                settled = true
-                clearTimeout(timer)
-                resolve(value)
-              },
-              (error) => {
-                if (settled) return
-                settled = true
-                clearTimeout(timer)
-                resolve({ ok: false, via: 'none', text: String((error && error.message) || error) })
-              },
-            )
-          })
 
         const run = async () => {
           if (bridge === undefined) {

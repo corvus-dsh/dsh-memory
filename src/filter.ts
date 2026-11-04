@@ -170,33 +170,79 @@ export async function selectApplicableSkillsDetailed(
     if (cached !== undefined) return { apply: cached.ids, supersede: cached.supersede, reasoningChars: 0, finishKind: '(cache)' }
   }
   const timeoutMs = options.timeoutMs ?? 60_000
-  const stream = llm.stream({
-    ...(options.provider === undefined ? {} : { provider: options.provider }),
-    ...(options.model === undefined ? {} : { model: options.model }),
-    reasoningEffort: options.reasoningEffort ?? 'off',
-    system: FILTER_SYSTEM_PROMPT,
-    messages: [{ role: 'user', content: [{ type: 'text', text: renderFilterInput(query, candidates) }] }],
-    // A reasoning model spends part of this budget BEFORE the answer text; 200
-    // was measured as "finish with no JSON". The answer itself is tiny.
-    maxTokens: 900,
-    ...(typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
-      ? { signal: AbortSignal.timeout(timeoutMs) }
-      : {}),
-  })
-  let raw = ''
-  let finishKind = '(none)'
-  let reasoningChars = 0
-  for await (const chunk of stream) {
-    if (chunk?.type === 'text-delta' && typeof chunk.text === 'string') raw += chunk.text
-    if (chunk?.type === 'reasoning-delta' && typeof chunk.text === 'string') reasoningChars += chunk.text.length
-    if (chunk?.type === 'finish') {
-      finishKind = chunk.reason?.kind ?? '(unknown)'
-      if (chunk.reason?.kind === 'error' || chunk.reason?.kind === 'aborted') {
-        const failure = chunk.reason.failure as { message?: string } | undefined
-        throw new Error(failure?.message ?? `llm finish ${chunk.reason.kind}`)
+  const effort = options.reasoningEffort ?? 'off'
+  /**
+   * v0.32: SOME PROVIDERS REFUSE `reasoningEffort: 'off'`.
+   *
+   * Measured live on `qiniu` / `deepseek/deepseek-v4.1-flash`:
+   * `provider "qiniu" model "…" does not support reasoning effort "off"`.
+   * Every adjudication therefore threw, which the pre-step path reads as "the
+   * judge has no opinion" — so the hint permanently degraded to strict lexical
+   * recall and `memory_search` reported `applied: false` on every call. The
+   * feature looked like an empty store.
+   *
+   * One retry with the field OMITTED (the adapter's own default) costs a round
+   * trip only when the provider actually complains, and never silently swallows
+   * an unrelated error.
+   */
+  const readOnce = async (reasoningEffort: string | undefined, maxTokens: number): Promise<{ raw: string; finishKind: string; reasoningChars: number }> => {
+    const stream = llm.stream({
+      ...(options.provider === undefined ? {} : { provider: options.provider }),
+      ...(options.model === undefined ? {} : { model: options.model }),
+      ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
+      system: FILTER_SYSTEM_PROMPT,
+      messages: [{ role: 'user', content: [{ type: 'text', text: renderFilterInput(query, candidates) }] }],
+      // A reasoning model spends part of this budget BEFORE the answer text; 200
+      // was measured as "finish with no JSON". The answer itself is tiny.
+      //
+      // v0.32: when the effort field is OMITTED the adapter applies its own default,
+      // and on `qiniu/deepseek-v4.1-flash` that default reasons for ~3.6k tokens —
+      // a 900-token budget then finished as `max-tokens` with an empty answer, which
+      // is "no opinion" all over again. The retry therefore gets room for both.
+      maxTokens,
+      ...(typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
+        ? { signal: AbortSignal.timeout(timeoutMs) }
+        : {}),
+    })
+    let text = ''
+    let kind = '(none)'
+    let reasoning = 0
+    for await (const chunk of stream) {
+      if (chunk?.type === 'text-delta' && typeof chunk.text === 'string') text += chunk.text
+      if (chunk?.type === 'reasoning-delta' && typeof chunk.text === 'string') reasoning += chunk.text.length
+      if (chunk?.type === 'finish') {
+        kind = chunk.reason?.kind ?? '(unknown)'
+        if (chunk.reason?.kind === 'error' || chunk.reason?.kind === 'aborted') {
+          const failure = chunk.reason.failure as { message?: string } | undefined
+          throw new Error(failure?.message ?? `llm finish ${chunk.reason.kind}`)
+        }
       }
     }
+    return { raw: text, finishKind: kind, reasoningChars: reasoning }
   }
+
+  let attempt: { raw: string; finishKind: string; reasoningChars: number } | undefined
+  let firstError: unknown
+  const attempts: Array<{ effort: string | undefined; maxTokens: number }> =
+    effort === 'off'
+      ? [
+          { effort, maxTokens: 900 },
+          { effort: undefined, maxTokens: 4096 },
+        ]
+      : [{ effort, maxTokens: 900 }]
+  for (const candidateAttempt of attempts) {
+    try {
+      attempt = await readOnce(candidateAttempt.effort, candidateAttempt.maxTokens)
+      break
+    } catch (error) {
+      if (firstError === undefined) firstError = error
+      const message = String((error as { message?: unknown })?.message ?? error)
+      const retryable = candidateAttempt.effort !== undefined && /reasoning|effort|unsupported/iu.test(message)
+      if (!retryable) throw error
+    }
+  }
+  if (attempt === undefined) throw firstError ?? new Error('filter call failed with no reply')
+  const { raw, finishKind, reasoningChars } = attempt
   const start = raw.indexOf('{')
   const end = raw.lastIndexOf('}')
   if (start < 0 || end <= start) {
