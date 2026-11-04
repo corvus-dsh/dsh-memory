@@ -402,6 +402,49 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /**
+     * v0.29 P0 — THE STATE THE PANEL FALLS BACK TO WHEN THE HOST DOES NOT ANSWER.
+     *
+     * The reported failure was three symptoms with ONE cause: the fetch failed, `state`
+     * stayed null, and everything derived from it therefore looked broken —
+     *
+     *   - every switch was `disabled: !canWrite` with `canWrite = state !== null`;
+     *   - the ledger card rendered its "正在读取…" branch;
+     *   - the summary said 读取失败 while no error card existed, because the failure
+     *     path returned before setting an error in one branch.
+     *
+     * A panel that cannot reach the Host is still useful for READING: it can show what
+     * the plugin would use by default. So a failed fetch now produces a REAL state object
+     * carrying the shipped defaults, tagged `degraded` with the reason. The switches then
+     * reflect those defaults (and say they are defaults), which is far more useful than
+     * a dead panel — and a write attempt on them will still fail loudly, which is correct
+     * because the default is not the live config.
+     */
+    function fallbackState(reason) {
+      return {
+        degraded: true,
+        degradedReason: reason,
+        config: {
+          retrieval: true,
+          workspaceIsolation: true,
+          semanticFilter: true,
+          taskAlignment: true,
+          autoApprove: false,
+          extraction: 'llm',
+          floor: 0.2,
+          threshold: 0.55,
+        },
+        workspace: '',
+        memoryDir: '',
+        skillsDir: '',
+        counts: { skills: 0, active: 0, superseded: 0, scenes: 0, queued: 0 },
+        scenes: [],
+        skills: [],
+        ledger: undefined,
+        sessions: [],
+      }
+    }
+
     function MemoryConsole({ bridge, useSessions }) {
       /**
        * v0.26: hand the selector to the bridge BEFORE anything can request.
@@ -616,25 +659,50 @@ window.__ModuleLoader__.load({
                 : ''
           if (alive) setBusy(true)
           try {
-            // No agent: the bridge sends the GLOBAL command with a shape-valid placeholder.
-            const reply = await withTimeout(bridge.state(target), 12_000, '读取控制台状态')
+            /**
+             * v0.29 P0 — A THREE-SECOND BUDGET AND A REAL FALLBACK.
+             *
+             * Twelve seconds is indistinguishable from "hang" to someone watching a
+             * panel. Worse, when it DID expire the panel was left with no state at all,
+             * so every switch stayed disabled and the ledger section kept saying
+             * "正在读取…" — three symptoms, one cause: `state` never became non-null.
+             *
+             * Two changes:
+             *   1. the budget is 3s, which is longer than a healthy round trip and short
+             *      enough to read as responsive;
+             *   2. on failure the panel FALLS BACK to a known default state instead of
+             *      leaving `state` null. The defaults are honest (they are what the
+             *      plugin ships with) and the error card says the values are defaults,
+             *      so the panel is usable for reading while the real values are unknown.
+             */
+            const reply = await withTimeout(bridge.state(target), 3_000, '读取控制台状态')
             if (!alive) return
             setVia(String((reply && reply.via) || ''))
             if (!reply || !reply.ok) {
-              setError(String((reply && reply.text) || '宿主没有返回内容'))
+              const reason = String((reply && reply.text) || '宿主没有返回内容')
+              setError(reason)
+              // Fall back to the shipped defaults so the panel is not dead. `degraded`
+              // marks it, and the UI says so rather than pretending these are real.
+              setState((prev) => (prev !== null && prev !== undefined ? prev : fallbackState(reason)))
               return
             }
             let parsed
             try {
               parsed = JSON.parse(reply.text)
             } catch (parseError) {
-              setError(`宿主返回的不是 JSON：${String((parseError && parseError.message) || parseError)}\n原始内容：${String(reply.text).slice(0, 500)}`)
+              const reason = `宿主返回的不是 JSON：${String((parseError && parseError.message) || parseError)}\n原始内容：${String(reply.text).slice(0, 500)}`
+              setError(reason)
+              setState((prev) => (prev !== null && prev !== undefined ? prev : fallbackState(reason)))
               return
             }
             setError('')
             setState(parsed)
           } catch (caught) {
-            if (alive) setError(String((caught && caught.message) || caught))
+            if (alive) {
+              const reason = String((caught && caught.message) || caught)
+              setError(reason)
+              setState((prev) => (prev !== null && prev !== undefined ? prev : fallbackState(reason)))
+            }
           } finally {
             if (alive) setBusy(false)
           }
@@ -839,7 +907,39 @@ window.__ModuleLoader__.load({
                 ]),
               ]),
         ]),
-        error ? h('div', { key: 'e', className: 'mc-card mc-err' }, error) : null,
+        /**
+         * v0.29 P0 — AN UNMISSABLE ERROR CARD.
+         *
+         * The report was "显示读取失败但下方没有渲染红卡", which is exactly what a
+         * conditional `error ? … : null` produces when the failure path forgets to set
+         * `error`. Two fixes:
+         *
+         *   1. the card is keyed on BOTH `error` and `state.degraded`, so any degraded
+         *      state shows a card even if the message itself was lost;
+         *   2. it is a plain inline-styled div with the raw text, not a themed component.
+         *      A diagnostic that depends on the styling layer it is diagnosing is not a
+         *      diagnostic.
+         */
+        error || (state !== null && state !== undefined && state.degraded === true)
+          ? h('div', {
+              key: 'e',
+              style: {
+                border: '1px solid #b91c1c',
+                borderRadius: '8px',
+                padding: '12px 14px',
+                background: 'rgba(185,28,28,.08)',
+                color: '#b91c1c',
+                font: '13px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif',
+                whiteSpace: 'pre-wrap',
+                wordBreak: 'break-word',
+              },
+            }, [
+              h('div', { key: 't', style: { fontWeight: 600, marginBottom: '6px' } }, '读取失败'),
+              h('div', { key: 'm' }, String(error || (state && state.degradedReason) || '(宿主没有返回可识别的错误信息)')),
+              h('div', { key: 'h', style: { marginTop: '8px', opacity: 0.8 } },
+                '以上开关显示的是插件默认值，不是宿主的真实配置。点击「刷新」重试。'),
+            ])
+          : null,
         notice ? h('div', { key: 'n', className: 'mc-card mc-ok' }, notice) : null,
         h('div', { key: 'sw', className: 'mc-card' }, [
           h('h3', { key: 'h', className: 'mc-h' }, '核心开关'),

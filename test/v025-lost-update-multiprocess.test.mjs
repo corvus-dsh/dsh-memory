@@ -84,7 +84,21 @@ const write = () => appendNegatives(dir, [{
 }], { sessionId: 'worker-' + index, boundarySeq: index, workspace: 'D:\\\\持久层能力架构', provenance: 'tool' })
 
 let lastError
-for (let attempt = 0; attempt < 8; attempt += 1) {
+/**
+ * v0.29: a GENEROUS retry budget, because the failure being retried is a SCHEDULING
+ * artifact, not the bug under test.
+ *
+ * Measured: this test is stable 6/6 in isolation, but fails roughly one run in five when
+ * the whole 226-test suite runs concurrently and eight child processes queue behind each
+ * other. Each individual lock hold is milliseconds; the WIDTH of the queue times the CPU
+ * pressure of the rest of the suite is what exceeds a short retry budget.
+ *
+ * Retrying a lock-acquisition timeout still cannot mask a lost update: a lost update shows
+ * as a MISSING ROW AFTER A CLEAN EXIT, which the assertion below catches regardless of
+ * how long a worker waited. The two failure modes stay distinguishable because a timeout
+ * exits with code 3 and a lost record exits with 0.
+ */
+for (let attempt = 0; attempt < 40; attempt += 1) {
   try {
     write()
     lastError = undefined
