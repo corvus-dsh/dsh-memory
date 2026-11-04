@@ -875,6 +875,13 @@ window.__ModuleLoader__.load({
          */
 
         const run = async () => {
+          /**
+           * v1.2 P1 — the poll executes a Host command, and a command executed against a real
+           * session lands in that session's transcript (`memory-console-global` noise in the
+           * main chat). Until the payload moves to a projection, poll once a minute and never
+           * while the window is hidden.
+           */
+          if (typeof document !== 'undefined' && document.hidden === true) return
           if (bridge === undefined) {
             if (alive) { setError('桥接未注入（slot inject 缺失）'); setBusy(false) }
             return
@@ -980,7 +987,7 @@ window.__ModuleLoader__.load({
           }
         }
         void run()
-        const timer = setInterval(() => { void run() }, 15000)
+        const timer = setInterval(() => { void run() }, 60000)
         return () => { alive = false; clearInterval(timer) }
         /**
          * v0.27: `sessionKey` (a plain string) instead of the arrays.
