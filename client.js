@@ -16,7 +16,17 @@
  */
 window.__ModuleLoader__.load({
   id: 'dsh-memory',
-  factory(require) {
+  /**
+   * v0.21: `host` is the THIRD symbol the client sandbox hands the factory.
+   *
+   * The documented surface for a Client half is `(require, styles, host)` — the
+   * package-private JSON RPC to this package's own Host half. The panel used
+   * `ctx.get('remote')` instead, and on the live page that threw
+   * `cannot get property "remote.commands" without inject`: `remote` is a GENERATED
+   * namespace that only exists once api-remotes is declared in `dsh.client.inject`.
+   * Keeping the namespace as a fallback costs nothing; making it primary is fatal.
+   */
+  factory(require, styles, host) {
     const React = require('react')
     const h = React.createElement
     const PANEL_KEY = 'memory-console'
@@ -49,40 +59,50 @@ window.__ModuleLoader__.load({
 .mc-ok{color:#047857;white-space:pre-wrap}
 `
 
-    function makeBridge(ctx) {
-      const tryCall = async (line) => {
-        const candidates = []
-        const remote = ctx.get && ctx.get('remote')
-        if (remote && remote.commands && typeof remote.commands.execute === 'function') {
-          candidates.push(['remote.commands.execute(line)', () => remote.commands.execute(line, [], undefined)])
-          candidates.push(['remote.commands.execute(null,line)', () => remote.commands.execute(null, line, [], undefined)])
-        }
-        if (remote && remote.session && remote.session.commands && typeof remote.session.commands.execute === 'function') {
-          candidates.push(['remote.session.commands.execute(line)', () => remote.session.commands.execute(line, [], undefined)])
-        }
+    function makeBridge(ctx, host) {
+      const callHost = async (method, args) => {
         const failures = []
-        for (const [label, run] of candidates) {
+        // 1. the package-private RPC: no inject declaration needed, no namespace guard.
+        if (host !== undefined && typeof host.call === 'function') {
           try {
-            const settled = await run()
-            const text = settled && settled.result && typeof settled.result.text === 'string' ? settled.result.text : undefined
-            if (text !== undefined) return { ok: settled.result.kind !== 'error', text, via: label }
-            if (settled !== undefined) return { ok: true, text: JSON.stringify(settled), via: label }
+            const value = await host.call(method, args)
+            return { ok: true, text: typeof value === 'string' ? value : JSON.stringify(value), via: `host.call(${method})` }
           } catch (error) {
-            failures.push(`${label}: ${String((error && error.message) || error)}`)
+            failures.push(`host.call(${method}): ${String((error && error.message) || error)}`)
+          }
+        }
+        // 2. the generated namespace, when this composition declares it.
+        const remote = (() => {
+          try {
+            return ctx && ctx.get ? ctx.get('remote') : undefined
+          } catch (error) {
+            failures.push(`ctx.get('remote'): ${String((error && error.message) || error)}`)
+            return undefined
+          }
+        })()
+        const namespace = remote && remote.commands
+        if (namespace && typeof namespace.execute === 'function') {
+          try {
+            const settled = await namespace.execute(method, args, [], undefined)
+            const text = settled && settled.result && typeof settled.result.text === 'string' ? settled.result.text : undefined
+            if (text !== undefined) return { ok: settled.result.kind !== 'error', text, via: 'remote.commands.execute' }
+            if (settled !== undefined) return { ok: true, text: JSON.stringify(settled), via: 'remote.commands.execute' }
+          } catch (error) {
+            failures.push(`remote.commands.execute: ${String((error && error.message) || error)}`)
           }
         }
         return {
           ok: false,
           via: 'none',
           text:
-            `无法从页面调用宿主命令（尝试：${failures.length === 0 ? candidates.map(([label]) => label).join(', ') || '无可用通道' : failures.join(' | ')}）。` +
-            `\n请先在输入框直接执行：/${line.replace(/^\//u, '')}`,
+            `面板无法调用宿主（${failures.length === 0 ? '没有可用的 Client→Host 通道' : failures.join(' | ')}）。\n` +
+            '请在输入框直接执行 /memory-console 查看状态，或用记忆工具操作。',
         }
       }
       return {
-        state: () => tryCall('memory-console'),
-        set: (key, value) => tryCall(`memory-console-set ${key} ${value}`),
-        clear: (includeUnscoped) => tryCall(`memory-console-clear${includeUnscoped ? ' include-unscoped' : ''}`),
+        state: () => callHost('memory-console', null),
+        set: (key, value) => callHost('memory-console-set', { rawInput: `${key} ${value}` }),
+        clear: () => callHost('memory-console-clear', null),
       }
     }
 
@@ -163,7 +183,7 @@ window.__ModuleLoader__.load({
 
       const clear = React.useCallback(async () => {
         setConfirming(false)
-        const reply = await bridge.clear(false)
+        const reply = await bridge.clear()
         setVia(reply.via)
         if (!reply.ok) { setError(reply.text); return }
         setNotice(reply.text)
@@ -297,7 +317,7 @@ window.__ModuleLoader__.load({
     return {
       inject: ['slots'],
       apply(ctx) {
-        const bridge = makeBridge(ctx)
+        const bridge = makeBridge(ctx, host)
         ctx.slots.inject('main', () =>
           ctx.slots.register({ name: 'main', key: PANEL_KEY, inject: () => ({ bridge }) }, MemoryConsole),
         )

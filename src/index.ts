@@ -20,6 +20,7 @@ import { extractEpisode } from './extract.js'
 import type { EvidenceRef, ExtractionResult } from './extract.js'
 import { findSkillCandidate } from './dedupe.js'
 import { retrieve, renderHint, retrieveWithFilter, collectScenes, extractTaskTerms, askAsksForFix } from './retrieve.js'
+import { applySkillArchive, listSkillSummaries, planSkillArchive, DEFAULT_SKILL_LIMIT } from './archive.js'
 import { currentWorkspaceOf, workspaceOfSession } from './workspace.js'
 import { applySupersede, listSkillRecords, quarantineWorkspaceMemory } from './store.js'
 import type { EvidenceRef, MemoryProvenance } from './extract.js'
@@ -164,6 +165,11 @@ export interface MemoryConfig {
    * is not a tuning knob.
    */
   taskAlignment?: boolean
+  /**
+   * v0.21 P1: ACTIVE skills above which one archival pass runs at activation.
+   * Default 100 (see `DEFAULT_SKILL_LIMIT`). 0 disables the pass.
+   */
+  skillLimit?: number
 }
 
 interface ContextLike {
@@ -226,6 +232,11 @@ function resolveConfig(ctx: ContextLike, config: MemoryConfig) {
     workspaceIsolation: config.workspaceIsolation !== false,
     // v0.20: on by default. A filter that is off by default protects nobody.
     taskAlignment: config.taskAlignment !== false,
+    // v0.21: 0 disables the archival pass; absent means the default threshold.
+    skillLimit:
+      Number.isFinite(Number(config.skillLimit)) && Number(config.skillLimit) >= 0
+        ? Math.trunc(Number(config.skillLimit))
+        : DEFAULT_SKILL_LIMIT,
   }
 }
 
@@ -1235,14 +1246,65 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
   }
   registerMemoryConsole()
 
+  /**
+   * v0.21 P1: one ARCHIVAL pass at activation, so the store cannot grow unbounded.
+   *
+   * Runs at activation rather than after every harvest on purpose: the pass is a
+   * policy decision about the whole store, it is cheap (a directory listing plus
+   * frontmatter reads), and doing it mid-harvest would interleave with writes.
+   *
+   * Under the limit it does nothing at all — no listing is even written.
+   */
+  try {
+    const summaries = listSkillSummaries(resolved.skillsDir)
+    const plan = planSkillArchive(summaries, resolved.skillLimit)
+    if (!plan.underLimit) {
+      const applied = applySkillArchive(resolved.skillsDir, plan)
+      ctx.logger?.warn?.(
+        `[dsh-memory] skill store over the limit (${plan.active}/${resolved.skillLimit} active): ` +
+          `merged ${applied.merged} pair(s), archived ${applied.archived.length} least-recently-used skill(s). ` +
+          'Archived skills stay on disk and are skipped by retrieval.',
+      )
+    }
+  } catch (error) {
+    ctx.logger?.warn?.(`[dsh-memory] archival pass skipped: ${String((error as any)?.message ?? error)}`)
+  }
+
   try {
     ctx.logger?.info?.(
       `[dsh-memory] ready: ledger=${resolved.graftDataDir} memory=${resolved.memoryDir} skills=${resolved.skillsDir} ` +
         `extractor=${resolved.extractor} autoApprove=${resolved.autoApprove} retrieval=${resolved.retrieval} semanticFilter=${resolved.semanticFilter} ` +
-        `workspaceIsolation=${resolved.workspaceIsolation}`,
+        `workspaceIsolation=${resolved.workspaceIsolation} taskAlignment=${resolved.taskAlignment}`,
     )
   } catch {
     // Logging must not block activation.
+  }
+
+  /**
+   * v0.21 P1: say LOUDLY that harvesting is dead.
+   *
+   * A missing `llm` service (no API key, provider not signed in, model unavailable) is
+   * not an outage that announces itself: `harvest` returns an empty extraction and the
+   * store simply stops growing. Weeks later the memory库 looks "quiet" rather than
+   * "broken", and every retrieval afterwards is served from a frozen corpus. A warning
+   * at activation is the only moment anyone is looking.
+   *
+   * `extractor: 'off'` is a DELIBERATE choice (scan-only mode), so it is not warned
+   * about — a warning that fires on a configured state trains people to ignore it.
+   */
+  if (!llmAvailable && resolved.extractor === 'llm') {
+    try {
+      // `warn` is called with the literal sentence the operator asked for, so it can
+      // be grepped in a log without decoding a structure.
+      ctx.logger?.warn?.('[dsh-memory] LLM unavailable. Harvesting is disabled.')
+      ctx.logger?.warn?.(
+        `[dsh-memory] reason: ctx.get('llm') is undefined (provider not signed in, API key missing, or the model is unreachable). ` +
+          'memory_harvest will run and return nothing; existing memories are still retrievable. ' +
+          "Set extractor: 'off' to silence this if scan-only is intended.",
+      )
+    } catch {
+      // Logging must not block activation.
+    }
   }
 }
 

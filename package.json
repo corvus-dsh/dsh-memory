@@ -1,6 +1,6 @@
 {
   "name": "dsh-memory",
-  "version": "0.20.0",
+  "version": "0.21.0",
   "description": "DSH open-source ecosystem plugin (topic: dsh-plugin): capability memory for long sessions. Consumes the handoff ledger, extracts four cognitive layers (facts with seq pointers, experiences, negative paths, structured SKILL.md skills) from finished sessions, filters retrieval with a cheap LLM relevance pass, and never imports the slicing plugin.",
   "private": false,
   "type": "module",
@@ -21,7 +21,9 @@
     "cordis.patch.yml",
     "scripts",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "ARCHITECTURE.md",
+    "RELEASE_NOTES.md"
   ],
   "scripts": {
     "build": "node scripts/build.mjs",
@@ -56,7 +58,11 @@
     },
     "client": {
       "platform": "web",
-      "immediately": true
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
     }
   }
 }
