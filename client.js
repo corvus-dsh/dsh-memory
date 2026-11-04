@@ -57,6 +57,8 @@ window.__ModuleLoader__.load({
 .mc-danger{border-color:#b91c1c;color:#b91c1c}
 .mc-err{color:#b91c1c;white-space:pre-wrap}
 .mc-ok{color:#047857;white-space:pre-wrap}
+.mc-select{border:1px solid var(--dsw-alias-border-secondary,rgba(128,128,128,.3));background:var(--dsw-alias-bg-layer-2,rgba(128,128,128,.1));border-radius:7px;padding:5px 9px;color:inherit;font:inherit;max-width:340px}
+.mc-sw[disabled]{opacity:.45;cursor:not-allowed}
 .mc-crash{margin:24px;padding:16px 18px;border:1px solid #b91c1c;border-radius:10px;background:rgba(185,28,28,.08);color:#b91c1c;font:13px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif}
 .mc-crash h3{margin:0 0 8px;font-size:14px}
 .mc-crash pre{margin:8px 0 0;white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,Consolas,monospace;font-size:11.5px;opacity:.9}
@@ -116,8 +118,16 @@ window.__ModuleLoader__.load({
       }
 
       /** One valid `{ id }` agent, or undefined with the reason recorded by the caller. */
-      const agentOf = () => {
+      const agentOf = (preferredId) => {
+        // v0.25: an EXPLICIT choice always wins. A human picking a session in the panel
+        // is the unambiguous source of truth and must not be second-guessed by "newest".
         const ids = sessionIdsFromProps()
+        if (typeof preferredId === 'string' && preferredId.length > 0) {
+          // Even when the snapshot does not list it, an id the user chose is a real id:
+          // the Host validates it and reports if it is gone. Refusing it here would make
+          // the selector unable to recover from a stale snapshot.
+          return { id: preferredId }
+        }
         if (ids.length > 0) return { id: ids[ids.length - 1] }
         try {
           const sessions = ctx.get ? ctx.get('sessions') : undefined
@@ -135,9 +145,35 @@ window.__ModuleLoader__.load({
         return undefined
       }
 
-      const callHost = async (line) => {
+      /**
+       * v0.25: the session list, for the panel's selector.
+       *
+       * A root-scoped panel can legitimately see ZERO sessions — a fresh window with no
+       * conversation. Reporting "no session" and stopping there leaves the panel useless,
+       * so the ids are published and a human picks one explicitly.
+       */
+      const listSessions = () => {
+        const ids = [...sessionIdsFromProps()]
+        try {
+          const sessions = ctx.get ? ctx.get('sessions') : undefined
+          if (sessions && typeof sessions.list === 'function') {
+            const list = sessions.list()
+            if (Array.isArray(list)) {
+              for (const entry of list) {
+                const id = typeof entry === 'string' ? entry : entry && typeof entry.id === 'string' ? entry.id : ''
+                if (id.length > 0 && !ids.includes(id)) ids.push(id)
+              }
+            }
+          }
+        } catch {
+          // An unavailable service simply means no extra ids.
+        }
+        return ids
+      }
+
+      const callHost = async (line, preferredId) => {
         const failures = []
-        const agent = agentOf()
+        const agent = agentOf(preferredId)
         const commands = (() => {
           try {
             const remote = ctx && ctx.get ? ctx.get('remote') : undefined
@@ -184,14 +220,23 @@ window.__ModuleLoader__.load({
         }
       }
       return {
-        state: () => callHost('/memory-console'),
-        set: (key, value) => callHost(`/memory-console-set ${key} ${value}`),
-        clear: () => callHost('/memory-console-clear'),
+        /**
+         * v0.25: the session surface, so the panel can offer an explicit choice.
+         *
+         * sessions() is synchronous and pure (it reads the injected snapshot), so the
+         * panel can call it on every render without a round trip.
+         */
+        sessions: () => listSessions(),
+        /** Is there an agent right now? Decides read-only mode vs. interactive. */
+        canWrite: () => agentOf() !== undefined,
+        state: (sessionId) => callHost('/memory-console', sessionId),
+        set: (key, value, sessionId) => callHost(`/memory-console-set ${key} ${value}`, sessionId),
+        clear: (sessionId) => callHost('/memory-console-clear', sessionId),
       }
     }
 
 
-    function Toggle({ label, hint, checked, onChange }) {
+    function Toggle({ label, hint, checked, onChange, disabled }) {
       return h('div', { className: 'mc-row' }, [
         h('span', { key: 'l', style: { display: 'flex', flexDirection: 'column', gap: 2 } }, [
           h('span', { key: 'a' }, label),
@@ -201,7 +246,11 @@ window.__ModuleLoader__.load({
           key: 's', type: 'button', role: 'switch',
           'aria-checked': checked ? 'true' : 'false',
           'aria-label': label, className: 'mc-sw',
-          onClick: () => onChange(!checked),
+          // v0.25: read-only mode DISABLES the control instead of hiding it. A hidden
+          // switch leaves the user wondering whether the feature exists; a disabled one
+          // shows the current value AND that it cannot be changed right now.
+          ...(disabled === true ? { disabled: true, title: '只读：没有确定的活动会话' } : {}),
+          onClick: () => { if (disabled !== true) onChange(!checked) },
         }, h('i', null)),
       ])
     }
@@ -304,6 +353,16 @@ window.__ModuleLoader__.load({
       const [confirming, setConfirming] = React.useState(false)
       const [busy, setBusy] = React.useState(false)
       /**
+       * v0.25 — THE SESSION THE PANEL ACTS ON.
+       *
+       * Empty means "let the bridge pick the most recent live session". A root-scoped
+       * panel has no inherent session binding, and useSessions can legitimately return
+       * nothing (a fresh window with no conversation open). Rather than dead-end on
+       * "没有可用的活动会话", the panel offers an explicit choice, and an explicit
+       * choice is authoritative.
+       */
+      const [picked, setPicked] = React.useState('')
+      /**
        * v0.23 — THE BLANK PANEL. See the same note in dsh-graft-slice/client.js.
        *
        * The sidebar icon drew and the panel was white. The icon calls no hook; the
@@ -359,7 +418,7 @@ window.__ModuleLoader__.load({
           }
           if (alive) setBusy(true)
           try {
-            const reply = await withTimeout(bridge.state(), 12_000, '读取控制台状态')
+            const reply = await withTimeout(bridge.state(picked), 12_000, '读取控制台状态')
             if (!alive) return
             setVia(String((reply && reply.via) || ''))
             if (!reply || !reply.ok) {
@@ -384,11 +443,11 @@ window.__ModuleLoader__.load({
         void run()
         const timer = setInterval(() => { void run() }, 15000)
         return () => { alive = false; clearInterval(timer) }
-      }, [bridge, tick])
+      }, [bridge, tick, picked])
 
       const write = async (key, value) => {
         try {
-          const reply = await bridge.set(key, value)
+          const reply = await bridge.set(key, value, picked)
           setVia(String((reply && reply.via) || ''))
           if (!reply || !reply.ok) { setError(String((reply && reply.text) || '写入失败')); return }
           setNotice(String(reply.text || ''))
@@ -402,7 +461,7 @@ window.__ModuleLoader__.load({
       const clear = async () => {
         setConfirming(false)
         try {
-          const reply = await bridge.clear()
+          const reply = await bridge.clear(picked)
           setVia(String((reply && reply.via) || ''))
           if (!reply || !reply.ok) { setError(String((reply && reply.text) || '清理失败')); return }
           setNotice(String(reply.text || ''))
@@ -423,6 +482,29 @@ window.__ModuleLoader__.load({
       const counts = state !== null && state !== undefined && state.counts ? state.counts : {}
       const ledger = state !== null && state !== undefined && state.ledger ? state.ledger : undefined
       const shown = scene === '*' ? skills : skills.filter((skill) => skill.scene === scene)
+
+      /**
+       * v0.25: the session surface, read synchronously from the injected snapshot.
+       *
+       * sessions() is a pure read, so it is safe on every render. readOnly when there is
+       * no resolvable agent AND no explicit choice: the panel then shows what it can and
+       * disables the switches, instead of reporting a dead end.
+       */
+      const sessions = (() => {
+        try {
+          return bridge !== undefined && typeof bridge.sessions === 'function' ? bridge.sessions() : []
+        } catch {
+          return []
+        }
+      })()
+      const canWrite = (() => {
+        try {
+          if (picked.length > 0) return true
+          return bridge !== undefined && typeof bridge.canWrite === 'function' ? bridge.canWrite() === true : false
+        } catch {
+          return false
+        }
+      })()
 
       /**
        * v0.24: THREE states, not two.
@@ -450,6 +532,41 @@ window.__ModuleLoader__.load({
           h('h2', { key: 't', className: 'mc-h', style: { fontSize: '16px' } }, '记忆控制台 · dsh-memory'),
           h('p', { key: 's', className: 'mc-sub' }, summary),
         ]),
+        /**
+         * v0.25 — THE SESSION SELECTOR.
+         *
+         * A root-scoped panel may see zero sessions. Reporting that as a dead end made
+         * the console useless in exactly the situation a user opens it (a fresh window,
+         * nothing running). The choices are:
+         *
+         *   - sessions available -> default to the newest, allow switching
+         *   - none available     -> say so ONCE, and keep the READ-ONLY view alive so the
+         *                           corpus total is still visible
+         */
+        h('div', { key: 'session', className: 'mc-card' }, [
+          h('h3', { key: 'h', className: 'mc-h' }, '目标会话'),
+          h('p', { key: 's', className: 'mc-sub' },
+            sessions.length === 0
+              ? '当前没有活动会话。面板处于只读模式：可以查看记忆库总量，但开关不可调节。'
+              : canWrite
+                ? '命令会以选中的会话身份执行。默认使用最新一个。'
+                : '未能确定活动会话，面板为只读。请从下拉框中选择一个会话。'),
+          sessions.length === 0
+            ? null
+            : h('div', { key: 'r', className: 'mc-row' }, [
+                h('span', { key: 'l', className: 'mc-label' }, '会话'),
+                h('select', {
+                  key: 'sel',
+                  className: 'mc-select',
+                  value: picked,
+                  'aria-label': '目标会话',
+                  onChange: (event) => setPicked(String(event.target.value || '')),
+                }, [
+                  h('option', { key: '', value: '' }, '（最新一个）'),
+                  ...sessions.map((id) => h('option', { key: id, value: id }, id)),
+                ]),
+              ]),
+        ]),
         error ? h('div', { key: 'e', className: 'mc-card mc-err' }, error) : null,
         notice ? h('div', { key: 'n', className: 'mc-card mc-ok' }, notice) : null,
         h('div', { key: 'sw', className: 'mc-card' }, [
@@ -460,6 +577,7 @@ window.__ModuleLoader__.load({
             hint: '关掉后不再往对话里注入任何记忆；隔离与防污染仍在写入/读取端生效',
             checked: config ? config.retrieval === true : false,
             onChange: (next) => write('retrieval', next),
+            disabled: !canWrite,
           }),
           h(Toggle, {
             key: 'w',
@@ -467,6 +585,7 @@ window.__ModuleLoader__.load({
             hint: '跨工作区记忆一律不注入；建议保持开启',
             checked: config ? config.workspaceIsolation === true : false,
             onChange: (next) => write('workspaceIsolation', next),
+            disabled: !canWrite,
           }),
           h(Toggle, {
             key: 's',
@@ -474,6 +593,7 @@ window.__ModuleLoader__.load({
             hint: '低阈值召回后由模型判定是否适用；关掉则退化为纯词法阈值',
             checked: config ? config.semanticFilter === true : false,
             onChange: (next) => write('semanticFilter', next),
+            disabled: !canWrite,
           }),
           h(Toggle, {
             key: 'ta',
@@ -481,6 +601,7 @@ window.__ModuleLoader__.load({
             hint: '与当前任务无关的旧事故流水账一律不召回；修复类提问例外',
             checked: config ? config.taskAlignment === true : false,
             onChange: (next) => write('taskAlignment', next),
+            disabled: !canWrite,
           }),
           // v0.20: the gate's own refusals, so "it did not recall" is explainable
           // from the panel instead of requiring the log.
