@@ -246,7 +246,19 @@ window.__ModuleLoader__.load({
        * `session/not-found`. Resolved once, from the slot snapshot or the Host index.
        */
       let cachedSessionId = ''
+      /** v1.0.4: an id the human pasted, remembered across reloads; outranks every guess. */
+      const SESSION_STORAGE_KEY = 'dsh-memory-console-session-id'
+      let preferredSessionId = (() => {
+        try {
+          return typeof window !== 'undefined' && window.localStorage
+            ? String(window.localStorage.getItem(SESSION_STORAGE_KEY) || '')
+            : ''
+        } catch {
+          return ''
+        }
+      })()
       const realSessionId = async () => {
+        if (preferredSessionId.length > 0) return preferredSessionId
         if (cachedSessionId.length > 0) return cachedSessionId
         const fromProps = sessionIdsFromProps()
         if (fromProps.length > 0) {
@@ -404,8 +416,13 @@ window.__ModuleLoader__.load({
            * console never read anything. Probe in order, remember the winner, and treat a
            * rejection as a rejection (never as state).
            */
+          /** v1.0.4: a pasted id outranks the hook, the snapshot and the placeholder. */
           const targetId =
-            typeof effectiveAgent.id === 'string' && effectiveAgent.id.length > 0 ? effectiveAgent.id : GLOBAL_AGENT_ID
+            preferredSessionId.length > 0
+              ? preferredSessionId
+              : typeof effectiveAgent.id === 'string' && effectiveAgent.id.length > 0
+                ? effectiveAgent.id
+                : GLOBAL_AGENT_ID
           /**
            * v1.0.3 — the probe answered the question: `id-string` is the contract, and the
            * id must name a REAL session. Live rejections (2026-11-04 21:39):
@@ -489,6 +506,26 @@ window.__ModuleLoader__.load({
         attach: (hook) => {
           if (typeof hook === 'function') sessionsHook = hook
         },
+        /**
+         * v1.0.4 — a live session id is the one thing the Client cannot discover: the host
+         * looks it up (`session/not-found`), a root-scoped panel has no session, and no
+         * Client service lists sessions. The human pastes it once from the sidebar.
+         */
+        useSession: (id) => {
+          const trimmed = typeof id === 'string' ? id.trim() : ''
+          if (trimmed.length === 0) return false
+          preferredSessionId = trimmed
+          cachedSessionId = trimmed
+          try {
+            if (typeof window !== 'undefined' && window.localStorage) {
+              window.localStorage.setItem(SESSION_STORAGE_KEY, trimmed)
+            }
+          } catch {
+            // Private windows may refuse storage; the in-memory value still works.
+          }
+          return true
+        },
+        session: () => preferredSessionId || cachedSessionId || '',
         sessions: () => listSessions(),
         /** Is there an agent right now? Decides read-only mode vs. interactive. */
         canWrite: () => agentOf() !== undefined,
@@ -770,6 +807,15 @@ window.__ModuleLoader__.load({
        * bumping it re-runs the effect and there is no dependency array to get wrong.
        */
       const [tick, setTick] = React.useState(0)
+      /** v1.0.4: the id the human pasted, so the row can show what the panel is pinned to. */
+      const [preferredSession, setPreferredSession] = React.useState(() => {
+        try {
+          return bridge !== undefined && typeof bridge.session === 'function' ? String(bridge.session() || '') : ''
+        } catch {
+          return ''
+        }
+      })
+      const [sessionDraft, setSessionDraft] = React.useState('')
       const refresh = () => setTick((value) => value + 1)
 
       React.useEffect(() => {
@@ -981,7 +1027,15 @@ window.__ModuleLoader__.load({
       /** Where the list came from, so the UI can say it honestly. */
       const sessionSource = hostSessions.length > 0 ? 'host' : liveSessions.length > 0 ? 'hook' : 'none'
       /** The session this panel will act on. */
-      const effectiveSession = picked.length > 0 ? picked : activeFromHook !== '' ? activeFromHook : sessions.length > 0 ? sessions[sessions.length - 1] : ''
+      const effectiveSession = picked.length > 0
+        ? picked
+        : preferredSession.length > 0
+          ? preferredSession
+          : activeFromHook !== ''
+            ? activeFromHook
+            : sessions.length > 0
+              ? sessions[sessions.length - 1]
+              : ''
       /**
        * v0.28: the switches are GLOBAL, so they are usable whenever the Host is reachable.
        *
@@ -1126,6 +1180,47 @@ window.__ModuleLoader__.load({
                   ...sessions.map((id) => h('option', { key: id, value: id }, id)),
                 ]),
               ]),
+          /**
+           * v1.0.4 — the host resolves the id it is given (`session/not-found`), and a
+           * root-scoped panel cannot learn a live one. The sidebar knows: right-click a
+           * session → 复制会话 id → paste here once.
+           */
+          h('div', { key: 'manual', className: 'mc-row' }, [
+            h('span', { key: 'l', className: 'mc-label' }, [
+              '会话 id（宿主校验存在性）',
+              h('span', { key: 'b', className: 'mc-hint' },
+                preferredSession === ''
+                  ? '自动取不到时：右键侧边栏会话 →「复制会话 id」→ 粘贴到这里，只需一次'
+                  : `已固定在 ${preferredSession}（清空后重新自动探测）`),
+            ]),
+            h('span', { key: 's', style: { display: 'flex', gap: '6px' } }, [
+              h('input', {
+                key: 'i',
+                className: 'mc-num',
+                style: { width: '260px', textAlign: 'left' },
+                value: sessionDraft,
+                placeholder: preferredSession || 'session-…',
+                'aria-label': '会话 id',
+                onChange: (event) => setSessionDraft(String(event.target.value || '')),
+              }),
+              h('button', {
+                key: 'b',
+                type: 'button',
+                className: 'mc-btn',
+                onClick: () => {
+                  const ok = bridge !== undefined && typeof bridge.useSession === 'function' ? bridge.useSession(sessionDraft) : false
+                  if (!ok) {
+                    setError('请输入一个非空的会话 id（右键侧边栏会话 →「复制会话 id」）')
+                    return
+                  }
+                  setPreferredSession(sessionDraft.trim())
+                  setState(null)
+                  setError('')
+                  setTick((value) => value + 1)
+                },
+              }, '使用'),
+            ]),
+          ]),
         ]),
         /**
          * v0.29 P0 — AN UNMISSABLE ERROR CARD.
