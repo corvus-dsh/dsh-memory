@@ -57,6 +57,9 @@ window.__ModuleLoader__.load({
 .mc-danger{border-color:#b91c1c;color:#b91c1c}
 .mc-err{color:#b91c1c;white-space:pre-wrap}
 .mc-ok{color:#047857;white-space:pre-wrap}
+.mc-crash{margin:24px;padding:16px 18px;border:1px solid #b91c1c;border-radius:10px;background:rgba(185,28,28,.08);color:#b91c1c;font:13px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif}
+.mc-crash h3{margin:0 0 8px;font-size:14px}
+.mc-crash pre{margin:8px 0 0;white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,Consolas,monospace;font-size:11.5px;opacity:.9}
 `
 
     function makeBridge(ctx, host) {
@@ -144,29 +147,92 @@ window.__ModuleLoader__.load({
     }
 
     function skillRow(skill) {
-      const dead = skill.invalidAt.length > 0
-      return h('tr', { key: skill.name, className: dead ? 'mc-dead' : undefined }, [
+      // v0.23: a Host payload is DATA. `skill.invalidAt.length` on a missing field is
+      // one of the ways a single malformed record blanked the whole panel.
+      const data = skill || {}
+      const invalidAt = typeof data.invalidAt === 'string' ? data.invalidAt : ''
+      const dead = invalidAt.length > 0
+      const supersedes = Array.isArray(data.supersedes) ? data.supersedes : []
+      return h('tr', { key: String(data.name || Math.random()), className: dead ? 'mc-dead' : undefined }, [
         h('td', { key: 'n' }, [
-          h('div', { key: 'a' }, skill.title || skill.name),
-          h('div', { key: 'b', className: 'mc-mono' }, skill.name),
-          h('div', { key: 'c', className: 'mc-hint' }, skill.when),
+          h('div', { key: 'a' }, data.title || data.name || '(未命名)'),
+          h('div', { key: 'b', className: 'mc-mono' }, String(data.name || '')),
+          h('div', { key: 'c', className: 'mc-hint' }, String(data.when || '')),
         ]),
-        h('td', { key: 's' }, h('span', { className: 'mc-tag' }, skill.scene)),
+        h('td', { key: 's' }, h('span', { className: 'mc-tag' }, String(data.scene || 'general'))),
         h('td', { key: 'p' }, [
           h('span', {
             key: 'a',
-            className: `mc-tag${skill.provenance === 'human' ? ' mc-human' : ''}`,
-            title: skill.provenance === 'human' ? '用户原话' : '工具/推断，请核实',
-          }, skill.provenance),
-          h('div', { key: 'b', className: 'mc-hint' }, skill.scope),
+            className: `mc-tag${data.provenance === 'human' ? ' mc-human' : ''}`,
+            title: data.provenance === 'human' ? '用户原话' : '工具/推断，请核实',
+          }, String(data.provenance || 'inferred')),
+          h('div', { key: 'b', className: 'mc-hint' }, String(data.scope || '')),
         ]),
         h('td', { key: 'w' }, [
-          h('div', { key: 'a', className: 'mc-hint' }, skill.workspace || '(无 provenance)'),
-          dead ? h('div', { key: 'b', className: 'mc-hint' }, `失效于 ${skill.invalidAt.slice(0, 10)}${skill.supersededBy ? ` → ${skill.supersededBy}` : ''}`) : null,
-          skill.supersedes.length > 0 ? h('div', { key: 'c', className: 'mc-hint' }, `取代了 ${skill.supersedes.join(', ')}`) : null,
+          h('div', { key: 'a', className: 'mc-hint' }, data.workspace || '(无 provenance)'),
+          dead ? h('div', { key: 'b', className: 'mc-hint' }, `失效于 ${invalidAt.slice(0, 10)}${data.supersededBy ? ` → ${data.supersededBy}` : ''}`) : null,
+          supersedes.length > 0 ? h('div', { key: 'c', className: 'mc-hint' }, `取代了 ${supersedes.join(', ')}`) : null,
         ]),
-        h('td', { key: 'e' }, `${skill.evidence}`),
+        h('td', { key: 'e' }, String(data.evidence === undefined ? 0 : data.evidence)),
       ])
+    }
+
+    /**
+     * v0.23 — ERROR BOUNDARY. See dsh-graft-slice/client.js for the full reasoning.
+     *
+     * Two facts drove this shape, both proven by test:
+     *   1. A white panel reports nothing, so a render throw must become a red card.
+     *   2. A try/catch around `createElement` CANNOT do it — createElement is lazy, and
+     *      React invokes the component later, outside the catch. Only a real class
+     *      boundary sits in the render phase.
+     *
+     * `React.Component` is feature-detected because it is not on the sandbox's
+     * documented surface (`createElement` / `useState` / `useEffect`). When present the
+     * panel gets a real boundary; when absent it renders unguarded. A boundary can only
+     * add protection — it must never be the reason the panel disappears.
+     */
+    function guard(Component) {
+      if (typeof React.Component !== 'function') return Component
+      return class MemoryPanelBoundary extends React.Component {
+        constructor(props) {
+          super(props)
+          this.state = { crash: null }
+        }
+
+        static getDerivedStateFromError(error) {
+          return { crash: error }
+        }
+
+        componentDidCatch(error, info) {
+          try {
+            const detail = `${String((error && error.stack) || error)}\n\n组件栈：\n${String((info && info.componentStack) || '(无)')}`
+            console.error(`[${PANEL_KEY}] 面板渲染失败：`, detail)
+          } catch {
+            // Logging must never be the second crash.
+          }
+        }
+
+        render() {
+          if (this.state.crash === null) return this.props.children
+          const error = this.state.crash
+          return h('div', { className: 'mc-crash' }, [
+            h('h3', { key: 't' }, '控制台渲染失败'),
+            h('div', { key: 'a' }, '面板内部抛出了未捕获异常，已被错误边界拦下（不再白屏）。完整堆栈已写入浏览器控制台。'),
+            h('pre', { key: 'p' }, String((error && error.stack) || (error && error.message) || error)),
+            h('div', { key: 'b', style: { marginTop: '10px', opacity: 0.75 } },
+              '宿主侧功能不受影响：可直接在输入框执行 /memory-console 查看同样的数据。'),
+          ])
+        }
+      }
+    }
+
+    /** Wrap the panel so a render throw becomes a card instead of an unmounted tree. */
+    function withBoundary(Component) {
+      const Boundary = guard(Component)
+      if (Boundary === Component) return Component
+      return function GuardedPanel(props) {
+        return h(Boundary, null, h(Component, props))
+      }
     }
 
     function MemoryConsole({ bridge }) {
@@ -177,46 +243,92 @@ window.__ModuleLoader__.load({
       const [scene, setScene] = React.useState('*')
       const [confirming, setConfirming] = React.useState(false)
       const [busy, setBusy] = React.useState(false)
+      /**
+       * v0.23 — THE BLANK PANEL. See the same note in dsh-graft-slice/client.js.
+       *
+       * The sidebar icon drew and the panel was white. The icon calls no hook; the
+       * panel called `React.useCallback`, which is not on the React surface this
+       * sandbox advertises (`createElement` / `useState` / `useEffect`). A missing
+       * symbol throws during render, before anything is committed — a white page.
+       *
+       * `tick` replaces the memoised callback: state is stable by construction, so
+       * bumping it re-runs the effect and there is no dependency array to get wrong.
+       */
+      const [tick, setTick] = React.useState(0)
+      const refresh = () => setTick((value) => value + 1)
 
-      const refresh = React.useCallback(async () => {
-        if (bridge === undefined) { setError('桥接未注入（slot inject 缺失）'); return }
-        setBusy(true)
+      React.useEffect(() => {
+        let alive = true
+        const run = async () => {
+          if (bridge === undefined) {
+            if (alive) setError('桥接未注入（slot inject 缺失）')
+            return
+          }
+          if (alive) setBusy(true)
+          try {
+            const reply = await bridge.state()
+            if (!alive) return
+            setVia(String((reply && reply.via) || ''))
+            if (!reply || !reply.ok) {
+              setError(String((reply && reply.text) || '宿主没有返回内容'))
+              return
+            }
+            let parsed
+            try {
+              parsed = JSON.parse(reply.text)
+            } catch (parseError) {
+              setError(`宿主返回的不是 JSON：${String((parseError && parseError.message) || parseError)}\n原始内容：${String(reply.text).slice(0, 500)}`)
+              return
+            }
+            setError('')
+            setState(parsed)
+          } catch (caught) {
+            if (alive) setError(String((caught && caught.message) || caught))
+          } finally {
+            if (alive) setBusy(false)
+          }
+        }
+        void run()
+        const timer = setInterval(() => { void run() }, 15000)
+        return () => { alive = false; clearInterval(timer) }
+      }, [bridge, tick])
+
+      const write = async (key, value) => {
         try {
-          const reply = await bridge.state()
-          setVia(reply.via)
-          if (!reply.ok) { setError(reply.text); return }
+          const reply = await bridge.set(key, value)
+          setVia(String((reply && reply.via) || ''))
+          if (!reply || !reply.ok) { setError(String((reply && reply.text) || '写入失败')); return }
+          setNotice(String(reply.text || ''))
           setError('')
-          setState(JSON.parse(reply.text))
+          setState((prev) => (prev === null ? prev : { ...prev, config: { ...((prev && prev.config) || {}), [key]: value } }))
         } catch (caught) {
           setError(String((caught && caught.message) || caught))
-        } finally {
-          setBusy(false)
         }
-      }, [bridge])
+      }
 
-      const write = React.useCallback(async (key, value) => {
-        const reply = await bridge.set(key, value)
-        setVia(reply.via)
-        if (!reply.ok) { setError(reply.text); return }
-        setNotice(reply.text)
-        setError('')
-        setState((prev) => (prev === null ? prev : { ...prev, config: { ...prev.config, [key]: value } }))
-      }, [bridge])
-
-      const clear = React.useCallback(async () => {
+      const clear = async () => {
         setConfirming(false)
-        const reply = await bridge.clear()
-        setVia(reply.via)
-        if (!reply.ok) { setError(reply.text); return }
-        setNotice(reply.text)
-        setError('')
-        void refresh()
-      }, [bridge, refresh])
+        try {
+          const reply = await bridge.clear()
+          setVia(String((reply && reply.via) || ''))
+          if (!reply || !reply.ok) { setError(String((reply && reply.text) || '清理失败')); return }
+          setNotice(String(reply.text || ''))
+          setError('')
+          refresh()
+        } catch (caught) {
+          setError(String((caught && caught.message) || caught))
+        }
+      }
 
-      React.useEffect(() => { void refresh() }, [refresh])
-
-      const config = state === null ? null : state.config
-      const skills = state === null ? [] : state.skills
+      // v0.23: every field read defensively. An incomplete Host payload must cost a
+      // section, never the panel.
+      const num0 = (value) => (typeof value === 'number' && Number.isFinite(value) ? value : 0)
+      const config = state === null || state === undefined ? null : state.config || null
+      const skillsRaw = state !== null && state !== undefined && Array.isArray(state.skills) ? state.skills : []
+      const skills = skillsRaw.filter((skill) => skill !== null && typeof skill === 'object')
+      const scenes = state !== null && state !== undefined && Array.isArray(state.scenes) ? state.scenes : []
+      const counts = state !== null && state !== undefined && state.counts ? state.counts : {}
+      const ledger = state !== null && state !== undefined && state.ledger ? state.ledger : undefined
       const shown = scene === '*' ? skills : skills.filter((skill) => skill.scene === scene)
 
       return h('div', { className: 'mc-root' }, [
@@ -224,7 +336,9 @@ window.__ModuleLoader__.load({
         h('div', { key: 'head' }, [
           h('h2', { key: 't', className: 'mc-h', style: { fontSize: '16px' } }, '记忆控制台 · dsh-memory'),
           h('p', { key: 's', className: 'mc-sub' },
-            state === null ? '正在读取…' : `工作区 ${state.workspace} · 存储 ${state.skillsDir}`),
+            state === null || state === undefined
+              ? '正在读取…'
+              : `工作区 ${state.workspace || '(未知)'} · 存储 ${state.skillsDir || '(未知)'}`),
         ]),
         error ? h('div', { key: 'e', className: 'mc-card mc-err' }, error) : null,
         notice ? h('div', { key: 'n', className: 'mc-card mc-ok' }, notice) : null,
@@ -260,22 +374,24 @@ window.__ModuleLoader__.load({
           }),
           // v0.20: the gate's own refusals, so "it did not recall" is explainable
           // from the panel instead of requiring the log.
-          state && state.blockedByTask
+          num0(state && state.blockedByTask) > 0
             ? h('p', { key: 'bt', className: 'mc-hint', style: { margin: '6px 0 0' } },
-                `上一次检索：${state.blockedByTask} 条记忆因与当前任务无关被拒（事故流水账）。`)
+                `上一次检索：${num0(state.blockedByTask)} 条记忆因与当前任务无关被拒（事故流水账）。`)
             : null,
         ]),
         h('div', { key: 'cat', className: 'mc-card' }, [
           h('div', { key: 'h', style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' } }, [
             h('h3', { key: 't', className: 'mc-h', style: { margin: 0 } },
-              state === null ? '记忆库' : `记忆库 · ${state.counts.skills} 条（生效 ${state.counts.active} / 失效 ${state.counts.superseded}）· 待审 ${state.counts.queued}`),
+              state === null || state === undefined
+                ? '记忆库'
+                : `记忆库 · ${num0(counts.skills)} 条（生效 ${num0(counts.active)} / 失效 ${num0(counts.superseded)}）· 待审 ${num0(counts.queued)}`),
             h('button', { key: 'b', type: 'button', className: 'mc-btn', disabled: busy, onClick: refresh }, busy ? '读取中…' : '刷新'),
           ]),
           h('p', { key: 's', className: 'mc-sub' }, via ? `桥接通道：${via}` : '按 scene 过滤；human 来源带绿色标记，其余需要核实'),
           h('div', { key: 'chips', className: 'mc-chips' }, [
             h('button', { key: '*', type: 'button', className: 'mc-chip', 'aria-pressed': scene === '*' ? 'true' : 'false', onClick: () => setScene('*') }, `全部 ${skills.length}`),
-            ...(state === null ? [] : state.scenes.map((name) => h('button', {
-              key: name, type: 'button', className: 'mc-chip',
+            ...(scenes.map((name) => h('button', {
+              key: String(name), type: 'button', className: 'mc-chip',
               'aria-pressed': scene === name ? 'true' : 'false',
               onClick: () => setScene(name),
             }, `${name} ${skills.filter((skill) => skill.scene === name).length}`))),
@@ -295,18 +411,21 @@ window.__ModuleLoader__.load({
         ]),
         h('div', { key: 'ledger', className: 'mc-card' }, [
           h('h3', { key: 'h', className: 'mc-h' }, '台账状态（交接来源）'),
-          state === null || state.ledger === undefined
+          // v0.23: `ledger` is a local guard now, and `ledger.epoch` is assumed to
+          // exist only after being checked — the old code read `.epoch.retired`
+          // straight off the payload and blanked the panel when the Host omitted it.
+          ledger === undefined
             ? h('p', { key: 's', className: 'mc-sub' }, '正在读取…')
             : [
                 h('p', { key: 'e', className: 'mc-sub', style: { margin: '0 0 6px' } },
-                  `epoch retired ${state.ledger.epoch.retired} / transferred ${state.ledger.epoch.transferred}` +
-                    `（本读取端支持到 ${state.ledger.supportedEpoch}）· 已退休 ${state.ledger.retired} · 已转移 ${state.ledger.transferred}`),
-                state.ledger.deferred
+                  `epoch retired ${num0(ledger.epoch && ledger.epoch.retired)} / transferred ${num0(ledger.epoch && ledger.epoch.transferred)}` +
+                    `（本读取端支持到 ${ledger.supportedEpoch === undefined ? '(未知)' : ledger.supportedEpoch}）· 已退休 ${num0(ledger.retired)} · 已转移 ${num0(ledger.transferred)}`),
+                ledger.deferred
                   ? h('p', { key: 'd', className: 'mc-sub', style: { color: '#b45309', margin: 0 } },
                       `本台账本轮被拒读，等待下一次完整写入（不猜测、不从半条记录抽取）：` +
-                        state.ledger.skipped.map((skip) => `${skip.file}:${skip.reason}`).join('、'))
+                        (Array.isArray(ledger.skipped) ? ledger.skipped.map((skip) => `${skip && skip.file}:${skip && skip.reason}`).join('、') : '(未提供原因)'))
                   : h('p', { key: 'd', className: 'mc-sub', style: { margin: 0 } }, '台账可读，抽取按最后一次完整写入进行。'),
-                h('p', { key: 'p', className: 'mc-hint', style: { margin: '4px 0 0' } }, state.ledger.graftDataDir),
+                h('p', { key: 'p', className: 'mc-hint', style: { margin: '4px 0 0' } }, ledger.graftDataDir || '(未配置)'),
               ],
         ]),
         h('div', { key: 'clear', className: 'mc-card' }, [
@@ -320,9 +439,17 @@ window.__ModuleLoader__.load({
               ])
             : h('button', {
                 key: 'b', type: 'button', className: 'mc-btn mc-danger',
-                disabled: state === null,
+                disabled: state === null || state === undefined,
                 onClick: () => setConfirming(true),
               }, '一键清空当前工作区记忆'),
+        ]),
+        // v0.23: a raw dump, always present, so "is the Host returning data at all"
+        // is answerable from the page instead of from devtools.
+        h('details', { key: 'raw', className: 'mc-card' }, [
+          h('summary', { key: 's', style: { cursor: 'pointer', fontSize: '12px', opacity: 0.7 } },
+            '原始状态数据（排查用）'),
+          h('pre', { key: 'p', className: 'mc-mono', style: { whiteSpace: 'pre-wrap', wordBreak: 'break-word', marginTop: '8px' } },
+            state === null || state === undefined ? '(尚未读取)' : JSON.stringify(state, null, 2).slice(0, 8000)),
         ]),
       ])
     }
@@ -349,13 +476,20 @@ window.__ModuleLoader__.load({
       apply(ctx) {
         const bridge = makeBridge(ctx, host)
         ctx.slots.inject('main', () =>
-          ctx.slots.register({ name: 'main', key: PANEL_KEY, inject: () => ({ bridge }) }, MemoryConsole),
+          ctx.slots.register({ name: 'main', key: PANEL_KEY, inject: () => ({ bridge }) }, withBoundary(MemoryConsole)),
         )
         ctx.slots.inject('sidebar.panellist', () =>
-          ctx.slots.register({ name: 'sidebar.panellist', id: PANEL_KEY, order: 61, label: () => '记忆' }, SidebarEntry),
+          ctx.slots.register({ name: 'sidebar.panellist', id: PANEL_KEY, order: 61, label: () => '记忆' }, withBoundary(SidebarEntry)),
         )
       },
       __bridgeFactory: makeBridge,
+      /**
+       * v0.23: test seams — see dsh-graft-slice/client.js for why rendering, not string
+       * matching, is what catches a blank panel.
+       */
+      __panelForTest: MemoryConsole,
+      __skillRowForTest: skillRow,
+      __guardForTest: guard,
     }
   },
 })
