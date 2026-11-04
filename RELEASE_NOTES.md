@@ -1,3 +1,70 @@
+# dsh-memory v0.22.1 — 渐进式披露的 P1 缺陷修复与测试补齐
+
+**发布日期**：2026-11-04　**状态**：预发布（v0.22.0 → v0.22.1）　**测试**：201/201（+13）
+
+## 1. P0 缺陷：降级路径在自己的 catch 块里崩了
+
+v0.22.0 引入了这条策略：pre-step 的语义过滤若超时，**退化为严格词法召回**，而不是一无所获。
+
+它在正式构建里从未生效。
+
+```
+ReferenceError: DEFAULT_RETRIEVAL_THRESHOLD is not defined
+    at retrieveWithFilter (lib/retrieve.js:1339)
+```
+
+该常量定义在 `index.ts`，引用点在 `retrieve.ts`；而 `index.ts` 已经 `import` 自 `retrieve.js`，反向导入即成环。ESM 不会在加载时报这个错——它只在**执行到那一行**时炸，而那一行恰好在 `catch` 块里面。
+
+于是发生了这次发版最讽刺的一件事：**那道用来「不让慢 judge 弄丢这一轮」的守卫，自己弄丢了这一轮**。judge 的超时被替换成了一次崩溃。
+
+**为什么测试没抓到**：旧测试只覆盖了「judge 失败 ⇒ fail closed」。缺的不是断言，是那条分支的**存在性**测试。
+
+**修法**：常量下沉到叶子模块 `retrieve.ts`（它才是使用者）；`index.ts` 改为 `export { ... } from './retrieve.js'` 并显式再导入供自用。公共导出面不变。
+
+## 2. 补齐 P1 的测试覆盖（13 条，`test/v022-progressive-disclosure.test.mjs`）
+
+v0.22.0 的三项 P1 改动**一行测试都没有**（约束 18 要求代码 + 测试）。本次补齐：
+
+| 项 | 钉住的是什么 |
+|---|---|
+| 渐进式披露 | hint 只带 `when_to_use`，**正文标记串绝不出现**；hint 必须点名 `skill_read`；`skill_read` 拒绝路径逃逸；插件真的注册了这个工具 |
+| 降级路径 | 超时后**不抛**且返回严格词法结果；`filter.reason` 写明 `degraded to strict lexical`；不设 `degradeOnTimeout` 时仍 fail closed；降级只降到 0.55，**绝不把 0.20 网底的弱匹配塞进来** |
+| 过滤前截断 | `FILTER_MAX_CANDIDATES === 5`；保留的是**最高分**而非文件顺序最前；短列表原样返回且不改入参；judge 实际收到的候选数 ≤ 5 |
+
+关键的一条测试**故意不包 `assert.throws`**：在 v0.22.0 的构建上，它会让 `ReferenceError` 直接冒出来——这正是该缺陷的真实呈现方式。
+
+## 3. 复现证据
+
+修复**前**（v0.22.0 构建产物，用探针脚本直接调 `retrieveWithFilter`）：
+
+```
+[stderr] ReferenceError: DEFAULT_RETRIEVAL_THRESHOLD is not defined
+    at retrieveWithFilter (lib/retrieve.js:1339:20)
+```
+
+修复**后**（同一探针，同一输入）：
+
+```
+degraded filter: {"attempted":true,"applied":false,"reason":"degraded to strict lexical recall: judge timeout"}
+```
+
+降级分支正常返回，13 条新测试全绿。
+
+## 4. 技术债登记
+
+- `ARCHITECTURE.md` **TD-M5**：本次缺陷的根因与修法（P0，已修，登记防复发）。
+- `ARCHITECTURE.md` **TD-M6**：阈值常量单一出处（升级自 TD-3）——TD-M5 不是笔误，是「常量分散 + ESM 循环导入把未定义藏到运行时」这一结构性问题。
+
+## 5. 本次**不做**
+
+- 不搬迁 `index.ts` / `retrieve.ts` 的大段代码，不新建 `thresholds.ts`（TD-M6 只登记）。
+
+## 验证
+
+`201/201` 全绿（v0.21 的 181 + v0.22.0 的既有 + 本次 13）。`dsh-graft-slice` 侧 `410/410` 全绿（仅文档与再导出变更，无行为改动）。
+
+---
+
 # dsh-memory v0.21.0 — LLM 静默降级告警、技能归档、负知识时效
 
 **发布日期**：2026-11-04　**状态**：预发布（v0.20.0 → v0.21.0）　**测试**：181/181（+11）
