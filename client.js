@@ -240,6 +240,45 @@ window.__ModuleLoader__.load({
         }
       }
 
+      /**
+       * v1.0.3 — a REAL session id (see the shapes comment at the call site): the gateway
+       * accepts a bare id and then looks it up, so a placeholder always answers
+       * `session/not-found`. Resolved once, from the slot snapshot or the Host index.
+       */
+      let cachedSessionId = ''
+      const realSessionId = async () => {
+        if (cachedSessionId.length > 0) return cachedSessionId
+        const fromProps = sessionIdsFromProps()
+        if (fromProps.length > 0) {
+          cachedSessionId = fromProps[fromProps.length - 1]
+          return cachedSessionId
+        }
+        try {
+          const sessions = ctx.get ? ctx.get('sessions') : undefined
+          if (sessions && typeof sessions.search === 'function') {
+            for (const query of ['的', '我们', '我', 'the', 'a']) {
+              try {
+                const reply = await sessions.search(query, undefined)
+                const items = reply && reply.ok === true && reply.value ? reply.value.items : undefined
+                if (!Array.isArray(items)) continue
+                for (const item of items) {
+                  const id = item && typeof item.sessionId === 'string' ? item.sessionId : ''
+                  if (id.length > 0) {
+                    cachedSessionId = id
+                    return cachedSessionId
+                  }
+                }
+              } catch {
+                // A search shape that throws simply contributes no id.
+              }
+            }
+          }
+        } catch {
+          // No sessions face: report "no id" rather than inventing one.
+        }
+        return ''
+      }
+
       /** One valid `{ id }` agent, or undefined with the reason recorded by the caller. */
       const agentOf = (preferredId) => {
         // v0.25: an EXPLICIT choice always wins. A human picking a session in the panel
@@ -367,32 +406,50 @@ window.__ModuleLoader__.load({
            */
           const targetId =
             typeof effectiveAgent.id === 'string' && effectiveAgent.id.length > 0 ? effectiveAgent.id : GLOBAL_AGENT_ID
+          /**
+           * v1.0.3 — the probe answered the question: `id-string` is the contract, and the
+           * id must name a REAL session. Live rejections (2026-11-04 21:39):
+           *
+           *   agent-object:   gateway/input-invalid field=agentId   (wrong type)
+           *   id-string:      session/not-found                     (right type, id missing)
+           *   agentId-object: gateway/input-invalid field=agentId   (wrong type)
+           */
           const shapes = [
-            { name: 'agent-object', build: (id) => [{ id }, effectiveLine, [], undefined] },
             { name: 'id-string', build: (id) => [id, effectiveLine, [], undefined] },
+            { name: 'agent-object', build: (id) => [{ id }, effectiveLine, [], undefined] },
             { name: 'agentId-object', build: (id) => [{ agentId: id }, effectiveLine, [], undefined] },
           ]
           const ordered =
             workingShape === undefined
               ? shapes
               : [shapes.find((shape) => shape.name === workingShape), ...shapes.filter((shape) => shape.name !== workingShape)]
-          for (const shape of ordered) {
-            if (shape === undefined) continue
-            try {
-              const settled = await commands.execute(...shape.build(targetId))
-              const execution = unwrapExecution(settled)
-              if (execution !== undefined) {
-                workingShape = shape.name
-                return {
-                  ok: execution.kind !== 'error',
-                  text: execution.text,
-                  via: `remote.commands.execute(${shape.name})`,
-                  raw: settled,
+          const liveId = await realSessionId()
+          /**
+           * v1.0.3: the RESOLVED id goes first (an explicit choice must never be
+           * second-guessed); the live id from the snapshot/index is the retry. In
+           * production the placeholder earns `session/not-found` and the retry is what
+           * makes the panel work.
+           */
+          const candidateIds = liveId.length > 0 && liveId !== targetId ? [targetId, liveId] : [targetId]
+          for (const attemptId of candidateIds) {
+            for (const shape of ordered) {
+              if (shape === undefined) continue
+              try {
+                const settled = await commands.execute(...shape.build(attemptId))
+                const execution = unwrapExecution(settled)
+                if (execution !== undefined) {
+                  workingShape = shape.name
+                  return {
+                    ok: execution.kind !== 'error',
+                    text: execution.text,
+                    via: `remote.commands.execute(${shape.name})`,
+                    raw: settled,
+                  }
                 }
+                failures.push(`${shape.name}: ${describeRejection(settled)}`)
+              } catch (error) {
+                failures.push(`${shape.name}: ${String((error && error.message) || error)}`)
               }
-              failures.push(`${shape.name}: ${describeRejection(settled)}`)
-            } catch (error) {
-              failures.push(`${shape.name}: ${String((error && error.message) || error)}`)
             }
           }
         } else {
