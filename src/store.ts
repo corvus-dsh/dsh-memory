@@ -1119,28 +1119,46 @@ export function quarantineWorkspaceMemory(
   }
 
   if (options.skillsOnly !== true) {
+    /**
+     * v0.31 P0 — THE QUARANTINE PATH WAS AN UNLOCKED READ-MODIFY-WRITE.
+     *
+     * This block reads ALL of `negatives.jsonl`, partitions it, and rewrites the
+     * remainder. It took no lock, so a harvest appending a record at that moment had its
+     * row silently erased by the rewrite — the same lost update the other five paths
+     * were fixed for, in the one place nobody looked: a maintenance/diagnostic operation
+     * that "cannot happen concurrently" in theory, and does in practice because a
+     * harvest runs on its own timer.
+     *
+     * The lock is taken around the read AND the writes, and the read is INSIDE it — a
+     * value read before taking the lock is stale by definition.
+     */
     const path = join(memoryDir, 'negatives.jsonl')
     if (existsSync(path)) {
-      const records = readJsonl(path)
-      const keep: Array<Record<string, unknown>> = []
-      const drop: Array<Record<string, unknown>> = []
-      for (const record of records) {
-        const scope = String(record.scope ?? 'project').toLowerCase()
-        if (scope === 'global') {
-          keep.push(record)
-          continue
+      const release = acquireFileLock(`${path}.lock`, { label: 'quarantineNegatives' })
+      try {
+        const records = readJsonl(path)
+        const keep: Array<Record<string, unknown>> = []
+        const drop: Array<Record<string, unknown>> = []
+        for (const record of records) {
+          const scope = String(record.scope ?? 'project').toLowerCase()
+          if (scope === 'global') {
+            keep.push(record)
+            continue
+          }
+          const recorded = normalizeWorkspace(record.workspace)
+          const unscoped = recorded.length === 0
+          const same = unscoped ? options.includeUnscoped === true : recorded === normalizeWorkspace(workspace)
+          if (same) drop.push(record)
+          else keep.push(record)
         }
-        const recorded = normalizeWorkspace(record.workspace)
-        const unscoped = recorded.length === 0
-        const same = unscoped ? options.includeUnscoped === true : recorded === normalizeWorkspace(workspace)
-        if (same) drop.push(record)
-        else keep.push(record)
-      }
-      if (drop.length > 0) {
-        mkdirSync(quarantineDir, { recursive: true })
-        atomicWrite(join(quarantineDir, 'negatives.jsonl'), drop.map((record) => JSON.stringify(record)).join('\n') + '\n')
-        atomicWrite(path, keep.map((record) => JSON.stringify(record)).join('\n') + (keep.length > 0 ? '\n' : ''))
-        negatives = drop.length
+        if (drop.length > 0) {
+          mkdirSync(quarantineDir, { recursive: true })
+          atomicWrite(join(quarantineDir, 'negatives.jsonl'), drop.map((record) => JSON.stringify(record)).join('\n') + '\n')
+          atomicWrite(path, keep.map((record) => JSON.stringify(record)).join('\n') + (keep.length > 0 ? '\n' : ''))
+          negatives = drop.length
+        }
+      } finally {
+        release()
       }
     }
   }
