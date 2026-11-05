@@ -1,8 +1,16 @@
-> 兄弟项目：[dsh-graft-slice](https://github.com/corvus-dsh/dsh-graft-slice) —— 物理交接（零继承、可回查、崩溃可恢复）。本插件只读它的 `.retired.json` / `.transferred.json`。
-
 # dsh-memory
 
 **能力记忆**：把做过的会话沉淀成可复用的技能与负知识。DSH 开源生态插件（topic `dsh-plugin`）。
+
+> **里程碑 `v0.9.0-freeze`（2026-11-05）** —— 本项目已进入架构冻结点。
+>
+> **核心功能**：消费交接台账，从已完成的会话中抽取四层认知（带 seq 指针的事实、经验、负路径、结构化 SKILL.md 技能），用一次廉价的 LLM 相关性裁决过滤检索结果，且永不 import 切片插件。
+>
+> **状态**：248 / 248 测试全绿；工作区硬隔离（`workspaceIsolation`）与双时态有效性在注入路径上生效。
+>
+> **已知结构性限制**：与副脑插件同源 —— 宿主不提供「插件自有 Remote」，客户端无法静默请求本插件做事，因此所有触发点都在模型工具侧（`memory_harvest` / `memory_search` 等）。
+
+> 兄弟项目：[dsh-graft-slice](https://github.com/corvus-dsh/dsh-graft-slice) —— 物理交接（零继承、可回查、崩溃可恢复）。本插件只读它的 `.retired.json` / `.transferred.json`。
 
 > 当前版本 **0.6.0（预发布）**。发布说明：[RELEASE_NOTES.md](./RELEASE_NOTES.md)。
 

@@ -5,3 +5,4 @@ Thumbs.db
 .dsh-memory/
 .graft-prepared.json
 .txn/
+*.jsonl
