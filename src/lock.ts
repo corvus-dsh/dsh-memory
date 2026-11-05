@@ -1,44 +1,77 @@
 /**
- * v0.22 P0 — a cross-process file lock, so two harvests cannot erase each other.
+ * v0.30 — THE LOCK IS NOW A LEASE, AND THE RACE IS GONE BY CONSTRUCTION.
  *
- * THE BUG THIS CLOSES
+ * WHAT THIS FILE USED TO BE, AND WHAT IT COST
  *
- * `atomicWrite` is already tmp-file + rename with a retry window, so a reader never
- * sees half a file. Atomicity is not isolation: `markProcessed` does
- * read-modify-write over `processed.json`, and two sessions harvesting at once each
- * hold a PARTIAL view. The second writer's `rename` replaces the first writer's key,
- * so the first session is "not processed" again and is mined a second time — the
- * duplicate-skill generator this project has already paid for once.
+ * It was a `mkdir` lock: `mkdirSync(lockDir)` won the lock atomically, and then a SEPARATE call wrote
+ * `lockDir/owner`. A reclaimer that judged the lock stale could delete the directory between those two
+ * lines, and the winning writer then crashed on `ENOENT` writing its own owner file. Observed under
+ * load, with eight contending processes:
  *
- * The lock is a DIRECTORY: `mkdir` fails with EEXIST on every platform we ship, which
- * makes it the one primitive that is atomic without a native addon. A lock whose owner
- * pid is alive is never stolen, however old; a lock whose owner is dead (or whose
- * lease expired) is reclaimed, because a crashed writer must not pin the store.
+ *     Error: ENOENT: no such file or directory, open '…/negatives.jsonl.lock/owner'
  *
- * Deliberately small and dependency-free: the store needs mutual exclusion for whole
- * file replacements, not a general transaction manager.
+ * Two more defects lived in the same design: reclaim judged liveness from a pid (so a pid recycled by
+ * an unrelated process pinned the lock), and the release path could delete a successor's lock.
+ *
+ * WHAT IT IS NOW
+ *
+ * The primitive is `createSyncLeaseAdapter` from `dsh-paradise` — the SAME lease the rest of the
+ * ecosystem uses, with a synchronous driver (this store is synchronous end to end, from `appendNegatives`
+ * up through the harvest pass, so an async lock could not be dropped in without changing every
+ * signature). Every rule — expiry, the ownership fence, the epoch bump — comes from
+ * `protocol/lease.ts`, shared with the asynchronous driver.
+ *
+ * The record is written to a temp file and RENAMED into place while a guard (created with `wx`) is
+ * held, so there is no window in which a half-written or owner-less lock exists for a reclaimer to
+ * delete. Reclamation is by EXPIRY, not by pid: a lease that has not expired is never stolen, and one
+ * that has is taken by the next caller regardless of who used to hold it.
+ *
+ * WHY THE API DID NOT CHANGE
+ *
+ * `acquireFileLock(path)` and `withFileLock(path, body)` keep their exact synchronous shapes. Nine call
+ * sites in `store.ts` / `suggest.ts` and 52 synchronous calls in the test suite depend on them, and a
+ * lock migration that forced every caller to become async would be a behaviour change wearing a
+ * refactor's clothes.
+ *
+ * THE PATH IS STILL THE IDENTITY. Callers pass `<file>.lock`; that string is used as the LEASE KEY, and
+ * one record file lives at that exact path — so "is the lock held?" stays answerable with `existsSync`,
+ * which two tests rely on.
  */
 
-import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { existsSync, readFileSync, rmSync } from 'node:fs'
+
+import type { LeaseRecord } from './lease-types.js'
+import { acquireLease, releaseLease, leaseAdapterStatus } from './lease-bridge.js'
 
 export interface LockOptions {
-  /** How long to wait for the lock before giving up. Default 8s. */
+  /** How long to wait for the lock before giving up. Default 30s. */
   timeoutMs?: number
-  /** A lock older than this whose owner is unknown is reclaimed. Default 30s. */
+  /** How long a held lease stays valid without renewal. Default 30s. */
   staleMs?: number
-  /** Label recorded in the owner file, for diagnostics. */
+  /** Label recorded with the lease, for diagnostics. */
   label?: string
 }
 
-interface OwnerRecord {
-  pid: number
-  at: number
-  token: string
-  label?: string
-}
+/** How long between acquisition attempts. Small: the critical sections are single file replacements. */
+const RETRY_MS = 8
 
-const LOCK_SETTLE_MS = 12
+/**
+ * A DISTINCT HOLDER IDENTITY PER ACQUISITION, and it is not cosmetic.
+ *
+ * The lease rule "the same owner may re-acquire what it already holds" is right FOR A LEASE — a job
+ * retrying its own claim should not be locked out by itself. It is wrong FOR A LOCK: two callers inside
+ * ONE process (two sessions harvesting on the same tick) share a pid, so a pid-only owner would make the
+ * second acquisition look like a renewal and both would enter the critical section. That is precisely
+ * the lost update this file exists to prevent.
+ *
+ * So each acquisition names itself: pid PLUS a per-call counter and a random suffix. The pid stays in
+ * the string because it is what a human reads when diagnosing a stuck lock.
+ */
+let acquisitionCounter = 0
+function nextHolderIdentity(): string {
+  acquisitionCounter += 1
+  return `pid:${process.pid}:${acquisitionCounter}:${Math.random().toString(36).slice(2, 8)}`
+}
 
 function sleepSync(ms: number): void {
   const until = Date.now() + ms
@@ -47,145 +80,73 @@ function sleepSync(ms: number): void {
   }
 }
 
-function isProcessAlive(pid: number): boolean {
-  if (!Number.isFinite(pid) || pid <= 0) return false
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch (error) {
-    // EPERM means the process exists but belongs to another user: still alive.
-    return String((error as any)?.code ?? '') === 'EPERM'
-  }
-}
-
-function readOwner(lockPath: string): OwnerRecord | undefined {
-  try {
-    const parsed = JSON.parse(readFileSync(join(lockPath, 'owner'), 'utf8')) as Record<string, unknown>
-    const pid = Number(parsed.pid)
-    const at = Number(parsed.at)
-    if (!Number.isFinite(pid) || !Number.isFinite(at)) return undefined
-    return {
-      pid,
-      at,
-      token: typeof parsed.token === 'string' ? parsed.token : '',
-      ...(typeof parsed.label === 'string' ? { label: parsed.label } : {}),
-    }
-  } catch {
-    return undefined
-  }
-}
-
 /**
- * Acquire `lockPath` (a directory) and return the release function.
+ * Acquire the lease at `lockPath` and return the synchronous release function.
  *
- * Throws when the wait budget is exhausted: a caller that cannot get the lock must
- * NOT proceed to a read-modify-write, because that is exactly the lost update.
+ * Throws when the wait budget is exhausted: a caller that cannot get the lock must NOT proceed to a
+ * read-modify-write, because that is exactly the lost update this whole file exists to prevent.
  */
 export function acquireFileLock(lockPath: string, options: LockOptions = {}): () => void {
   /**
-   * v0.26: the default wait budget was 8s, which is ample for two harvests and NOT
-   * ample for a machine under load. Measured: with eight writers plus a full test suite
-   * competing for CPU, a writer can spend more than 8s simply WAITING ITS TURN even
-   * though every critical section is a few milliseconds.
-   *
-   * The cost asymmetry decides it. Waiting longer costs a slower write, which is
-   * invisible (a harvest is already a long operation). Failing costs a LOST RECORD,
-   * because a caller that cannot get the lock must not proceed. Bias hard toward
-   * waiting.
+   * THE WAIT BUDGET IS DELIBERATELY GENEROUS. The cost asymmetry decides it: waiting longer costs a
+   * slower write, which is invisible (a harvest is already long). Failing costs a LOST RECORD, because
+   * a caller that cannot get the lock must not proceed. Measured on a loaded machine, eight writers
+   * plus a full test suite can spend seconds merely taking turns even though each section is
+   * milliseconds.
    */
   const timeoutMs = Number.isFinite(options.timeoutMs) ? Number(options.timeoutMs) : 30_000
-  const staleMs = Number.isFinite(options.staleMs) ? Number(options.staleMs) : 30_000
-  const token = `${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+  const ttlMs = Number.isFinite(options.staleMs) ? Number(options.staleMs) : 30_000
+  const status = leaseAdapterStatus()
+  if (!status.ok) {
+    throw new Error(
+      `无法取得 ${lockPath}：${status.reason}。` +
+        '这个锁现在由 dsh-paradise 的租约提供——把 dsh-paradise 放在与 dsh-memory 同级的目录，或在 profile 依赖里加入它。',
+    )
+  }
+
   const deadline = Date.now() + timeoutMs
-  // The lock is a SIBLING of the file it guards, so the parent may not exist yet on a
-  // first run. Creating it here keeps every caller from repeating the step.
-  mkdirSync(dirname(lockPath), { recursive: true })
   for (;;) {
-    try {
-      mkdirSync(lockPath, { recursive: false })
-      const owner: OwnerRecord = {
-        pid: process.pid,
-        at: Date.now(),
-        token,
-        ...(options.label === undefined ? {} : { label: options.label }),
-      }
-      writeFileSync(join(lockPath, 'owner'), JSON.stringify(owner), 'utf8')
+    const lease = acquireLease(lockPath, {
+      ttlMs,
+      owner: nextHolderIdentity(),
+      ...(options.label === undefined ? {} : { label: options.label }),
+    })
+    if (lease !== undefined) {
       let released = false
-      /**
-       * v0.26 — THE RELEASE RACE, and the lost record it caused.
-       *
-       * The old release did: read the owner, compare the token, `rmSync` the directory.
-       * Between the compare and the delete, a WAITER could win `mkdirSync` and become the
-       * new owner — and then this `rmSync` deleted THEIR lock. A third process would
-       * immediately acquire a lock two writers believed they held, and one of their rows
-       * was overwritten.
-       *
-       * Measured: eight processes, eight clean exits, SEVEN rows.
-       *
-       * The fix removes the window instead of narrowing it. `rename` is atomic: exactly
-       * one caller can move `lockPath` to a private name, so exactly one caller can
-       * delete it, and it is provably the one that won the rename. A caller that loses
-       * the rename finds ENOENT and leaves the directory alone — which is correct,
-       * because it belongs to somebody else now.
-       *
-       * The token check stays as a second guard for the reclaim path (a stale lock that
-       * was swept and re-acquired under a different token).
-       */
       return () => {
         if (released) return
         released = true
-        const current = readOwner(lockPath)
-        if (current !== undefined && current.token !== token) return
-        const graveyard = `${lockPath}.released-${process.pid}-${Date.now().toString(36)}`
-        try {
-          renameSync(lockPath, graveyard)
-        } catch (error) {
-          const code = String((error as any)?.code ?? '')
-          // ENOENT: somebody else already released or reclaimed it. Not an error.
-          // EPERM/EBUSY: a waiter is inside creating its owner file; leave it be.
-          if (code === 'ENOENT' || code === 'EPERM' || code === 'EBUSY') return
-          return
-        }
-        try {
-          rmSync(graveyard, { recursive: true, force: true })
-        } catch {
-          // A graveyard that will not delete is disposable and outside the lock path.
-        }
+        /**
+         * THE RELEASE IS FENCED. `releaseLease` refuses when the record is no longer this generation,
+         * so a holder that overran its TTL cannot delete the claim of whoever took over. That refusal
+         * is correct and silent here: leaves the successor's record in place, which is the safe
+         * direction.
+         */
+        releaseLease(lease)
       }
-    } catch (error) {
-      if (String((error as any)?.code ?? '') !== 'EEXIST') throw error
-    }
-    // Somebody holds it. Reclaim only when the holder is provably gone.
-    const owner = readOwner(lockPath)
-    const ageMs = (() => {
-      try {
-        return Date.now() - statSync(lockPath).mtimeMs
-      } catch {
-        return 0
-      }
-    })()
-    const dead = owner !== undefined && !isProcessAlive(owner.pid)
-    const unknownAndOld = owner === undefined && ageMs > staleMs
-    if (dead || unknownAndOld) {
-      try {
-        rmSync(lockPath, { recursive: true, force: true })
-      } catch {
-        // Another waiter won the reclaim; the retry loop settles it.
-      }
-      sleepSync(LOCK_SETTLE_MS)
-      continue
     }
     if (Date.now() >= deadline) {
+      const holder = describeCurrentHolder(lockPath)
       throw new Error(
-        `could not acquire ${lockPath} within ${timeoutMs}ms` +
-          (owner === undefined ? ' (owner unknown)' : ` (held by pid ${owner.pid}${owner.label === undefined ? '' : `, ${owner.label}`})`),
+        `could not acquire ${lockPath} within ${timeoutMs}ms${holder === '' ? ' (holder unknown)' : ` (held by ${holder})`}`,
       )
     }
-    sleepSync(LOCK_SETTLE_MS + Math.floor(Math.random() * 8))
+    sleepSync(RETRY_MS + Math.floor(Math.random() * 8))
   }
 }
 
-/** Run `body` while holding `lockPath`; the lock is always released. */
+/** Best-effort description of whoever holds it, for the timeout message. */
+function describeCurrentHolder(lockPath: string): string {
+  try {
+    const record = JSON.parse(readFileSync(lockPath, 'utf8')) as Partial<LeaseRecord>
+    const owner = typeof record.owner === 'string' ? record.owner : 'unknown'
+    return `${owner}${typeof record.label === 'string' ? `, ${record.label}` : ''}`
+  } catch {
+    return ''
+  }
+}
+
+/** Run `body` while holding the lock at `lockPath`; the lock is always released. */
 export function withFileLock<T>(lockPath: string, body: () => T, options: LockOptions = {}): T {
   const release = acquireFileLock(lockPath, options)
   try {
@@ -193,4 +154,14 @@ export function withFileLock<T>(lockPath: string, body: () => T, options: LockOp
   } finally {
     release()
   }
+}
+
+/** Is a lock currently held at this path? Answerable because the record IS the lock file. */
+export function isLockHeld(lockPath: string): boolean {
+  return existsSync(lockPath)
+}
+
+/** Remove a lock record without the fence. ONLY for test cleanup of an abandoned directory. */
+export function forceReleaseLockForTest(lockPath: string): void {
+  rmSync(lockPath, { force: true })
 }
