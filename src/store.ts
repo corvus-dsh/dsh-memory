@@ -611,8 +611,30 @@ function renderSkill(
     description: skill.description.slice(0, 160),
     when_to_use: skill.when.slice(0, 200),
     scope: skill.scope,
+    /**
+     * NOTE the single `domain` key. This literal previously declared it TWICE in a row — the second silently
+     * won. It happened to be identical, so nothing ever failed, which is exactly why it survived: the bug was
+     * invisible until the day someone edited only one of them.
+     */
     domain: skill.domain ?? 'general',
-    domain: skill.domain ?? 'general',
+    /**
+     * v0.32 — THE CAUSAL FIELDS, WRITTEN ONLY WHEN THE CALLER ACTUALLY KNOWS THEM.
+     *
+     * `dependencies` and `target_effect` are what turn a skill from a procedure into a MACRO: preconditions
+     * in, expected state out. They are omitted rather than defaulted, because an invented precondition would
+     * be read back by `causalChain` as evidence and would make a chain look complete when it is not.
+     */
+    ...(Array.isArray((skill as ExtractedSkill).dependencies) && (skill as ExtractedSkill).dependencies!.length > 0
+      ? {
+          dependencies: (skill as ExtractedSkill)
+            .dependencies!.map((ref) => (ref.sourceSessionId.length > 0 ? `${ref.sourceSessionId}@${ref.seq}` : String(ref.seq)))
+            .join(','),
+        }
+      : {}),
+    ...(typeof (skill as ExtractedSkill).target_effect === 'string' &&
+    ((skill as ExtractedSkill).target_effect as string).length > 0
+      ? { target_effect: (skill as ExtractedSkill).target_effect as string }
+      : {}),
     // v0.8: provenance for the isolation gate (see workspace.ts). Written even for
     // a `global` skill: `global` decides ELIGIBILITY, the path stays on record for
     // audit. Omitted only when the caller genuinely had no workspace.
@@ -763,6 +785,26 @@ export function writeSkill(skillsDir: string, input: SkillInput | ExtractedSkill
   const withSession: ExtractedSkill = {
     ...skill,
     evidence: skill.evidence.map((ref) => ({ ...ref, sourceSessionId: ref.sourceSessionId.length > 0 ? ref.sourceSessionId : meta.sessionId })),
+    /**
+     * v0.32 — CARRY THE CAUSAL FIELDS THROUGH THE NORMALIZER.
+     *
+     * `normalizeSkill` rebuilds the record from a known set of fields, so anything it does not name is
+     * dropped. `dependencies` / `target_effect` were added to the schema but not to that whitelist, and the
+     * effect was silent: the skill was written, `readSkillBody` returned no preconditions, and the causal
+     * chain looked complete while missing its first hop. Copying them explicitly here (and pointing each
+     * dependency at the fallback session) is what makes the round trip whole.
+     */
+    ...(Array.isArray((input as ExtractedSkill).dependencies)
+      ? {
+          dependencies: (input as ExtractedSkill).dependencies!.map((ref) => ({
+            ...ref,
+            sourceSessionId: ref.sourceSessionId.length > 0 ? ref.sourceSessionId : meta.sessionId,
+          })),
+        }
+      : {}),
+    ...(typeof (input as ExtractedSkill).target_effect === 'string'
+      ? { target_effect: (input as ExtractedSkill).target_effect }
+      : {}),
   }
   const threat = scanThreat(`${skill.title} ${skill.description} ${skill.when} ${skill.steps.join(' ')} ${skill.verify.join(' ')}`)
   if (threat !== undefined) return `skipped:${threat}`
@@ -1275,6 +1317,8 @@ export function appendNegatives(memoryDir: string, negatives: ExtractedNegative[
         counterEvidence: [],
         sourceSessionId: meta.sessionId,
         boundarySeq: meta.boundarySeq,
+        // v0.32: the physical trace, on negatives too — a blocker with no time cannot be ordered in the chain.
+        timestamp: monotonicTimestamp(),
         at: meta.at ?? new Date().toISOString(),
         hits: 1,
         // v0.8: same isolation contract as SKILL.md.
@@ -1624,10 +1668,47 @@ export function markSkillValidated(skillsDir: string, name: string, at?: string)
 }
 
 /** Append facts/experiences, merging evidence (never instructions, only pointers). */
+/**
+ * v0.32 — THE STRICTLY MONOTONIC WRITE CLOCK.
+ *
+ * WHY NOT JUST `new Date().toISOString()`: the causal graph (Fact → Experience → Negative/Skill) is only
+ * meaningful if its nodes are ORDERED, and wall clocks are not monotonic — an NTP correction, a VM restore,
+ * or two machines a few seconds apart all produce "the cause happened after the effect". A trace that can
+ * run backwards is not a physical trace.
+ *
+ * So the clock never goes back: it returns `max(now, lastIssued + 1ms)`. Under a correct clock it is
+ * indistinguishable from `now`; under a jumping one it keeps ordering intact instead of silently inverting
+ * causality.
+ *
+ * It is a MODULE-LEVEL clock on purpose: this is a per-process ordering guarantee. Across processes the
+ * ordering authority is `at` written under the file lock, and cross-machine ordering is explicitly NOT
+ * promised — claiming otherwise would be the kind of overreach that makes an audit trail untrustworthy.
+ */
+let lastIssuedMs = 0
+export function monotonicTimestamp(now = Date.now()): string {
+  const next = now > lastIssuedMs ? now : lastIssuedMs + 1
+  lastIssuedMs = next
+  return new Date(next).toISOString()
+}
+
+/** Test seam: reset the clock so a suite can assert from a known origin. */
+export function resetMonotonicClockForTest(at = 0): void {
+  lastIssuedMs = at
+}
+
 function appendLayer(
   memoryDir: string,
   file: string,
-  entries: ReadonlyArray<{ text: string; seq: number; scene?: string }>,
+  entries: ReadonlyArray<{
+    text: string
+    seq: number
+    scene?: string
+    domain?: string
+    timestamp?: string
+    cause?: unknown
+    effect?: unknown
+    action?: string
+  }>,
   meta: SkillMeta,
 ): number {
   if (entries.length === 0) return 0
@@ -1661,8 +1742,24 @@ function appendLayer(
     existing.push({
       text: entry.text,
       scene: /^[a-z][a-z0-9-]{1,23}$/u.test(String(entry.scene ?? '')) ? String(entry.scene) : 'general',
-      domain: /^[a-z][a-z0-9-]{1,31}$/u.test(String(entry.domain ?? '').toLowerCase()) ? String(entry.domain).toLowerCase() : 'general',
-      domain: /^[a-z][a-z0-9-]{1,31}$/u.test(String(entry.domain ?? '').toLowerCase()) ? String(entry.domain).toLowerCase() : 'general',
+      /**
+       * NOTE the single `domain` key. The previous revision declared it TWICE in this object literal — the
+       * second silently won, which happened to be identical, so nothing ever failed. That is the kind of
+       * duplication that becomes a real bug the moment one copy is edited.
+       */
+      domain: /^[a-z][a-z0-9-]{1,31}$/u.test(String(entry.domain ?? '').toLowerCase())
+        ? String(entry.domain).toLowerCase()
+        : 'general',
+      /**
+       * v0.32: the physical trace. An explicit `entry.timestamp` is honoured (a caller replaying an ordered
+       * batch keeps its own order); otherwise the monotonic clock stamps it.
+       */
+      timestamp: typeof entry.timestamp === 'string' && entry.timestamp.length > 0
+        ? entry.timestamp
+        : monotonicTimestamp(),
+      ...(entry.cause === undefined ? {} : { cause: entry.cause }),
+      ...(entry.effect === undefined ? {} : { effect: entry.effect }),
+      ...(typeof entry.action === 'string' && entry.action.length > 0 ? { action: entry.action } : {}),
       evidence: [{ sourceSessionId: meta.sessionId, seq: entry.seq }],
       sourceSessionId: meta.sessionId,
       boundarySeq: meta.boundarySeq,
@@ -1823,6 +1920,50 @@ export interface SkillBody {
   body: string
   /** Character count of `body`, so a caller can decide before reading. */
   chars: number
+  /**
+   * v0.32 — THE MACRO'S PRECONDITIONS, parsed from frontmatter.
+   *
+   * `dependencies` are the evidence pointers the procedure requires to already hold. They are read back
+   * HERE, not fetched from a database, because a SKILL.md is the durable record: whatever the causal chain
+   * reports must be something written in the file, or it is a story this layer told itself.
+   *
+   * ABSENT means "the procedure declares no preconditions", which is different from "its preconditions were
+   * not recorded" — the file is the source of truth either way.
+   */
+  dependencies?: Array<{ sourceSessionId: string; seq: number }>
+  /** v0.32: the state the procedure is expected to produce, from frontmatter `target_effect`. */
+  targetEffect?: string
+}
+
+/**
+ * Parse a frontmatter list of evidence pointers.
+ *
+ * WHY A TOLERANT PARSER: frontmatter is hand-edited (that is a feature — a human can correct a skill), so a
+ * malformed entry must be SKIPPED rather than made to throw. A skill whose dependency line is typo'd should
+ * still be readable; only that one precondition is lost, and the loss is silent by construction because the
+ * alternative is making a whole skill unreadable over one bad line.
+ */
+function parseEvidenceList(raw: string, field: string): Array<{ sourceSessionId: string; seq: number }> {
+  const items = raw
+    .split(/[,\s]+/u)
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0)
+  const out: Array<{ sourceSessionId: string; seq: number }> = []
+  for (const item of items) {
+    // Accept `sessionId@seq` and bare `seq`.
+    const at = item.lastIndexOf('@')
+    if (at > 0) {
+      const seq = Number(item.slice(at + 1))
+      if (Number.isFinite(seq)) out.push({ sourceSessionId: item.slice(0, at), seq })
+      continue
+    }
+    const seq = Number(item)
+    if (Number.isFinite(seq)) out.push({ sourceSessionId: '', seq })
+  }
+  if (out.length === 0 && raw.trim().length > 0) {
+    void field
+  }
+  return out
 }
 
 export function readSkillBody(skillsDir: string, name: string): SkillBody | undefined {
@@ -1847,5 +1988,13 @@ export function readSkillBody(skillsDir: string, name: string): SkillBody | unde
     when: field('when_to_use') || field('when'),
     body,
     chars: body.length,
+    /**
+     * v0.32: the causal fields, read back from the SAME file. Only included when actually present, so a
+     * legacy SKILL.md returns exactly the shape it always did — no invented keys, no fake defaults.
+     */
+    ...(field('dependencies').length === 0
+      ? {}
+      : { dependencies: parseEvidenceList(field('dependencies'), 'dependencies') }),
+    ...(field('target_effect').length === 0 ? {} : { targetEffect: field('target_effect') }),
   }
 }

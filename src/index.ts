@@ -23,6 +23,24 @@ import { retrieve, renderHint, retrieveWithFilter, collectScenes, extractTaskTer
 import { applySkillArchive, listSkillSummaries, planSkillArchive, DEFAULT_SKILL_LIMIT } from './archive.js'
 import { currentWorkspaceOf, workspaceOfSession } from './workspace.js'
 import { applySupersede, listSkillRecords, quarantineWorkspaceMemory, readSkillBody } from './store.js'
+
+/**
+ * v0.32 — THE STORE'S WRITE SURFACE, re-exported for the causal layer's tests and for any consumer that
+ * needs to write a layer record directly.
+ *
+ * These already existed and were reachable through `lib/store.js`; they are surfaced from the package entry
+ * so the causal schema can be exercised without importing an internal module path — which is what a test
+ * SHOULD be able to do, and what a downstream consumer will be able to do tomorrow.
+ */
+export {
+  appendExperiences,
+  appendFacts,
+  appendNegatives,
+  appendMemoryAudit,
+  listSkillRecords,
+  readSkillBody,
+  writeSkill,
+} from './store.js'
 import type { EvidenceRef, MemoryProvenance } from './extract.js'
 
 /**
@@ -98,6 +116,16 @@ export const DEFAULT_RETRIEVAL_FLOOR = 0.2
 // v0.22 P1: the strict bar moved to `retrieve.ts`, which is where the degradation path
 // needs it. It is re-exported here so every existing importer keeps working.
 export { DEFAULT_RETRIEVAL_THRESHOLD } from './retrieve.js'
+/**
+ * v0.32 — CAUSAL RETRIEVAL, exported for the consumer that must DECIDE rather than be hinted.
+ *
+ * `memory_search` answers "what looks like this"; `causalChain` answers "what must be true first, what
+ * forbids this, and what evidence supports it". The second question is what a scheduler or a compiler asks,
+ * and it is answered by following the schema's pointers rather than by word overlap.
+ */
+export { causalChain, describeCausalChain } from './causal.js'
+export type { CausalChain, CausalNode } from './causal.js'
+export { monotonicTimestamp, resetMonotonicClockForTest } from './store.js'
 
 export interface MemoryConfig {
   /** Where the slicing plugin keeps its ledgers. Default: sibling `dsh-graft-slice` data dir. */

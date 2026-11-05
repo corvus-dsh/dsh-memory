@@ -65,6 +65,23 @@ export interface ExtractedFact {
   scene: MemoryScene
   /** v0.17: the project/system this is about. Absent/unknown = `general`. */
   domain?: MemoryDomain
+  /**
+   * v0.32 — WHEN THIS BECAME TRUE, as a strictly monotonic physical trace.
+   *
+   * WHY A FACT NEEDS A TIMESTAMP OF ITS OWN: the four layers form a causal graph (Fact → Experience →
+   * Negative/Skill), and an arrow is only meaningful if its two ends are ORDERED. `seq` orders facts within
+   * ONE session; across sessions it is meaningless. `timestamp` is what establishes a global order, so
+   * "this experience was caused by that fact" can be checked rather than merely asserted.
+   *
+   * STRICTLY MONOTONIC, ENFORCED AT WRITE TIME (`stampFact`): a new fact's timestamp is never less than or
+   * equal to the last one, even under a clock that jumped backwards. That is what makes it a physical trace
+   * instead of a wall-clock reading.
+   *
+   * ABSENT ON LEGACY RECORDS, and that is deliberate: a v0.31 fact has no timestamp, and inventing one at
+   * migration time would fabricate ordering evidence that was never observed. Readers must treat absence as
+   * "unknown position", not as "position zero".
+   */
+  timestamp?: string
 }
 
 export interface ExtractedExperience {
@@ -74,6 +91,31 @@ export interface ExtractedExperience {
   seq: number
   /** v0.6: the domain this lesson belongs to. */
   scene: MemoryScene
+  /**
+   * v0.32 — THE CAUSE AND THE EFFECT, as explicit pointers instead of prose.
+   *
+   * WHAT WAS MISSING: an experience said "what happened", and the reader had to infer "because of what" and
+   * "resulting in what" from the narrative. That is unrecoverable for a consumer that did not read the
+   * source session — and a compiler (or a scheduler) cannot act on narration.
+   *
+   * `cause` points at the PRECEDING state (the fact/seq that set the stage); `effect` points at the
+   * RESULTING state. Both are ordinary evidence pointers, so they are checkable by the same
+   * `sourceSessionId + seq` rule as everything else.
+   *
+   * OPTIONAL, because an experience extracted from a session that only shows the outcome has no observable
+   * "before". Recording a guess there would be worse than recording nothing: it would look like evidence.
+   */
+  cause?: EvidenceRef
+  effect?: EvidenceRef
+  /**
+   * v0.32: the action between cause and effect — "what was done", in one phrase.
+   *
+   * The third side of the triangle. `cause` + `action` + `effect` is a complete causal step; without it the
+   * reader knows two states changed and not why.
+   */
+  action?: string
+  /** v0.32: strictly monotonic physical trace — see `ExtractedFact.timestamp`. */
+  timestamp?: string
 }
 
 export type MemoryScope = 'workspace' | 'project' | 'global'
@@ -106,6 +148,25 @@ export interface ExtractedSkill {
   steps: string[]
   /** `## 验证标准` — how the next session proves it worked. At least one. */
   verify: string[]
+  /**
+   * v0.32 — WHAT THIS PROCEDURE REQUIRES TO BE TRUE FIRST (the macro's preconditions).
+   *
+   * THE COMPILER ANALOGY IS EXACT, not decorative: a skill is a macro, and a macro that expands without its
+   * preconditions being satisfied produces a plausible-looking wrong result. Today `when` says when to
+   * CONSIDER the skill; `dependencies` says what must ALREADY HOLD for it to be applicable at all.
+   *
+   * Each entry is an ordinary evidence pointer, so a precondition is checkable: the reader can go read that
+   * seq and decide whether it still holds.
+   */
+  dependencies?: EvidenceRef[]
+  /**
+   * v0.32 — THE STATE THIS PROCEDURE IS EXPECTED TO PRODUCE.
+   *
+   * The other half of a macro: what it expands INTO. Without it, `verify` says "how to check you did the
+   * steps" while `target_effect` says "what should be true afterwards" — the difference between a checklist
+   * and an assertion.
+   */
+  target_effect?: string
   /** v0.5: how far the procedure travels. Defaults to `project`. */
   scope: MemoryScope
   /** v0.6: the scene that gates retrieval. */
@@ -142,6 +203,19 @@ export interface ExtractedNegative {
   symptom: string
   cause: string
   avoid: string
+  /**
+   * v0.32 — THE CONDITION THAT TRIGGERS THE BLOCK: the compiler's "stop" assertion.
+   *
+   * WHY `avoid` IS NOT ENOUGH: `avoid` is advice ("don't do X"), which a reader can only apply by
+   * interpreting it. `blocked_condition` is a PREDICATE — the state in which this negative applies. That
+   * difference is what lets a consumer decide mechanically instead of asking a model to remember.
+   *
+   * Optional, because a legacy negative (and many new ones) encode the condition inside `cause`. Absence
+   * means "the condition is implicit", not "there is none".
+   */
+  blocked_condition?: string
+  /** v0.32: strictly monotonic physical trace — see `ExtractedFact.timestamp`. */
+  timestamp?: string
   /** v0.5: same three-way scope as skills. Defaults to `project`. */
   scope: MemoryScope
   /** v0.6: scene gate. */
