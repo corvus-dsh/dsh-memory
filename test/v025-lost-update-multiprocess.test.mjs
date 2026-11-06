@@ -81,7 +81,7 @@ const write = () => appendNegatives(dir, [{
   avoid: shape.avoid,
   evidence: [{ sourceSessionId: 'worker-' + index, seq: index }],
   provenance: 'tool',
-}], { sessionId: 'worker-' + index, boundarySeq: index, workspace: 'D:\\\\持久层能力架构', provenance: 'tool' })
+}], { sessionId: 'worker-' + index, boundarySeq: index, workspace: 'D:\\\\workspace', provenance: 'tool' })
 
 let lastError
 /**

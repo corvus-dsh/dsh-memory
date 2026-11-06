@@ -231,7 +231,7 @@ const canWrite = state !== null && state !== undefined
 2026-11-04 20:20，用户在另一个工作区的会话里提问「切片写入失败 … 怎么修」，**没有任何记忆提示**。逐层查证后确认是三个叠加原因，前两个是真缺陷：
 
 1. **store 里没有这条知识**：`memory_harvest` 从未跑过（`processed: 0`），`~/.agents/skills` 里只有 3 条 `acceptance-*` 测试夹具。→ 已执行 harvest，新增 3 条技能 / 6 facts / 6 experiences / 5 negatives。
-2. **隔离门把 workspace 解析成了宿主进程目录**（P0，已修）：0.2.2 的 `agent/pre-step` 只给 `{ agent: Agent }`，而 `Agent` 的契约是 `{ readonly id: SessionId }`——**没有 cwd**。`currentWorkspaceOf(payload)` 于是一路回落到 `process.cwd()`（Electron 应用目录），`D:/持久层能力架构` 与它永不相等，**所有 project 级记忆被拒**，症状恰好是「没有注入」。`memory_search` 同病（实测默认调用 `blockedByWorkspace: 18`＝全部）。
+2. **隔离门把 workspace 解析成了宿主进程目录**（P0，已修）：0.2.2 的 `agent/pre-step` 只给 `{ agent: Agent }`，而 `Agent` 的契约是 `{ readonly id: SessionId }`——**没有 cwd**。`currentWorkspaceOf(payload)` 于是一路回落到 `process.cwd()`（Electron 应用目录），`D:/workspace` 与它永不相等，**所有 project 级记忆被拒**，症状恰好是「没有注入」。`memory_search` 同病（实测默认调用 `blockedByWorkspace: 18`＝全部）。
    - 修复：新增 `sessionWorkspaceOf(agentId)`，用 `sessions.get(id)` + `workingDirectory.get(session)` / `session.header.cwd` 解析真实工作区；pre-step 与 `memory_search`（`exec.agent.id`）都走它，解析不到才回落到旧路径，且仍然 fail-closed。
    - 测试双写改真：旧测试传的是 `{ id, cwd }`——宿主从不这样发，所以测试常绿而功能常死。
 3. **过滤器被 provider 拒绝**（已修）：`reasoningEffort: 'off'` 在 `qiniu / deepseek-v4.1-flash` 上直接报 `does not support reasoning effort "off"`，每次裁决都抛错 → 每轮退化为严格词法召回。修复：命中该错误时**去掉该字段重试一次**（显式指定 effort 时不重试）。

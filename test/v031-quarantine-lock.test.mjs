@@ -61,7 +61,7 @@ const NEG = (symptom, workspace) => ({
 test('v0.31 P0: a record appended during a quarantine is NOT erased by it', async () => {
   const { root, memoryDir, skillsDir } = tempMemory('dsh-mem-q-')
   const OTHER = 'D:\\another-workspace'
-  const MINE = 'D:\\持久层能力架构'
+  const MINE = 'D:\\workspace'
 
   // One record belonging to this workspace (gets quarantined), one belonging to another.
   appendNegatives(memoryDir, [NEG('mine-a', MINE)], META(MINE))
@@ -90,7 +90,7 @@ test('v0.31 P0: a record appended during a quarantine is NOT erased by it', asyn
 
 test('v0.31 P0: the quarantined record lands in the quarantine directory, not nowhere', () => {
   const { memoryDir, skillsDir } = tempMemory('dsh-mem-q2-')
-  const MINE = 'D:\\持久层能力架构'
+  const MINE = 'D:\\workspace'
   appendNegatives(memoryDir, [NEG('mine-only', MINE)], META(MINE))
 
   const result = quarantineWorkspaceMemory(memoryDir, skillsDir, MINE, { skillsOnly: false })
@@ -103,7 +103,7 @@ test('v0.31 P0: the quarantined record lands in the quarantine directory, not no
 test('v0.31 P0: repeated quarantines are idempotent, not additive', () => {
   // A second run with nothing left to move must not rewrite the file with stale content.
   const { memoryDir, skillsDir } = tempMemory('dsh-mem-q3-')
-  const MINE = 'D:\\持久层能力架构'
+  const MINE = 'D:\\workspace'
   const OTHER = 'D:\\another-workspace'
   appendNegatives(memoryDir, [NEG('mine', MINE)], META(MINE))
   appendNegatives(memoryDir, [NEG('other', OTHER)], META(OTHER))

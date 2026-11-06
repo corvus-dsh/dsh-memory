@@ -40,7 +40,7 @@ import {
 } from '../lib/retrieve.js'
 import { apply } from '../lib/index.js'
 
-const WORKSPACE = 'D:\\持久层能力架构'
+const WORKSPACE = 'D:\\workspace'
 
 function skillDir(root) {
   const dir = join(root, 'skills')

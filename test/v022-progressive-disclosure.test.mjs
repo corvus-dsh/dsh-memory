@@ -43,7 +43,7 @@ import {
 import { readSkillBody } from '../lib/store.js'
 import { apply } from '../lib/index.js'
 
-const WORKSPACE = 'D:\\持久层能力架构'
+const WORKSPACE = 'D:\\workspace'
 
 /**
  * A skill that is FRESH (used and validated now) scores 1.0 on an exact trigger match

@@ -54,7 +54,7 @@ function tempMemory(prefix) {
 const META = (sessionId) => ({
   sessionId,
   boundarySeq: 10,
-  workspace: 'D:\\持久层能力架构',
+  workspace: 'D:\\workspace',
   provenance: 'tool',
 })
 

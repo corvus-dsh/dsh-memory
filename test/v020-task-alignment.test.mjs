@@ -35,7 +35,7 @@ import {
   retrieveCandidates,
 } from '../lib/retrieve.js'
 
-const WORKSPACE = 'D:\\持久层能力架构'
+const WORKSPACE = 'D:\\workspace'
 
 /** Write one SKILL.md into a throwaway skills dir. */
 function writeSkill(skillsDir, name, { title, when, body, scene = 'general', workspace = WORKSPACE }) {

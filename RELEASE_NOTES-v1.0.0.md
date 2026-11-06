@@ -19,7 +19,7 @@
 export interface Agent { readonly id: SessionId; }   // ← 没有 cwd
 ```
 
-`currentWorkspaceOf(payload)` 读不到 `agent.cwd`，一路回落到 `process.cwd()`（Electron 应用目录），于是拿 `D:/持久层能力架构` 去和它比较——**永不相等**。结果：所有 project 级记忆被拒。这道门不是关着的，是焊死的，而且不报错，与「库是空的」完全不可区分。
+`currentWorkspaceOf(payload)` 读不到 `agent.cwd`，一路回落到 `process.cwd()`（Electron 应用目录），于是拿 `D:/workspace` 去和它比较——**永不相等**。结果：所有 project 级记忆被拒。这道门不是关着的，是焊死的，而且不报错，与「库是空的」完全不可区分。
 
 `memory_search` 同病：不传 `workspace` 时实测 `blockedByWorkspace: 18`（＝全部文档）。
 
@@ -63,4 +63,4 @@ export interface Agent { readonly id: SessionId; }   // ← 没有 cwd
 
 - **版本号**：`package.json` / `manifest.json` 统一到 `1.0.0`（与 `dsh-graft-slice` 对齐）。
 - **重启生效**：Host 侧模块，重启 DSH 后重新导入 `lib/`；`client.js` 由页面刷新加载。
-- **验证口令**（重启后，在 `D:\持久层能力架构` 的会话里）：问一句「切片写入失败 cannot append outside a SessionStore 怎么修」，应出现 `cold-tape-materialize-slice` 的提示；`memory_search` 不传 workspace 时 `blockedByWorkspace` 应为 0。
+- **验证口令**（重启后，在 `D:\workspace` 的会话里）：问一句「切片写入失败 cannot append outside a SessionStore 怎么修」，应出现 `cold-tape-materialize-slice` 的提示；`memory_search` 不传 workspace 时 `blockedByWorkspace` 应为 0。
