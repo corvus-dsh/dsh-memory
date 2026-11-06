@@ -33,7 +33,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { readSkillBody, listSkillRecords } from './store.js'
-import { tokenize } from './retrieve.js'
+import type { SkillBody, SkillRecord } from './store.js'
 
 /** One node in the chain, whatever layer it came from. */
 export interface CausalNode {
@@ -105,6 +105,43 @@ function readJsonl(path: string): RawRecord[] {
 }
 
 /**
+ * WHERE A CHAIN READS ITS RECORDS FROM — the seam that keeps this module path-free.
+ *
+ * WHY THIS EXISTS AT ALL
+ *
+ * Every layer below used to be reached by joining a directory and a filename, which welded the causal
+ * chain to one storage layout: the skills as a directory of `SKILL.md` files, the three layers as
+ * jsonl files beside it. That is the layout the L0 tier happens to use. It is NOT the contract, and a
+ * tier that keeps its hot layers in memory (the L1 driver) has no such paths at all — so a chain that
+ * insisted on joining paths could only ever answer for L0.
+ *
+ * WHAT IT IS NOT: a storage engine. It is three narrow questions — "which skills have I got", "read
+ * this skill's body", "read these records" — because those are the only reads the traversal performs.
+ * A wider interface would tempt this module to care about writing, and it never writes.
+ *
+ * THE DEFAULT IS THE FILE LAYOUT, EXACTLY AS BEFORE. `fileCausalSource()` is what `causalChain()`
+ * builds when a caller passes only directories, so every existing call site — and every test that
+ * asserts on real files — keeps the behaviour it had, byte for byte.
+ */
+export interface CausalRecordSource {
+  /** Every stored skill, newest state of each. */
+  skills(): SkillRecord[]
+  /** One skill's markdown body, or undefined when it is absent/unreadable. */
+  skillBody(name: string): SkillBody | undefined
+  /** The records of one layer, in file order. A missing layer is an empty list, never an error. */
+  layer(name: 'negatives' | 'facts' | 'experiences'): RawRecord[]
+}
+
+/** The record source for the L0 (file) layout: a memory directory and a skills directory. */
+export function fileCausalSource(memoryDir: string, skillsDir: string): CausalRecordSource {
+  return {
+    skills: () => listSkillRecords(skillsDir),
+    skillBody: (name) => readSkillBody(skillsDir, name),
+    layer: (name) => readJsonl(join(memoryDir, `${name}.jsonl`)),
+  }
+}
+
+/**
  * Does this text plausibly describe the target action?
  *
  * WHY THE TOKEN FALLBACK IS NOT ENOUGH FOR THIS LANGUAGE: `tokenize` splits on whitespace and punctuation,
@@ -171,13 +208,20 @@ function pointerOf(value: unknown): { sourceSessionId: string; seq: number } | u
  *
  * READ-ONLY. It never writes, never repairs, and never invents a node: a chain that cannot be completed
  * comes back SHORTER with a warning, which is the only honest way to answer "here is your evidence".
+ *
+ * THE TWO DIRECTORIES ARE STILL THE SIGNATURE, AND STILL MEAN WHAT THEY MEANT. They are how a caller
+ * says "read the L0 layout at this location"; `options.source` overrides where the records come from
+ * without changing what the traversal does. Keeping the positional form is deliberate: 20 call sites
+ * and four test files already use it, and a refactor that made the chain reach a different set of
+ * records would be a behaviour change wearing a tidy-up's clothes.
  */
 export function causalChain(
   memoryDir: string,
   skillsDir: string,
   target: string,
-  options: { limit?: number } = {},
+  options: { limit?: number; source?: CausalRecordSource } = {},
 ): CausalChain {
+  const source = options.source ?? fileCausalSource(memoryDir, skillsDir)
   const limit = Number.isFinite(Number(options.limit)) ? Math.max(1, Number(options.limit)) : 20
   const warnings: string[] = []
   const skills: CausalNode[] = []
@@ -187,9 +231,9 @@ export function causalChain(
 
   /* ── 1. which skills claim this action ─────────────────────────────────────────────────── */
 
-  let records: ReturnType<typeof listSkillRecords> = []
+  let records: SkillRecord[] = []
   try {
-    records = listSkillRecords(skillsDir)
+    records = source.skills()
   } catch (error) {
     warnings.push(`技能目录不可读：${String((error as any)?.message ?? error)}`)
   }
@@ -197,7 +241,7 @@ export function causalChain(
   for (const record of records) {
     const body = (() => {
       try {
-        return readSkillBody(skillsDir, record.name)
+        return source.skillBody(record.name)
       } catch {
         return undefined
       }
@@ -243,7 +287,7 @@ export function causalChain(
 
   /* ── 2. which negatives BLOCK it, and which experiences explain them ───────────────────── */
 
-  const negatives = readJsonl(join(memoryDir, 'negatives.jsonl'))
+  const negatives = source.layer('negatives')
   for (const record of negatives) {
     const blockedCondition = typeof record.blocked_condition === 'string' ? record.blocked_condition : ''
     const symptom = String(record.symptom ?? '')
@@ -269,7 +313,7 @@ export function causalChain(
 
   /* ── 3. experiences, pulled in by cause/effect or by the same target ──────────────────── */
 
-  const experiences = readJsonl(join(memoryDir, 'experiences.jsonl'))
+  const experiences = source.layer('experiences')
   const experienceNodes: CausalNode[] = []
   for (const record of experiences) {
     const text = String(record.text ?? '')
@@ -299,7 +343,7 @@ export function causalChain(
 
   /* ── 4. facts as the bottom of the chain, de-duplicated by pointer ────────────────────── */
 
-  const factsRaw = readJsonl(join(memoryDir, 'facts.jsonl'))
+  const factsRaw = source.layer('facts')
   const factByPointer = new Map<string, CausalNode>()
   for (const record of factsRaw) {
     const text = String(record.text ?? '')
@@ -356,4 +400,348 @@ export function describeCausalChain(chain: CausalChain): string {
     `${chain.facts.length} 事实`,
   ]
   return `因果链「${chain.target}」：${parts.join(' / ')}${chain.warnings.length === 0 ? '' : `（${chain.warnings.length} 条警告）`}`
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════════════════════
+ * THE RECURSIVE WALK — `recursiveCausalChain`
+ *
+ * WHY THE ONE-HOP WALK IS NOT ENOUGH FOR A SCHEDULER
+ *
+ * `causalChain` answers "what does this action touch?" — one hop from the target, which is what a HINT
+ * needs. A COMPILER asks a different question: "what must be true before I may schedule this, and
+ * what must be true before THAT?" That is a graph, and a one-hop answer is a single level of it.
+ *
+ * So this walk follows pointers DOWNWARD: an experience's `cause` and `effect` are themselves
+ * pointers into a session log, and a fact cited as evidence can itself be the cause of a deeper
+ * experience. Repeating the hop is what turns the list into a DAG.
+ *
+ * WHAT IS ACTUALLY FOLLOWED, AND WHAT IS NOT — stated so the graph cannot be over-read
+ *
+ *   skill  ──dependencies/target_effect──> facts (by pointer)      ✔ followed
+ *   negative ──evidence──> fact                                     ✔ followed
+ *   experience ──cause/effect──> fact                               ✔ followed
+ *   fact ──(no outgoing pointer)                                    ✘ terminal by construction
+ *
+ * A FACT IS A LEAF. The records carry one pointer each (`evidence[0]`), pointing INTO a session log;
+ * a session event has no memory-layer pointers at all. That is a property of the DATA, not a choice
+ * made here — inventing an edge from a fact to another fact would mean matching text, which is the
+ * "confident nonsense" this module's header warns about.
+ *
+ * WHY DEPTH IS A HARD LIMIT AND NOT A SUGGESTION
+ *
+ * Two reasons, and the second is the one that matters operationally:
+ *   1. the graph is finite but the POINTER SPACE is not (a corrupt record can point at itself);
+ *   2. a scheduler that recurses must bound its own work, or a bad store turns a compile step into a
+ *      hang. `maxDepth` is therefore enforced by the walker, not by the caller's patience.
+ *
+ * CYCLES ARE DETECTED BY NODE IDENTITY, and a revisited node is recorded as such rather than silently
+ * dropped: a consumer that sees `revisited: true` knows the graph looped, which is different from
+ * "there was nothing further".
+ * ═══════════════════════════════════════════════════════════════════════════════════════════════ */
+
+/** One node in the recursive graph, carrying how far from the target it sits. */
+export interface CausalGraphNode extends CausalNode {
+  /** 0 = the target's own layer; 1 = one hop down; … */
+  depth: number
+  /** The node that pulled this one in, when it was pulled in by another node. */
+  via?: string
+  /** True when this node was already visited on this walk — a cycle, reported rather than hidden. */
+  revisited?: boolean
+}
+
+/** One edge of the graph, oriented cause → effect (or blocker → blocked action). */
+export interface CausalGraphEdge {
+  from: string
+  to: string
+  /** Which pointer produced this edge. */
+  relation: 'dependency' | 'blocker' | 'cause' | 'effect' | 'evidence'
+}
+
+export interface CausalGraph {
+  target: string
+  /** Every node reached, breadth-first, deepest last. */
+  nodes: CausalGraphNode[]
+  edges: CausalGraphEdge[]
+  /** How deep the walk actually got (0 when nothing was found). */
+  depthReached: number
+  /** Nodes whose outgoing pointers were NOT followed because `maxDepth` was hit. */
+  truncatedAt: string[]
+  warnings: string[]
+}
+
+export interface RecursiveChainOptions {
+  /** How many hops below the target to follow. Default 3. Values below 1 are clamped to 1. */
+  maxDepth?: number
+  /** Cap on TOTAL nodes, so a wide graph cannot blow up a prompt. Default 60. */
+  maxNodes?: number
+  /** Cap per layer at each hop, so one noisy layer cannot crowd out the others. Default 20. */
+  limitPerHop?: number
+  /** Where records come from. Defaults to the L0 file layout. */
+  source?: CausalRecordSource
+}
+
+/**
+ * Walk the causal graph BACKWARDS from an action, following pointers `maxDepth` hops down.
+ *
+ * READ-ONLY, like its one-hop sibling: it never writes, never repairs, and never invents a node.
+ *
+ * THE ENTRY POINT IS THE ONE-HOP WALK. Reusing it means the two functions can never disagree about
+ * what "this action's skill" means — a second, separately-written matcher is how a hint and a
+ * scheduler end up seeing different graphs for the same action.
+ */
+export function recursiveCausalChain(
+  memoryDir: string,
+  skillsDir: string,
+  target: string,
+  options: RecursiveChainOptions = {},
+): CausalGraph {
+  const source = options.source ?? fileCausalSource(memoryDir, skillsDir)
+  const maxDepth = Math.max(1, Math.trunc(Number(options.maxDepth ?? 3)))
+  const maxNodes = Math.max(1, Math.trunc(Number(options.maxNodes ?? 60)))
+  const limitPerHop = Math.max(1, Math.trunc(Number(options.limitPerHop ?? 20)))
+
+  const warnings: string[] = []
+  const nodes: CausalGraphNode[] = []
+  const edges: CausalGraphEdge[] = []
+  const seen = new Set<string>()
+  const truncatedAt: string[] = []
+
+  /**
+   * THE POINTER INDEX — built ONCE, from every layer.
+   *
+   * WHY AN INDEX AND NOT A RE-SCAN PER HOP: a hop from a pointer would otherwise re-read and re-match
+   * every record in every layer. With four layers and a depth of five that is twenty scans of the same
+   * files for one graph, and the results could differ between scans if a harvest writes concurrently.
+   *
+   * WHY **EVERY** EVIDENCE ENTRY IS INDEXED, NOT JUST THE FIRST: a fact is often supported by several
+   * events, and the one that CHAINS to a deeper record is not always the first one written. Indexing
+   * only `evidence[0]` made the walk stop at depth 1 for every graph whose second citation was the
+   * interesting one — measured, not hypothesised: the first version of this function reached exactly
+   * one hop on a five-level fixture.
+   */
+  const factsByPointer = new Map<string, RawRecord[]>()
+  const experiencesByCause = new Map<string, RawRecord[]>()
+  const negativesByEvidence = new Map<string, RawRecord[]>()
+
+  const indexPointer = (map: Map<string, RawRecord[]>, pointer: { sourceSessionId: string; seq: number } | undefined, record: RawRecord): void => {
+    if (pointer === undefined) return
+    const key = `${pointer.sourceSessionId}@${pointer.seq}`
+    const bucket = map.get(key)
+    if (bucket === undefined) map.set(key, [record])
+    else if (!bucket.includes(record)) bucket.push(record)
+  }
+  const indexAllEvidence = (map: Map<string, RawRecord[]>, record: RawRecord): void => {
+    for (const ref of Array.isArray(record.evidence) ? record.evidence : []) indexPointer(map, pointerOf(ref), record)
+  }
+
+  for (const record of source.layer('facts')) indexAllEvidence(factsByPointer, record)
+  for (const record of source.layer('experiences')) {
+    indexPointer(experiencesByCause, pointerOf(record.cause), record)
+    indexPointer(experiencesByCause, pointerOf(record.effect), record)
+    indexAllEvidence(experiencesByCause, record)
+  }
+  for (const record of source.layer('negatives')) indexAllEvidence(negativesByEvidence, record)
+
+  const push = (node: CausalGraphNode): boolean => {
+    if (nodes.length >= maxNodes) return false
+    if (seen.has(node.id)) {
+      // A REVISIT IS DATA. Recorded once, not expanded again — expanding it is how a cycle hangs.
+      if (!nodes.some((existing) => existing.id === node.id && existing.revisited === true)) {
+        nodes.push({ ...node, revisited: true })
+      }
+      return false
+    }
+    seen.add(node.id)
+    nodes.push(node)
+    return true
+  }
+
+  /* ── hop 0: the target's own layer, via the one-hop walk ─────────────────────────────── */
+
+  const base = causalChain(memoryDir, skillsDir, target, { limit: limitPerHop, source })
+  warnings.push(...base.warnings)
+
+  const seed: Array<{ node: CausalNode; via?: string }> = [
+    ...base.skills.map((node) => ({ node })),
+    ...base.blockers.map((node) => ({ node })),
+    ...base.experiences.map((node) => ({ node })),
+    ...base.dependencies.map((node) => ({ node })),
+    ...base.effects.map((node) => ({ node })),
+    ...base.facts.map((node) => ({ node })),
+  ]
+
+  /** The frontier for the next hop: pointers that still have something to pull in. */
+  let frontier: Array<{ fromId: string; pointers: Array<{ sourceSessionId: string; seq: number }>; depth: number }> = []
+
+  for (const entry of seed) {
+    const node = entry.node
+    push({ ...node, depth: 0, ...(entry.via === undefined ? {} : { via: entry.via }) })
+    if (node.pointer !== undefined && maxDepth > 1) {
+      frontier.push({ fromId: node.id, pointers: [node.pointer], depth: 1 })
+    }
+  }
+
+  /**
+   * A SKILL'S DECLARED PRECONDITION IS AN EDGE, not just a label.
+   *
+   * `causalChain` reports `dependencies` as separate nodes; here they are also connected to the skill
+   * that declared them, because a compiler needs to know WHICH procedure requires them.
+   */
+  for (const dependency of base.dependencies) {
+    for (const skill of base.skills) {
+      if (dependency.pointer === undefined) continue
+      edges.push({ from: dependency.id, to: skill.id, relation: 'dependency' })
+      break
+    }
+  }
+  for (const skill of base.skills) {
+    for (const effect of base.effects) {
+      if (!effect.id.startsWith(`${skill.id}:effect`)) continue
+      edges.push({ from: skill.id, to: effect.id, relation: 'effect' })
+    }
+  }
+  for (const blocker of base.blockers) {
+    for (const skill of base.skills) {
+      edges.push({ from: blocker.id, to: skill.id, relation: 'blocker' })
+    }
+  }
+
+  /* ── hops 1..maxDepth: follow pointers downward ────────────────────────────────────── */
+
+  let depthReached = 0
+
+  while (frontier.length > 0) {
+    const next: typeof frontier = []
+    for (const item of frontier) {
+      if (item.depth > maxDepth) continue
+
+      /**
+       * EVERY POINTER ON THE NODE IS FOLLOWED, not just the first one.
+       *
+       * The first version followed `evidence[0]` alone, and that is why an experience whose CAUSE
+       * pointed somewhere useful never expanded: an experience's `evidence` is usually empty, so the
+       * walk stopped at depth 1 no matter how deep the graph really was. A scheduler does not care
+       * which field a pointer happened to be stored in — it cares that the edge exists.
+       */
+      const deeper: Array<{ record: RawRecord; relation: CausalGraphEdge['relation']; layer: CausalNode['layer']; id: string; title: string; detail?: string }> = []
+
+      for (const pointer of item.pointers) {
+        const key = `${pointer.sourceSessionId}@${pointer.seq}`
+
+        for (const record of factsByPointer.get(key) ?? []) {
+          const text = String(record.text ?? '')
+          deeper.push({ record, relation: 'evidence', layer: 'fact', id: `fact:${text.slice(0, 40)}`, title: text.slice(0, 120) })
+        }
+        for (const record of experiencesByCause.get(key) ?? []) {
+          const text = String(record.text ?? '')
+          const action = typeof record.action === 'string' ? record.action : ''
+          deeper.push({
+            record,
+            relation: 'cause',
+            layer: 'experience',
+            id: `experience:${text.slice(0, 40)}`,
+            title: text.slice(0, 120),
+            ...(action.length === 0 ? {} : { detail: action }),
+          })
+        }
+        for (const record of negativesByEvidence.get(key) ?? []) {
+          const symptom = String(record.symptom ?? '')
+          deeper.push({
+            record,
+            relation: 'blocker',
+            layer: 'negative',
+            id: `negative:${symptom.slice(0, 40)}`,
+            title: symptom,
+            ...(typeof record.cause === 'string' ? { detail: record.cause } : {}),
+          })
+        }
+      }
+
+      if (deeper.length === 0) continue
+
+      const accepted = deeper.slice(0, limitPerHop)
+      if (deeper.length > accepted.length) {
+        warnings.push(`节点 ${item.fromId} 在第 ${item.depth} 层有 ${deeper.length} 个后继，只展开了前 ${accepted.length} 个`)
+      }
+
+      depthReached = Math.max(depthReached, item.depth)
+
+      for (const entry of accepted) {
+        /**
+         * THE DEEPER NODE'S OWN POINTERS ARE COLLECTED FIRST — before `push`, because a node already
+         * visited still has edges worth recording even when it is not expanded twice.
+         */
+        const ownPointers: Array<{ sourceSessionId: string; seq: number }> = []
+        if (Array.isArray(entry.record.evidence)) {
+          for (const ref of entry.record.evidence) {
+            const pointer = pointerOf(ref)
+            if (pointer !== undefined) ownPointers.push(pointer)
+          }
+        }
+        for (const field of ['cause', 'effect'] as const) {
+          const pointer = pointerOf(entry.record[field])
+          if (pointer !== undefined) ownPointers.push(pointer)
+        }
+
+        const added = push({
+          layer: entry.layer,
+          id: entry.id,
+          title: entry.title,
+          relation: entry.relation,
+          ...(entry.detail === undefined ? {} : { detail: entry.detail }),
+          ...(ownPointers.length === 0 ? {} : { pointer: ownPointers[0] }),
+          depth: item.depth,
+          via: item.fromId,
+        })
+        edges.push({ from: item.fromId, to: entry.id, relation: entry.relation })
+        if (!added) continue
+        /**
+         * A deeper node's OWN pointers are what the next hop follows — this is the recursion.
+         *
+         * TRUNCATION IS RECORDED AT THE MOMENT IT HAPPENS, not inferred afterwards from the node
+         * depths. The first version tried to reconstruct it at the end by collecting nodes whose depth
+         * equalled `maxDepth`, which reported zero for a graph that HAD been cut — because a node that
+         * was never expanded is, by definition, not in `nodes` to be found. The honest place to notice
+         * "I stopped here" is the branch that stops.
+         */
+        if (ownPointers.length === 0) continue
+        if (item.depth + 1 > maxDepth) {
+          if (!truncatedAt.includes(entry.id)) truncatedAt.push(entry.id)
+          continue
+        }
+        next.push({ fromId: entry.id, pointers: ownPointers, depth: item.depth + 1 })
+      }
+    }
+    if (next.length === 0) break
+    frontier = next
+  }
+
+  /**
+   * TRUNCATION IS REPORTED, NOT ASSUMED SILENT. A consumer must be able to tell "the graph ends here"
+   * from "I stopped looking", because the first is a fact about the memory and the second is a fact
+   * about this call's parameters.
+   *
+   * `truncatedAt` was filled at the branch that stopped (see the hop loop); this only turns it into a
+   * sentence, so the warning and the list cannot disagree.
+   */
+  if (truncatedAt.length > 0) {
+    warnings.push(`已达深度上限 ${maxDepth}：${truncatedAt.length} 个节点没有再向下展开（这是本函数的参数，不是记忆的边界）`)
+  }
+  if (nodes.length >= maxNodes) {
+    warnings.push(`已达节点上限 ${maxNodes}：图被截断，更深的关系没有进入结果`)
+  }
+
+  return { target, nodes, edges, depthReached, truncatedAt, warnings }
+}
+
+/** A one-line summary of the graph, so a scheduler can log it without dumping every node. */
+export function describeCausalGraph(graph: CausalGraph): string {
+  const byDepth = new Map<number, number>()
+  for (const node of graph.nodes) byDepth.set(node.depth, (byDepth.get(node.depth) ?? 0) + 1)
+  const levels = [...byDepth.entries()].sort((a, b) => a[0] - b[0]).map(([depth, count]) => `L${depth}:${count}`).join(' ')
+  return (
+    `因果图「${graph.target}」：${graph.nodes.length} 节点 / ${graph.edges.length} 边 / ` +
+    `深度 ${graph.depthReached}${levels.length === 0 ? '' : `（${levels}）`}` +
+    `${graph.warnings.length === 0 ? '' : `（${graph.warnings.length} 条警告）`}`
+  )
 }

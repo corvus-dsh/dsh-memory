@@ -122,9 +122,20 @@ export { DEFAULT_RETRIEVAL_THRESHOLD } from './retrieve.js'
  * `memory_search` answers "what looks like this"; `causalChain` answers "what must be true first, what
  * forbids this, and what evidence supports it". The second question is what a scheduler or a compiler asks,
  * and it is answered by following the schema's pointers rather than by word overlap.
+ *
+ * v0.38 — `recursiveCausalChain` is the SAME walk repeated downward, with a hard depth limit. The
+ * one-hop answer is a level; a compiler needs a graph, and a graph is what this returns.
  */
-export { causalChain, describeCausalChain } from './causal.js'
-export type { CausalChain, CausalNode } from './causal.js'
+export { causalChain, describeCausalChain, recursiveCausalChain, describeCausalGraph, fileCausalSource } from './causal.js'
+export type {
+  CausalChain,
+  CausalNode,
+  CausalGraph,
+  CausalGraphNode,
+  CausalGraphEdge,
+  CausalRecordSource,
+  RecursiveChainOptions,
+} from './causal.js'
 export { monotonicTimestamp, resetMonotonicClockForTest } from './store.js'
 
 export interface MemoryConfig {
