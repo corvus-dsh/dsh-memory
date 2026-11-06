@@ -26,6 +26,8 @@ import { homedir } from 'node:os'
 import type { EvidenceRef, ExtractedExperience, ExtractedFact, ExtractedNegative, ExtractedSkill, MemoryProvenance } from './extract.js'
 import { jaccard, planNegative, trigrams } from './dedupe.js'
 import { replaceEdges, writeEdge, writeEdges } from './edges.js'
+import { commitLedger, invalidateLedger, readRecords, replaceRecords } from './ledger-cache.js'
+import { invalidateSkillDocs } from './skill-cache.js'
 import { acquireFileLock } from './lock.js'
 import { normalizeWorkspace } from './workspace.js'
 import { scanThreat } from './threat.js'
@@ -968,11 +970,14 @@ export function writeSkill(skillsDir: string, input: SkillInput | ExtractedSkill
     atomicWrite(path, renderSkill(mergedSkill, writeMeta, { evidence: merged.length, sources: sources + 1, created, lastUsed, lastValidated, validAt: previousValidity.validAt, invalidAt: previousValidity.invalidAt, supersededBy: previousValidity.supersededBy, supersedes: previousValidity.supersedes, provenance: previousValidity.provenance }, conflicts))
     commitEdges(skillsDir, skill.name, conflicts)
     invalidateSkillShape(skillsDir, skill.name)
+    /** v1.1.0: the retrieval-side document cache must not serve the pre-write shape. */
+    invalidateSkillDocs(skillsDir)
     return 'merged'
   }
   atomicWrite(path, renderSkill(withSession, meta, undefined, conflicts))
   commitEdges(skillsDir, skill.name, conflicts)
   invalidateSkillShape(skillsDir, skill.name)
+  invalidateSkillDocs(skillsDir)
   return 'created'
 }
 
@@ -1218,19 +1223,32 @@ export function applySupersede(
   return { applied: true, status: 'superseded', invalidAt: at }
 }
 
+/**
+ * READ ONE JSONL LEDGER.
+ *
+ * v1.1.0: this used to be `readFileSync` + line-by-line `JSON.parse` on EVERY call. The V8
+ * profile put three instances of this function at 14.0% of a turn's CPU, and the retrieval
+ * path re-parsed the same files again for another 13.2%. It now goes through the ledger
+ * cache, which validates with two `stat` calls and returns the already-parsed array.
+ *
+ * The signature is unchanged on purpose: every caller keeps treating the result as a plain
+ * array it may mutate, and `commitLedger` is what makes those mutations durable.
+ */
 function readJsonl(path: string): Array<Record<string, unknown>> {
-  const out: Array<Record<string, unknown>> = []
-  if (!existsSync(path)) return out
-  for (const line of readFileSync(path, 'utf8').split(/\r?\n/u)) {
-    if (line.trim().length === 0) continue
-    try {
-      const parsed = JSON.parse(line)
-      if (parsed !== null && typeof parsed === 'object') out.push(parsed)
-    } catch {
-      // A torn line must not erase the rest of the ledger.
-    }
-  }
-  return out
+  return readRecords(path)
+}
+
+/**
+ * Read a ledger that a caller is about to MUTATE under a lock.
+ *
+ * The cache returns a shared array; a caller that wants to be certain it is not holding a
+ * snapshot taken before the lock must invalidate first. This is the explicit escape hatch —
+ * named so that "did you mean the shared array or a fresh read?" has an answer at the call
+ * site instead of in a comment.
+ */
+function readJsonlFresh(path: string): Array<Record<string, unknown>> {
+  invalidateLedger(path)
+  return readRecords(path)
 }
 
 /**
@@ -1516,17 +1534,18 @@ export function appendNegatives(memoryDir: string, negatives: ExtractedNegative[
   if (negatives.length === 0) return 0
   const workspace = normalizeWorkspace(meta.workspace)
   const path = join(memoryDir, 'negatives.jsonl')
-  const existing = readJsonl(path)
   let appended = 0
   let dirty = false
-  // v0.25 P1: the read above and the write below are ONE critical section. Two
-  // harvests appending different negatives used to keep only the later file, silently
-  // dropping the other session's warning.
+  /**
+   * v1.1.0: no pre-lock read. It only warmed a local array; the authoritative read now
+   * happens inside the lock via the stat-validated cache, so a pre-lock parse would be a
+   * wasted full file read.
+   */
   const release = acquireFileLock(`${path}.lock`, { label: 'appendNegatives' })
   try {
-    // Re-read INSIDE the lock: whatever we saw before may already be stale.
-    existing.length = 0
-    existing.push(...readJsonl(path))
+    const existing = readJsonl(path)
+    const beforeLength = existing.length
+    let patched = false
     appended = 0
     dirty = false
     for (const negative of negatives) {
@@ -1544,6 +1563,7 @@ export function appendNegatives(memoryDir: string, negatives: ExtractedNegative[
           const merged = [...new Map([...(Array.isArray(same.evidence) ? same.evidence : []), ...negative.evidence].map((ref) => [keyOf(ref), ref])).values()]
           same.evidence = merged
           same.hits = Number(same.hits ?? 0) + 1
+          patched = true
           dirty = true
         }
         continue
@@ -1579,14 +1599,21 @@ export function appendNegatives(memoryDir: string, negatives: ExtractedNegative[
      * it would race a concurrent harvest that is rewriting the same file.
      */
     if (existing.length > MAX_NEGATIVES) {
-      const overflow = planNegativeArchive(existing as Array<Record<string, unknown>>, MAX_NEGATIVES)
+      const overflow = planNegativeArchive(existing, MAX_NEGATIVES)
       if (overflow.archive.length > 0) {
         appendFileSync(join(memoryDir, NEGATIVE_ARCHIVE_FILE), `${overflow.archive.map((record) => JSON.stringify(record)).join('\n')}\n`, 'utf8')
-        existing.length = 0
-        existing.push(...(overflow.keep as never[]))
+        replaceRecords(path, overflow.keep)
+        return appended
       }
     }
-    atomicWrite(path, existing.map((record) => JSON.stringify(record)).join('\n') + '\n')
+    /**
+     * v1.1.0 — THE HOT PATH IS NO LONGER A FULL REWRITE.
+     *
+     * New rows go to the WAL (one append); a `hits += 1` patch forces an immediate flush
+     * because a patch cannot be expressed as an append. The common case is append-only,
+     * so the common case is O(1).
+     */
+    commitLedger(path, existing.slice(beforeLength), { patched })
     return appended
   } finally {
     release()
@@ -1683,11 +1710,20 @@ export function recordCounterEvidence(
   // counter sweep would be erased by whichever wrote last.
   const release = acquireFileLock(`${path}.lock`, { label: 'recordCounterEvidence' })
   try {
-    records.length = 0
-    records.push(...readJsonl(path))
+    /**
+     * v1.1.0 — NO CLEAR-AND-REFILL.
+     *
+     * This used to be `records.length = 0; records.push(...readJsonl(path))`, a re-read
+     * inside the lock to defeat a stale pre-lock snapshot. With the ledger cache that is
+     * catastrophic: `readJsonl` returns the SAME array instance, so clearing it and then
+     * spreading it yields an empty array — every negative silently deleted. The cache is
+     * already stat-validated under the lock, so the re-read is unnecessary; `invalidate`
+     * first to be certain we are not looking at a snapshot another process invalidated.
+     */
+    const live = readJsonlFresh(path)
     updated.length = 0
     dirty = false
-    for (const record of records) {
+    for (const record of live) {
       const symptom = String(record.symptom ?? '')
       const cause = String(record.cause ?? '')
       const avoid = String(record.avoid ?? '')
@@ -1715,7 +1751,7 @@ export function recordCounterEvidence(
         dirty = true
       }
     }
-    if (dirty) atomicWrite(path, records.map((record) => JSON.stringify(record)).join('\n') + '\n')
+    if (dirty) commitLedger(path, [], { patched: true })
     return { updated, scannedResults: successes.length }
   } finally {
     release()
@@ -1733,6 +1769,8 @@ export function touchSkillUsage(skillsDir: string, name: string, at?: string): b
       ? text.replace(/^last_used:.*$/mu, `last_used: ${stamp}`)
       : text.replace(/^(name:.*)$/mu, `$1\nlast_used: ${stamp}`)
     atomicWrite(path, text)
+    /** v1.1.0: a usage stamp changes last_used/decay, which retrieval derives from. */
+    invalidateSkillDocs(skillsDir)
     return true
   } catch {
     return false
@@ -1797,6 +1835,8 @@ export function applySkillFeedback(
       missing.push(name)
     }
   }
+  /** v1.1.0: confidence feeds scoring, so the cached documents are now stale. */
+  if (updated.length > 0) invalidateSkillDocs(skillsDir)
   return { updated, missing }
 }
 
@@ -1914,6 +1954,8 @@ export function markSkillValidated(skillsDir: string, name: string, at?: string)
       ? text.replace(/^last_validated:.*$/mu, `last_validated: ${stamp}`)
       : text.replace(/^(name:.*)$/mu, `$1\nlast_validated: ${stamp}`)
     atomicWrite(path, text)
+    /** v1.1.0: re-validation clears the stale flag, which the cached document still carries. */
+    invalidateSkillDocs(skillsDir)
     return true
   } catch {
     return false
@@ -1967,15 +2009,14 @@ function appendLayer(
   if (entries.length === 0) return 0
   const workspace = normalizeWorkspace(meta.workspace)
   const path = join(memoryDir, file)
-  const existing = readJsonl(path) as unknown as LayerRecord[]
   let appended = 0
   let dirty = false
-  // v0.25 P1: facts and experiences are appended by whole-file rewrite too, so two
-  // harvests racing here lose one session's observations exactly as negatives would.
+  /** v1.1.0: no pre-lock read; the authoritative read is inside the lock via the cache. */
   const release = acquireFileLock(`${path}.lock`, { label: `appendLayer:${file}` })
   try {
-    existing.length = 0
-    existing.push(...(readJsonl(path) as unknown as LayerRecord[]))
+    const existing = readJsonl(path) as unknown as LayerRecord[]
+    const beforeLength = existing.length
+    let patched = false
     appended = 0
     dirty = false
     for (const entry of entries) {
@@ -1989,6 +2030,7 @@ function appendLayer(
       }
       same.evidence = refs
       same.hits = Number(same.hits ?? 0) + 1
+      patched = true
       dirty = true
       continue
     }
@@ -2024,7 +2066,8 @@ function appendLayer(
     dirty = true
   }
     if (!dirty) return 0
-    atomicWrite(path, existing.map((record) => JSON.stringify(record)).join('\n') + '\n')
+    /** v1.1.0: append-only rows go to the WAL; a `hits += 1` patch forces a flush. */
+    commitLedger(path, existing.slice(beforeLength), { patched })
     return appended
   } finally {
     release()

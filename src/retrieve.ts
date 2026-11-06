@@ -18,7 +18,7 @@
  */
 
 import { execFileSync } from 'node:child_process'
-import { existsSync, readdirSync, readFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { selectApplicableSkillsDetailed } from './filter.js'
@@ -29,6 +29,8 @@ import { memoryAllowsWorkspace, normalizeWorkspace } from './workspace.js'
 import { scanThreat } from './threat.js'
 import { isValidAt, readSkillValidity } from './store.js'
 import { getNeighbors } from './edges.js'
+import { readRecords } from './ledger-cache.js'
+import { getCachedSkillDocs, setCachedSkillDocs, skillDocsKey } from './skill-cache.js'
 
 /** v0.6: all four layers participate in retrieval. */
 export type DocumentKind = 'skill' | 'negative' | 'fact' | 'experience'
@@ -687,7 +689,32 @@ function isActive(document: Document, now: number): boolean {
   return isValidAt({ validAt: document.validAt, invalidAt: document.invalidAt }, now)
 }
 
+/**
+ * v1.1.0 — SKILL DOCUMENT CACHE.
+ *
+ * After the ledger cache removed JSON parsing from the hot path, the profile moved here:
+ * `readFileUtf8` (7.0%), `existsSync` (6.1%) and `tokenize` (3.7%) were all this function
+ * re-reading and re-tokenizing every SKILL.md on every retrieval. With 40 skills that is
+ * 40 file opens, 40 tokenize passes and 40 `existsSync` calls per turn — for files that had
+ * not changed since the previous turn.
+ *
+ * The cache itself lives in `skill-cache.ts` so that the WRITER can invalidate it without
+ * creating an import cycle (this module already imports store.ts).
+ */
+function skillDirKey(skillsDir: string, now: number): string {
+  let mtime = -1
+  try {
+    mtime = statSync(skillsDir).mtimeMs
+  } catch {
+    mtime = -1
+  }
+  return skillDocsKey(mtime, now)
+}
+
 function skillDocuments(skillsDir: string, now: number): Document[] {
+  const cacheKey = skillDirKey(skillsDir, now)
+  const cached = getCachedSkillDocs<Document>(skillsDir, cacheKey)
+  if (cached !== undefined) return cached
   let names: string[] = []
   try {
     names = readdirSync(skillsDir, { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => entry.name)
@@ -802,6 +829,7 @@ function skillDocuments(skillsDir: string, now: number): Document[] {
         confidence,
     })
   }
+  setCachedSkillDocs(skillsDir, cacheKey, out)
   return out
 }
 
@@ -826,18 +854,18 @@ function firstEvidence(value: unknown, fallbackSession?: string): { sessionId?: 
 
 function negativeDocuments(memoryDir: string, now: number): Document[] {
   const path = join(memoryDir, 'negatives.jsonl')
-  if (!existsSync(path)) return []
+  /**
+   * v1.1.0 — READ THROUGH THE LEDGER CACHE, NOT THE FILE.
+   *
+   * The V8 profile put this function's forEach at 5.0% of a turn and its sibling at 8.2%:
+   * 13.2% spent re-parsing ledgers that had not changed since the last retrieval. The cache
+   * is stat-validated, so a write by another process still forces a reload.
+   */
+  const records = readRecords(path)
+  if (records.length === 0) return []
   const out: Document[] = []
-  let lines: string[] = []
-  try {
-    lines = readFileSync(path, 'utf8').split(/\r?\n/u).filter(Boolean)
-  } catch {
-    return []
-  }
-  lines.forEach((line, index) => {
+  records.forEach((record, index) => {
     try {
-      const record = JSON.parse(line)
-      if (record === null || typeof record !== 'object') return
       const symptom = String(record.symptom ?? '')
       const cause = String(record.cause ?? '')
       const avoid = String(record.avoid ?? '')
@@ -892,18 +920,12 @@ function negativeDocuments(memoryDir: string, now: number): Document[] {
 /** v0.6: facts and experiences are retrievable evidence, not just stored text. */
 function layerDocuments(memoryDir: string, file: string, kind: 'fact' | 'experience', now: number): Document[] {
   const path = join(memoryDir, file)
-  if (!existsSync(path)) return []
-  let lines: string[] = []
-  try {
-    lines = readFileSync(path, 'utf8').split(/\r?\n/u).filter(Boolean)
-  } catch {
-    return []
-  }
+  /** v1.1.0: through the ledger cache (this loop was 8.2% of a turn when re-parsing). */
+  const records = readRecords(path)
+  if (records.length === 0) return []
   const out: Document[] = []
-  lines.forEach((line, index) => {
+  records.forEach((record, index) => {
     try {
-      const record = JSON.parse(line)
-      if (record === null || typeof record !== 'object') return
       const text = String(record.text ?? '')
       if (text.length === 0) return
       const sceneText = String(record.scene ?? 'general').toLowerCase()
