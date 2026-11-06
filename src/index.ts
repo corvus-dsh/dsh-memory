@@ -355,12 +355,45 @@ export interface HarvestReport {
  * means another harvest finished in between. The write phase merges (read-modify-
  * write inside the store), so the correct response is a merge + retry of the
  * WRITE — never a second LLM extraction, which is the expensive part.
+ *
+ * v1.0.0 P0 — THE EDGE INDEX IS PART OF THE STORE VERSION.
+ *
+ * v1.0.0 moved conflict edges out of SKILL.md and into `skills-edges.jsonl`. That made a
+ * new piece of durable state that the stamp could not see: an operation can now change
+ * the store's conflict graph while every SKILL.md stays byte-identical. Without this entry,
+ * `versionBeforeWrites !== versionAtExtractStart` would report "no concurrent write" for a
+ * change that DID happen.
+ *
+ * Found by auditing my own change rather than by a failing test — which is the honest
+ * status: it is a correctness gap that no current test exercises, because the edge index is
+ * append-only and idempotent, so a missed merge costs a redundant retry, not data. It is
+ * still wrong to leave a state file outside the stamp.
  */
+export const STORE_VERSION_MEMORY_FILES = [
+  'negatives.jsonl',
+  'negatives-archive.jsonl',
+  'processed.json',
+  'facts.jsonl',
+  'experiences.jsonl',
+  'suggestions.jsonl',
+] as const
+/** Files that live in the SKILLS directory rather than the memory directory. */
+export const STORE_VERSION_SKILL_FILES = ['skills-edges.jsonl'] as const
+
 export function snapshotStoreVersion(memoryDir: string, skillsDir: string): string {
   const parts: string[] = []
-  for (const file of ['negatives.jsonl', 'processed.json', 'facts.jsonl', 'experiences.jsonl', 'suggestions.jsonl']) {
+  for (const file of STORE_VERSION_MEMORY_FILES) {
     try {
       const state = statSync(join(memoryDir, file))
+      parts.push(`${file}:${state.size}:${Math.round(state.mtimeMs)}`)
+    } catch {
+      parts.push(`${file}:-`)
+    }
+  }
+  /** Non-skill files inside the skills directory (the edge index) participate too. */
+  for (const file of STORE_VERSION_SKILL_FILES) {
+    try {
+      const state = statSync(join(skillsDir, file))
       parts.push(`${file}:${state.size}:${Math.round(state.mtimeMs)}`)
     } catch {
       parts.push(`${file}:-`)
