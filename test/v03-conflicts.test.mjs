@@ -1,11 +1,16 @@
 /**
  * v0.3: conflicting capabilities must be RECORDED as alternatives.
+ * v1.0.0: the recording MOVED — from inline frontmatter/hero prose into `skills-edges.jsonl`.
  *
- * The battle case: one session learns "connect MySQL with pymysql", another
- * learns "open SQLite with sqlite3". Both are correct procedures for the same
- * purpose and they are mutually exclusive. Stored silently, a later retrieval
- * says "this worked last time" twice — for two different answers. The record has
- * to name the fork so the next model asks the user instead of guessing.
+ * The battle case is unchanged: one session learns "connect MySQL with pymysql", another
+ * learns "open SQLite with sqlite3". Both are correct procedures for the same purpose and
+ * they are mutually exclusive. A later retrieval must still name the fork.
+ *
+ * WHY THE ASSERTIONS CHANGED: v1.0.0 removed `conflicts_with:` and the `## ⚠️ 冲突提示`
+ * footer from SKILL.md. Inlining them made one edge rewrite a whole existing file, so
+ * writing N skills cost O(N²) file IO over files that grew with every edge (measured:
+ * 103.7 ms/skill at N=400, single files at 104 KB). The edges are now an index; these
+ * tests assert the INDEX and, through retrieval, the user-visible behaviour that matters.
  */
 
 import test from 'node:test'
@@ -16,6 +21,7 @@ import { join } from 'node:path'
 
 import { findConflicts, isConflictingSkill, normalizeSkill, parseSkillFile, skillPath, writeSkill } from '../lib/store.js'
 import * as storeModule from '../lib/store.js'
+import { readEdges, hasEdge, getNeighbors, edgeCount } from '../lib/edges.js'
 import { renderHint, retrieve } from '../lib/retrieve.js'
 import { selectApplicableSkills } from '../lib/filter.js'
 import { writeFileSync as atomicWriteForTest } from 'node:fs'
@@ -66,39 +72,46 @@ test('conflict: pymysql and sqlite3 are alternatives, not duplicates', () => {
   assert.equal(isConflictingSkill(a, normalizeSkill(sameMethod)), false)
 })
 
-test('conflict: writing the second skill records both edges and a warning', () => {
+test('conflict: writing the second skill records both edges in the index (not in the files)', () => {
   const skills = dir()
   assert.equal(writeSkill(skills, MYSQL, { sessionId: 's-a', boundarySeq: 9 }), 'created')
   assert.equal(writeSkill(skills, SQLITE, { sessionId: 's-b', boundarySeq: 12 }), 'created')
 
+  // The edge exists, in both directions, in the index.
+  assert.equal(hasEdge(skills, MYSQL.name, SQLITE.name), true, 'the link must be symmetric (unordered)')
+  assert.equal(hasEdge(skills, SQLITE.name, MYSQL.name), true)
+  assert.equal(edgeCount(skills), 1, 'one unordered pair is ONE edge, not two lines')
+
+  // Retrieval-side neighbour lookup returns the alternative for both sides.
+  assert.deepEqual(getNeighbors(skills, MYSQL.name), [SQLITE.name])
+  assert.deepEqual(getNeighbors(skills, SQLITE.name), [MYSQL.name])
+
+  // And NOTHING was inlined into the skill files.
   const mysqlText = readFileSync(skillPath(skills, MYSQL.name), 'utf8')
   const sqliteText = readFileSync(skillPath(skills, SQLITE.name), 'utf8')
-
-  assert.match(sqliteText, new RegExp(`^conflicts_with: ${MYSQL.name}$`, 'mu'))
-  assert.match(mysqlText, new RegExp(`^conflicts_with: ${SQLITE.name}$`, 'mu'), 'the link must be symmetric')
-  assert.match(sqliteText, /## ⚠️ 冲突提示/u)
-  assert.match(sqliteText, /不要混用/u)
-  assert.match(mysqlText, /## ⚠️ 冲突提示/u)
+  assert.doesNotMatch(sqliteText, /^conflicts_with:/mu, 'v1.0.0: the edge is not a frontmatter line')
+  assert.doesNotMatch(mysqlText, /^conflicts_with:/mu)
+  assert.doesNotMatch(sqliteText, /## ⚠️ 冲突提示/u, 'v1.0.0: no footer prose in the stored file')
+  assert.doesNotMatch(mysqlText, /## ⚠️ 冲突提示/u)
 })
 
-test('conflict: rewriting a skill does not duplicate the warning or the edge', () => {
+test('conflict: rewriting a skill does not duplicate the edge', () => {
   const skills = dir()
   writeSkill(skills, MYSQL, { sessionId: 's-a', boundarySeq: 9 })
   writeSkill(skills, SQLITE, { sessionId: 's-b', boundarySeq: 12 })
   writeSkill(skills, { ...SQLITE, evidence: [203] }, { sessionId: 's-c', boundarySeq: 20 })
-  const text = readFileSync(skillPath(skills, SQLITE.name), 'utf8')
-  assert.equal((text.match(/## ⚠️ 冲突提示/gu) ?? []).length, 1)
-  assert.equal(text.split(`与 \`${MYSQL.name}\``).length - 1, 1, 'the warning is appended once')
-  assert.equal((text.match(new RegExp(`^conflicts_with:.*${MYSQL.name}`, 'mu')) ?? []).length, 1)
+  assert.equal(edgeCount(skills), 1, 'the same pair must stay a single edge')
+  assert.deepEqual(getNeighbors(skills, MYSQL.name), [SQLITE.name])
 })
 
-test('conflict: an unrelated skill carries no conflict metadata', () => {
+test('conflict: an unrelated skill carries no conflict metadata and no edges', () => {
   const skills = dir()
   writeSkill(skills, MYSQL, { sessionId: 's-a', boundarySeq: 9 })
   writeSkill(skills, UNRELATED, { sessionId: 's-c', boundarySeq: 30 })
   const text = readFileSync(skillPath(skills, UNRELATED.name), 'utf8')
   assert.doesNotMatch(text, /conflicts_with/u)
   assert.doesNotMatch(text, /冲突提示/u)
+  assert.equal(edgeCount(skills), 0, 'no pair, no edge')
 })
 
 test('conflict: retrieval surfaces the fork instead of "both worked"', () => {
@@ -183,12 +196,20 @@ test('conflict: harvest does NOT merge two methods that share one trigger', asyn
   assert.equal(report.harvested.length, 1)
   const statuses = report.harvested[0].skills.map((item) => item.status)
   assert.deepEqual(statuses, ['created', 'created'], 'the second skill must be a new file, not a merge')
-  const names = readdirSync(skills).sort()
+  /**
+   * The skills directory now also holds the edge INDEX (`skills-edges.jsonl`), so the name
+   * list is filtered to directories. Asserting the raw readdir would fail for a reason that
+   * has nothing to do with conflict behaviour — an example of a test that would push a
+   * future reader toward "put the index somewhere else" instead of fixing the real question.
+   */
+  const names = readdirSync(skills, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .sort()
   assert.deepEqual(names, [MYSQL.name, SQLITE.name].sort())
-  const mysqlText = readFileSync(skillPath(skills, MYSQL.name), 'utf8')
-  const sqliteText = readFileSync(skillPath(skills, SQLITE.name), 'utf8')
-  assert.match(mysqlText, new RegExp(`^conflicts_with: ${SQLITE.name}$`, 'mu'))
-  assert.match(sqliteText, new RegExp(`^conflicts_with: ${MYSQL.name}$`, 'mu'))
+  // v1.0.0: the fork is recorded in the index, and the two files are NOT merged into one.
+  assert.equal(hasEdge(skills, MYSQL.name, SQLITE.name), true, 'harvest must record the fork as an edge')
+  assert.equal(edgeCount(skills), 1)
 })
 
 test('conflict: testing vocabulary alone is NOT a conflict (measured false positive)', () => {
@@ -214,20 +235,26 @@ test('conflict: testing vocabulary alone is NOT a conflict (measured false posit
   assert.equal(conflicts(threshold, sqliteTests), false, 'shared 测试/验证 words must not link unrelated subjects')
 })
 
-test('conflict: rebuilding links removes stale edges and keeps real ones', async () => {
+test('conflict: rebuilding links rewrites the index and keeps the real pair', async () => {
   const { rebuildConflictLinks } = storeModule
   const skills = dir()
   writeSkill(skills, MYSQL, { sessionId: 's-a', boundarySeq: 9 })
   writeSkill(skills, SQLITE, { sessionId: 's-b', boundarySeq: 12 })
   writeSkill(skills, { ...UNRELATED, description: '提交漂移排查。', when: '当 graft_commit 返回 SOURCE_DRIFT 时' }, { sessionId: 's-c', boundarySeq: 30 })
-  // Simulate an edge written by an older, looser rule.
-  const bogus = readFileSync(skillPath(skills, UNRELATED.name), 'utf8')
-  atomicWriteForTest(skillPath(skills, UNRELATED.name), bogus.replace(/^(name: .+)$/mu, `$1\nconflicts_with: ${MYSQL.name}`))
+  /**
+   * v1.0.0: a stale edge is simulated by writing it into the INDEX — which is where edges
+   * now live. Writing it into SKILL.md would only test the legacy-migration path, not the
+   * rebuild that this test is named after.
+   */
+  const { writeEdge } = await import('../lib/edges.js')
+  writeEdge(skills, UNRELATED.name, MYSQL.name)
+  assert.equal(edgeCount(skills), 2, 'precondition: the bogus edge exists')
 
   const pairs = rebuildConflictLinks(skills)
   assert.deepEqual(pairs, [{ a: MYSQL.name, b: SQLITE.name }])
+  assert.equal(hasEdge(skills, UNRELATED.name, MYSQL.name), false, 'the stale edge is gone')
+  assert.equal(hasEdge(skills, MYSQL.name, SQLITE.name), true, 'the real pair survives')
   assert.doesNotMatch(readFileSync(skillPath(skills, UNRELATED.name), 'utf8'), /conflicts_with/u)
-  assert.match(readFileSync(skillPath(skills, MYSQL.name), 'utf8'), new RegExp(`conflicts_with: ${SQLITE.name}$`, 'mu'))
 })
 
 test('conflict: the LLM filter is told to keep both sides of a fork', async () => {

@@ -21,6 +21,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { sanitizeExtraction } from '../lib/extract.js'
+import { hasEdge } from '../lib/edges.js'
 import {
   applySkillFeedback,
   appendFacts,
@@ -203,10 +204,16 @@ test('v0.7.1: python 3.8 vs 3.12 is a conflict, never a merge', () => {
   assert.match(status, /^conflicted:/u, `expected a conflict, got ${status}`)
   const original = readFileSync(skillPath(skills, 'pymysql-connect'), 'utf8')
   const alternative = readFileSync(skillPath(skills, 'pymysql-connect-2'), 'utf8')
-  // Both files must name the other: a one-way link makes the unlinked one look
-  // authoritative — the trap linkConflictBack exists for.
-  assert.match(original, /^conflicts_with: pymysql-connect-2$/mu)
-  assert.match(alternative, /^conflicts_with: pymysql-connect$/mu)
+  /**
+   * v1.0.0: the two-way link is an EDGE, not a frontmatter line in each file. What this
+   * test protects — "a one-way link makes the unlinked one look authoritative" — is now
+   * enforced by the index being unordered: `hasEdge` is true from either direction, so a
+   * one-way record is structurally impossible.
+   */
+  assert.equal(hasEdge(skills, 'pymysql-connect', 'pymysql-connect-2'), true,
+    'the link must be symmetric')
+  assert.equal(hasEdge(skills, 'pymysql-connect-2', 'pymysql-connect'), true,
+    'lookup from the other side must agree')
   assert.match(alternative, /python 3\.12/u)
   assert.match(original, /python 3\.8/u)
 })

@@ -15,6 +15,7 @@ import { join } from 'node:path'
 
 import { asDomain, sanitizeExtraction } from '../lib/extract.js'
 import { skillPath, writeSkill } from '../lib/store.js'
+import { hasEdge } from '../lib/edges.js'
 import { retrieve } from '../lib/retrieve.js'
 
 const WORKSPACE = 'D:\\项目A'
@@ -123,14 +124,13 @@ test('v0.17: the same trigger in the SAME domain is still linked (the gate is no
   writeSkill(skills, cacheSqlite('cache-async-2', 'project-local'), {
     sessionId: 's2', boundarySeq: 2, workspace: WORKSPACE,
   })
-  const both = [
-    readFileSync(skillPath(skills, 'cache-lock'), 'utf8'),
-    readFileSync(skillPath(skills, 'cache-async-2'), 'utf8'),
-  ]
-  assert.ok(
-    both.some((text) => /^conflicts_with:/mu.test(text)),
-    'two methods in ONE domain are still a fork the user must choose between',
-  )
+  /**
+   * v1.0.0: the fork is recorded in the edge index, not in either SKILL.md. The question
+   * this test asks ("are two methods in ONE domain still linked?") is unchanged; only the
+   * place the answer is written down has moved.
+   */
+  assert.equal(hasEdge(skills, 'cache-lock', 'cache-async-2'), true,
+    'two methods in ONE domain are still a fork the user must choose between')
 })
 
 test('v0.17: a legacy record without a domain still conflicts (general is "not stated")', () => {
@@ -141,12 +141,8 @@ test('v0.17: a legacy record without a domain still conflicts (general is "not s
   writeSkill(skills, cachePymysql('cache-lock-2', 'project-local'), {
     sessionId: 's2', boundarySeq: 2, workspace: WORKSPACE,
   })
-  const legacy = readFileSync(skillPath(skills, 'legacy-cache'), 'utf8')
-  const local = readFileSync(skillPath(skills, 'cache-lock-2'), 'utf8')
-  assert.ok(
-    /^conflicts_with:/mu.test(legacy) || /^conflicts_with:/mu.test(local),
-    'refusing to compare an untagged record against a tagged one would silently disable conflicts for everything written before v0.17',
-  )
+  assert.equal(hasEdge(skills, 'legacy-cache', 'cache-lock-2'), true,
+    'refusing to compare an untagged record against a tagged one would silently disable conflicts for everything written before v0.17')
 })
 
 test('v0.17: the judge prompt carries the domain and the rule about it', async () => {

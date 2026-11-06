@@ -19,12 +19,13 @@
  * is not written at all; the reason is returned, never swallowed.
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 
 import type { EvidenceRef, ExtractedExperience, ExtractedFact, ExtractedNegative, ExtractedSkill, MemoryProvenance } from './extract.js'
 import { jaccard, planNegative, trigrams } from './dedupe.js'
+import { replaceEdges, writeEdge, writeEdges } from './edges.js'
 import { acquireFileLock } from './lock.js'
 import { normalizeWorkspace } from './workspace.js'
 import { scanThreat } from './threat.js'
@@ -369,11 +370,53 @@ function sharedPurpose(a: ExtractedSkill, b: ExtractedSkill): number {
   return shared
 }
 
+/**
+ * v1.0.0 P0 — METHOD SIMILARITY IS A PROPERTY OF THE STEPS, NOT OF THE PROSE AROUND THEM.
+ *
+ * THE BUG THIS FIXES (measured, not theorised)
+ *
+ * This used to be `jaccard(trigrams(description + steps), …)`. Putting a free-form
+ * `description` into the same trigram set as the procedure body made the score MOVE with
+ * the description's LENGTH and with the shape of its numbers, and the whole conflict
+ * decision hangs off a hard 0.85 threshold. Measured on the audit's own fixture, where
+ * every skill's steps were byte-identical and only the index differed:
+ *
+ *     …技能 100  vs …技能 101   → 0.9077  → "same method"  ✅
+ *     …技能 999  vs …技能 1000  → 0.8382  → "different method" ❌ WRONG
+ *     …技能 1234 vs …技能 8765  → 0.8261  → "different method" ❌ WRONG
+ *
+ * Out of 15 sampled pairs, 6 were declared conflicting DESPITE having the same steps —
+ * 15 pairs, identical procedures, "these are mutually exclusive alternatives, pick one".
+ *
+ * The values were not continuous either: across 899 pairs one skill only ever scored
+ * 0.846, 0.875 or 0.905. A metric that produces three values on one input family and
+ * decides a binary question at a boundary is measuring the FIXTURE, not the method.
+ *
+ * WHAT IT IS NOW
+ *
+ * Only the EXECUTION STEPS are compared. Two procedures with the same steps are the same
+ * method however differently they are described — that is what "method" means. The
+ * description still matters for *purpose* (`purposeTokens`/`conflictStrength`), which is
+ * where it belongs: purpose decides whether two skills are about the same thing at all.
+ *
+ * WHAT THIS DELIBERATELY DOES NOT DO
+ *
+ * It does not normalise digits away. Stripping digits here would be the same error as the
+ * `normalizeForMatch` bug fixed earlier today, one floor up: `端口 3000` and `端口 8080`
+ * have genuinely different steps. Digits inside the STEPS are evidence; digits inside a
+ * NAME are noise. That distinction is the whole fix.
+ */
 function methodSimilarity(a: ExtractedSkill, b: ExtractedSkill): number {
-  return jaccard(
-    trigrams(`${a.description} ${a.steps.join(' ')}`),
-    trigrams(`${b.description} ${b.steps.join(' ')}`),
-  )
+  /**
+   * A skill with no parsable steps cannot be compared on method. Returning 0 here is the
+   * conservative direction: "unknown method" must not silently become "same method" and
+   * suppress a real conflict. `writeSkill` refuses step-less skills anyway, so this only
+   * affects skills written by older versions or by hand.
+   */
+  const leftSteps = a.steps.map((step) => step.trim()).filter(Boolean)
+  const rightSteps = b.steps.map((step) => step.trim()).filter(Boolean)
+  if (leftSteps.length === 0 || rightSteps.length === 0) return 0
+  return jaccard(trigrams(leftSteps.join(' ')), trigrams(rightSteps.join(' ')))
 }
 
 /**
@@ -395,48 +438,41 @@ export interface SkillConflict {
 
 /**
  * v0.3.1: recompute every conflict edge from the current rules.
+ * v1.0.0 P0: recompute into the EDGE INDEX, and do not touch SKILL.md at all.
  *
- * Needed because links are written incrementally: a rule change (or a looser
- * earlier rule) leaves edges on disk that no future write would ever remove.
- * The rebuild strips the edges and the warning sections, then re-links pairs
- * from scratch — the same discipline as `check-docs`, applied to memory.
+ * Needed because edges are written incrementally: a rule change (a looser earlier rule, or
+ * the v1.0.0 fix to `methodSimilarity`) leaves edges in the index that no future write
+ * would ever remove. The old implementation stripped `conflicts_with` and the warning
+ * section out of each file and re-linked pairwise — one full rewrite per skill, then one
+ * more per discovered edge, which is the same quadratic shape this release removes.
+ *
+ * Now: read every shape once, compute the true pair set, and REPLACE the index in one
+ * write. The files are not modified, because they no longer contain edges to strip. A
+ * legacy store keeps its stale inline copies; `retrieve` merges them with the index, so the
+ * stale ones simply stop appearing once the file is rewritten for any other reason.
  */
 export function rebuildConflictLinks(skillsDir: string): Array<{ a: string; b: string }> {
-  const skills = new Map<string, ExtractedSkill>()
+  const skills: ExtractedSkill[] = []
   for (const name of listSkillFiles(skillsDir)) {
     const path = skillPath(skillsDir, name)
     if (!existsSync(path)) continue
     try {
-      skills.set(name, parseSkillFile(readFileSync(path, 'utf8'), name))
+      skills.push(parseSkillFile(readFileSync(path, 'utf8'), name))
     } catch {
       // A broken file is skipped, not rewritten.
     }
   }
-  for (const name of skills.keys()) {
-    const path = skillPath(skillsDir, name)
-    let text: string
-    try {
-      text = readFileSync(path, 'utf8')
-    } catch {
-      continue
-    }
-    text = text.replace(/^conflicts_with:.*\r?\n/mu, '')
-    const cut = text.search(/\r?\n## ⚠️ 冲突提示/u)
-    if (cut >= 0) text = `${text.slice(0, cut).trimEnd()}\n`
-    atomicWrite(path, text)
-  }
   const pairs: Array<{ a: string; b: string }> = []
-  const list = [...skills.values()]
-  for (let leftIndex = 0; leftIndex < list.length; leftIndex += 1) {
-    for (let rightIndex = leftIndex + 1; rightIndex < list.length; rightIndex += 1) {
-      const left = list[leftIndex]
-      const right = list[rightIndex]
-      if (!isConflictingSkill(left, right)) continue
-      linkConflictBack(skillsDir, { name: left.name, title: left.title }, right)
-      linkConflictBack(skillsDir, { name: right.name, title: right.title }, left)
-      pairs.push({ a: left.name, b: right.name })
+  for (let leftIndex = 0; leftIndex < skills.length; leftIndex += 1) {
+    for (let rightIndex = leftIndex + 1; rightIndex < skills.length; rightIndex += 1) {
+      if (!isConflictingSkill(skills[leftIndex], skills[rightIndex])) continue
+      pairs.push({ a: skills[leftIndex].name, b: skills[rightIndex].name })
     }
   }
+  replaceEdges(
+    skillsDir,
+    pairs.map((pair) => [pair.a, pair.b] as const),
+  )
   return pairs
 }
 
@@ -454,23 +490,28 @@ export function conflictStrength(a: ExtractedSkill, b: ExtractedSkill): { shared
 
 export function isConflictingSkill(a: ExtractedSkill, b: ExtractedSkill): boolean {
   if (a.name === b.name) return true
+  /**
+   * v1.0.0 P0: "same name is a conflict" is the ONLY conclusion available when neither
+   * skill has a parsable procedure. Without this guard, `methodSimilarity` returns 0 for
+   * an empty step list — which reads as "completely different method" — and two step-less
+   * records that merely share some purpose words get linked as alternatives. Measured
+   * while fixing this: two skills with `steps: []` returned TRUE. That is the same
+   * "unknown silently becomes a claim" failure the rest of this function is careful about.
+   */
+  const leftSteps = a.steps.map((step) => step.trim()).filter(Boolean)
+  const rightSteps = b.steps.map((step) => step.trim()).filter(Boolean)
+  if (leftSteps.length === 0 || rightSteps.length === 0) return false
   // Two names for the same steps is a duplicate, not a conflict.
   if (methodSimilarity(a, b) >= 0.85) return false
-  // v0.17: `scene` is the technology, `domain` is the SYSTEM. Two procedures about
-  // different systems are not two ways of doing one thing, however similar their
-  // wording — linking them asked the user to choose between unrelated methods.
-  if (
-    a.domain !== undefined &&
-    b.domain !== undefined &&
-    a.domain !== 'general' &&
-    b.domain !== 'general' &&
-    a.domain !== b.domain
-  ) {
-    return false
-  }
-  // v0.17: `scene` is the technology, `domain` is the SYSTEM. Two procedures about
-  // different systems are not two ways of doing one thing, however similar their
-  // wording — linking them asked the user to choose between unrelated methods.
+  /**
+   * v0.17: `scene` is the technology, `domain` is the SYSTEM. Two procedures about
+   * different systems are not two ways of doing one thing, however similar their
+   * wording — linking them asked the user to choose between unrelated methods.
+   *
+   * NOTE: this block used to appear TWICE, identically. Deleting the copy is safe (both
+   * returned the same value), and it is worth recording because a duplicated guard is a
+   * guard that will eventually be edited in one place only.
+   */
   if (
     a.domain !== undefined &&
     b.domain !== undefined &&
@@ -533,19 +574,76 @@ function listSkillFiles(skillsDir: string): string[] {
   }
 }
 
-/** Existing skills whose purpose matches but whose method differs. */
+/**
+ * v1.0.0 P0 — CONFLICT DISCOVERY IS A READ; ONLY THE EDGE WRITE HAD TO CHANGE.
+ *
+ * `findConflicts` must SCAN every existing skill: a conflict is a property of two shapes,
+ * and a shape that was never written down cannot be looked up in an index. The first
+ * version of this refactor made discovery read the edge index instead — which is a
+ * chicken-and-egg bug: the index only contains edges that discovery already found, so the
+ * very first conflict could never be recorded. Caught by a 5-skill fixture producing an
+ * empty `skills-edges.jsonl`.
+ *
+ * v1.0.0 P0 C: THE SCAN IS CACHED PER (dir, name, mtime, size).
+ *
+ * Rewriting a growing file per edge was the O(N²) IO. What was left after that fix is a
+ * smaller but still quadratic cost: writing N skills in one process re-reads and re-parses
+ * every earlier skill N times. Measured after the join fix: 7.0 ms/skill at N=50 rising to
+ * 23.0 ms/skill at N=200 (3.28×). The cache below turns those re-parses into map lookups.
+ *
+ * INVALIDATION IS BY stat, NOT BY TRUST: a cached shape is reused only when mtime AND size
+ * both match. Another process editing a SKILL.md therefore cannot leave a stale shape in
+ * play — which matters because harvest writes are one process and reviews are another.
+ */
+interface CachedShape {
+  mtimeMs: number
+  size: number
+  skill: ExtractedSkill
+}
+
+const shapeCache = new Map<string, Map<string, CachedShape>>()
+
+/** Drop the cached shape of one skill (after this process writes it). */
+export function invalidateSkillShape(skillsDir: string, name: string): void {
+  shapeCache.get(skillsDir)?.delete(name)
+}
+
+/** Drop every cached shape for a directory. Tests and bulk rebuilds call this. */
+export function clearSkillShapeCache(skillsDir?: string): void {
+  if (skillsDir === undefined) shapeCache.clear()
+  else shapeCache.delete(skillsDir)
+}
+
+function shapeOf(skillsDir: string, name: string): ExtractedSkill | undefined {
+  const path = skillPath(skillsDir, name)
+  let stat: { mtimeMs: number; size: number }
+  try {
+    stat = statSync(path)
+  } catch {
+    shapeCache.get(skillsDir)?.delete(name)
+    return undefined
+  }
+  const bucket = shapeCache.get(skillsDir) ?? new Map<string, CachedShape>()
+  if (!shapeCache.has(skillsDir)) shapeCache.set(skillsDir, bucket)
+  const cached = bucket.get(name)
+  if (cached !== undefined && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) return cached.skill
+  let text: string
+  try {
+    text = readFileSync(path, 'utf8')
+  } catch {
+    return undefined
+  }
+  const skill = parseSkillFile(text, name)
+  bucket.set(name, { mtimeMs: stat.mtimeMs, size: stat.size, skill })
+  return skill
+}
+
 export function findConflicts(skillsDir: string, skill: ExtractedSkill): SkillConflict[] {
   const out: SkillConflict[] = []
   for (const name of listSkillFiles(skillsDir)) {
     if (name === skill.name) continue
-    const path = skillPath(skillsDir, name)
-    if (!existsSync(path)) continue
-    let other: ExtractedSkill
-    try {
-      other = parseSkillFile(readFileSync(path, 'utf8'), name)
-    } catch {
-      continue
-    }
+    const other = shapeOf(skillsDir, name)
+    if (other === undefined) continue
     if (isConflictingSkill(skill, other)) out.push({ name, title: other.title })
   }
   return out
@@ -646,7 +744,22 @@ function renderSkill(
       .map((ref) => (ref.sourceSessionId.length > 0 ? `${ref.sourceSessionId}@${ref.seq}` : String(ref.seq)))
       .join(','),
     sources: previous === undefined ? 1 : previous.sources,
-    ...(conflicts.length === 0 ? {} : { conflicts_with: conflicts.map((conflict) => conflict.name).join(',') }),
+    /**
+     * v1.0.0 P0 — NO INLINE CONFLICT EDGES.
+     *
+     * This used to emit `conflicts_with: a,b,c,…` here, and `reorder` below emitted the
+     * same neighbors again as prose under `## ⚠️ 冲突提示`. Both are gone. Every edge now
+     * lives in `skills-edges.jsonl` (see edges.ts), joined at retrieval time.
+     *
+     * WHY REMOVE IT RATHER THAN CAP IT: the field was a single line that grew with every
+     * neighbor, so one file reached 12,959 characters of names plus 91 KB of repeated
+     * prose. Retrieval had to read and tokenize all of it to answer a question about the
+     * skill's trigger. Capping the line would have kept both costs and added a truncation
+     * bug. The edge is a GRAPH FACT, not a property of one file.
+     *
+     * A legacy store still has the field on disk; `migrateLegacyEdges` folds those into the
+     * index and nothing rewrites the files (a stale hint is harmless; a mass rewrite is not).
+     */
   }
   if (previous !== undefined && previous.created.length > 0) {
     fields.created = previous.created
@@ -700,8 +813,15 @@ function renderSkill(
     '## 证据',
     '',
     ...evidenceBodyLines(skill.evidence, meta.sessionId),
-    '',
-    ...conflictFooter(conflicts),
+    /**
+     * v1.0.0 P0 — the `## ⚠️ 冲突提示` footer is GONE.
+     *
+     * It repeated up to 720 neighbor names as prose inside the skill file, which is what
+     * made a 798 B skill grow to 104 KB and forced retrieval to read 91 KB of warnings to
+     * answer a query about the trigger. Conflicts are now joined from `skills-edges.jsonl`
+     * where they are actually needed — see retrieve.ts. `conflictFooter` is kept exported
+     * below for the render of a HUMAN-facing listing, never for the stored file.
+     */
   ].join('\n')
 }
 
@@ -846,46 +966,44 @@ export function writeSkill(skillsDir: string, input: SkillInput | ExtractedSkill
     // learned confidence across the merge.
     const mergedSkill: ExtractedSkill = { ...withSession, evidence: merged, confidence: clampConfidence(previousSkill.confidence) }
     atomicWrite(path, renderSkill(mergedSkill, writeMeta, { evidence: merged.length, sources: sources + 1, created, lastUsed, lastValidated, validAt: previousValidity.validAt, invalidAt: previousValidity.invalidAt, supersededBy: previousValidity.supersededBy, supersedes: previousValidity.supersedes, provenance: previousValidity.provenance }, conflicts))
-    for (const conflict of conflicts) linkConflictBack(skillsDir, conflict, skill)
+    commitEdges(skillsDir, skill.name, conflicts)
+    invalidateSkillShape(skillsDir, skill.name)
     return 'merged'
   }
   atomicWrite(path, renderSkill(withSession, meta, undefined, conflicts))
-  for (const conflict of conflicts) linkConflictBack(skillsDir, conflict, skill)
+  commitEdges(skillsDir, skill.name, conflicts)
+  invalidateSkillShape(skillsDir, skill.name)
   return 'created'
 }
 
 /**
- * Add the reverse edge on the skill that was already on disk.
+ * v1.0.0 P0 C — ONE APPEND FOR ALL OF A SKILL'S EDGES.
  *
- * A one-way link is a trap: whichever skill happens to be retrieved first carries
- * the warning, the other looks authoritative. Both files must name their
- * alternative, and re-writing either one must not duplicate the warning.
+ * The loop this replaces called `linkConflictBack` once per neighbor, and each call wrote
+ * the index separately. A skill with 300 true conflicts meant 300 open/append/close cycles
+ * for one write. Batching turns that into a single append; the edge count itself is a
+ * property of the store's content and cannot be reduced (and must not be — a real conflict
+ * is information).
  */
-function linkConflictBack(skillsDir: string, target: SkillConflict, other: { name: string; title: string }): void {
-  const path = skillPath(skillsDir, target.name)
-  if (!existsSync(path)) return
-  let text: string
-  try {
-    text = readFileSync(path, 'utf8')
-  } catch {
-    return
-  }
-  const existing = (text.match(/^conflicts_with:\s*(.+)$/mu)?.[1] ?? '').split(/[,\s]+/u).filter(Boolean)
-  const merged = [...new Set([...existing, other.name])]
-  const line = `conflicts_with: ${merged.join(',')}`
-  if (/^conflicts_with:/mu.test(text)) {
-    text = text.replace(/^conflicts_with:.*$/mu, line)
-  } else {
-    text = text.replace(/^(name:.*)$/mu, `$1\n${line}`)
-  }
-  const marker = `与 \`${other.name}\`（`
-  if (!text.includes(marker)) {
-    const mention = `- 与 \`${other.name}\`（${other.title}）用途相近但方法不同，选用前先确认场景，不要混用。`
-    text = text.includes('## ⚠️ 冲突提示')
-      ? `${text.trimEnd()}\n${mention}\n`
-      : `${text.trimEnd()}\n\n## ⚠️ 冲突提示\n\n${mention}\n`
-  }
-  atomicWrite(path, text)
+function commitEdges(skillsDir: string, name: string, conflicts: readonly SkillConflict[]): void {
+  if (conflicts.length === 0) return
+  writeEdges(
+    skillsDir,
+    conflicts.map((conflict) => [name, conflict.name] as const),
+  )
+}
+
+/**
+ * v1.0.0 P0 — CONFLICT INDEX LAYER: EDGE WRITING
+ *
+ * Instead of rewriting the whole SKILL.md file, we just append one line to the shared index.
+ * The old code path (line 911–936) did a full read/write for each edge. That is now
+ * replaced with an O(1) append-only write. Backwards compatibility: legacy files that
+ * already carry conflicts_with will be migrated by runMigration().
+ */
+export function linkConflictBack(skillsDir: string, target: SkillConflict, other: { name: string; title: string }): void {
+  /** Write edge only — no more rewrites of individual SKILL.md files. */
+  writeEdge(skillsDir, target.name, other.name)
 }
 
 /**
