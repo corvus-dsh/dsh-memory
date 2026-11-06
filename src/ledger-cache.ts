@@ -58,9 +58,45 @@ interface LedgerState {
   mainSize: number
   /** Bytes of WAL already folded into `records`. */
   walBytes: number
+  /**
+   * Size of the WAL file AS LAST SEEN ON DISK, used for cache validation.
+   *
+   * ⚠️ THIS MUST BE SEPARATE FROM `walBytes`. The first buffered-WAL implementation reused
+   * `walBytes` for both "bytes I have buffered" and "bytes the file has", so after buffering
+   * one row the cached value (407) never matched the file (which did not exist yet, 0). Every
+   * read then looked like a foreign change, reloaded from an empty ledger, and DISCARDED the
+   * buffered rows: a 220-turn run left exactly one row on disk.
+   *
+   * `walBytes` now means "how much of the WAL is already reflected in `records`"; this field
+   * means "what the file looked like when we last looked". Only the second is a cache key.
+   */
+  syncedWalBytes: number
   /** Appends since the last flush. */
   pending: number
   lastFlushMs: number
+  /**
+   * Monotonic content version, bumped on every mutation (append, patch, replace, reload).
+   *
+   * WHY A COUNTER AND NOT `records.length`: a `hits += 1` patch changes content without
+   * changing length, and an evidence union changes neither length nor `at`. A downstream
+   * cache keyed on length would keep serving documents built from the pre-patch rows.
+   */
+  version: number
+  /**
+   * Bumped ONLY by an in-place patch.
+   *
+   * WHY THIS IS SEPARATE FROM `version`: a Document cache can handle an APPEND incrementally
+   * (build one new document, push it onto the array) but a PATCH invalidates documents that
+   * were already built. With a single counter every write forced a full rebuild, which made
+   * the first Document cache useless in a write-then-read loop (measured 33.79 → 32.54 ms,
+   * i.e. nothing).
+   */
+  patchCount: number
+  /**
+   * Pending WAL payload, written in one `appendFileSync` when the batch closes.
+   * See `commitLedger` for the durability window this implies.
+   */
+  walBuffer: string[]
 }
 
 const cache = new Map<string, LedgerState>()
@@ -112,6 +148,19 @@ export function flushLedger(path: string, force = false): boolean {
    * "evidence expected 2 rows, got 1".
    */
   if (!force && state.walBytes === 0 && state.pending === 0) return false
+  /**
+   * Fold any buffered WAL payload into the file BEFORE the main rewrite. On a successful
+   * flush the WAL is deleted straight after, so this write only matters for the crash window
+   * between the two steps — which is exactly the window a WAL exists to narrow.
+   */
+  if (state.walBuffer.length > 0) {
+    try {
+      appendFileSync(walPathOf(path), state.walBuffer.join(''), 'utf8')
+      state.walBuffer.length = 0
+    } catch {
+      /* the main rewrite below still makes the rows durable */
+    }
+  }
   const body = state.records.length === 0 ? '' : `${state.records.map((record) => JSON.stringify(record)).join('\n')}\n`
   writeFileSync(path, body, 'utf8')
   try {
@@ -125,6 +174,8 @@ export function flushLedger(path: string, force = false): boolean {
   state.walBytes = 0
   state.pending = 0
   state.lastFlushMs = Date.now()
+  /** The WAL file is gone after a successful flush, and the buffer is empty by construction. */
+  state.syncedWalBytes = 0
   return true
 }
 
@@ -154,12 +205,17 @@ export function readLedger(path: string): LedgerSnapshot {
   const cached = cache.get(path)
   const mainMtime = main?.mtimeMs ?? -1
   const mainSize = main?.size ?? -1
-  const walBytes = wal?.size ?? 0
+  /**
+   * Validate against the WAL as it exists ON DISK (`syncedWalBytes`), never against the
+   * buffered count — otherwise our own unflushed buffer looks like a foreign change on every
+   * read and the cache reloads away the rows it was holding. See the field's note.
+   */
+  const walOnDisk = wal?.size ?? 0
   if (
     cached !== undefined &&
     cached.mainMtimeMs === mainMtime &&
     cached.mainSize === mainSize &&
-    cached.walBytes === walBytes
+    cached.syncedWalBytes === walOnDisk
   ) {
     return { records: cached.records, fromCache: true }
   }
@@ -186,9 +242,24 @@ export function readLedger(path: string): LedgerSnapshot {
     records,
     mainMtimeMs: mainMtime,
     mainSize: mainSize,
-    walBytes,
+    /** Bytes replayed from the WAL are already inside `records`. */
+    walBytes: walOnDisk,
     pending: 0,
     lastFlushMs: Date.now(),
+    /** A reload is a new content version: caches keyed on the old one must rebuild. */
+    version: (cache.get(path)?.version ?? 0) + 1,
+    /**
+     * A RELOAD ALSO INVALIDATES DERIVED DOCUMENTS.
+     *
+     * The rows on disk may have been rewritten by another process (or by the test suite)
+     * without any length change — same count, different content, same `patchCount`. Treating
+     * that as "append-only" made an incremental document cache serve the pre-reload rows:
+     * measured as a bitemporal test still seeing a negative that had been invalidated on disk.
+     */
+    patchCount: (cache.get(path)?.patchCount ?? 0) + 1,
+    walBuffer: [],
+    /** After a reload the in-memory view matches what is on disk. */
+    syncedWalBytes: walOnDisk,
   }
   cache.set(path, next)
   /** Fold the replayed WAL in so it cannot be applied twice. */
@@ -263,10 +334,38 @@ export function commitLedger(
   const state = cache.get(path)
   if (newRecords.length > 0) {
     const lines = `${newRecords.map((record) => JSON.stringify(record)).join('\n')}\n`
-    appendFileSync(walPathOf(path), lines, 'utf8')
+    /**
+     * v1.1.0 P0+ — THE WAL IS BUFFERED, AND THE DURABILITY WINDOW IS STATED.
+     *
+     * `appendFileSync` per call meant open/write/close per call: three of those per simulated
+     * turn, and the last profile put `open` at 2.8% of the CPU. Buffering the WAL string and
+     * writing it in batches removes the syscalls.
+     *
+     * WHAT IT COSTS: a hard kill between two batch writes loses those rows. The window is the
+     * same one the ledger flush already has (`FLUSH_EVERY` rows / `FLUSH_INTERVAL_MS`), so it
+     * does not widen the worst case — it makes the WAL as durable as the thing it protects.
+     * `TEST_MODE` writes through immediately so a suite never observes a stale file.
+     */
+    if (state !== undefined && !TEST_MODE) state.walBuffer.push(lines)
+    else appendFileSync(walPathOf(path), lines, 'utf8')
     if (state !== undefined) {
       state.walBytes += Buffer.byteLength(lines, 'utf8')
       state.pending += newRecords.length
+    }
+  }
+  /**
+   * THE TWO COUNTERS DIVERGE HERE, AND THAT IS THE POINT.
+   *
+   * `version` moves on any mutation. `patchCount` moves only when rows that were already
+   * built into documents have changed underneath a derived cache. A Document cache uses the
+   * first to know "something happened" and the second to decide whether it may APPEND or must
+   * REBUILD.
+   */
+  if (state !== undefined) {
+    if (newRecords.length > 0) state.version += 1
+    if (options.patched) {
+      state.version += 1
+      state.patchCount += 1
     }
   }
   /**
@@ -301,6 +400,12 @@ export function replaceRecords(path: string, records: ReadonlyArray<Record<strin
     walBytes: 0,
     pending: 0,
     lastFlushMs: Date.now(),
+    walBuffer: [],
+    /** The WAL was deleted just above, so the on-disk WAL size is zero. */
+    syncedWalBytes: 0,
+    version: (cache.get(path)?.version ?? 0) + 1,
+    /** A wholesale replace invalidates every derived document. */
+    patchCount: (cache.get(path)?.patchCount ?? 0) + 1,
   })
 }
 
@@ -323,6 +428,27 @@ export function ledgerCacheStats(): { entries: number; pending: number; walBytes
     walBytes += state.walBytes
   }
   return { entries: cache.size, pending, walBytes }
+}
+
+/**
+ * Content version of one ledger — bumped by every append, patch, replace and reload.
+ * A downstream cache that keys on this stops confusing "the file did not change" with
+ * "the data did not change".
+ */
+export function ledgerVersion(path: string): number {
+  return cache.get(path)?.version ?? 0
+}
+
+/**
+ * How many in-place patches this ledger has seen.
+ *
+ * A Document cache may serve an APPEND incrementally, but a patch means rows it already
+ * converted have changed. This counter lets it tell the two apart; without it every append
+ * forced a full rebuild of every document (the reason the first Document cache measured as a
+ * 1.04× no-op).
+ */
+export function ledgerPatchCount(path: string): number {
+  return cache.get(path)?.patchCount ?? 0
 }
 
 /* ── background flush ─────────────────────────────────────────────────────────────────── */

@@ -29,7 +29,7 @@ import { memoryAllowsWorkspace, normalizeWorkspace } from './workspace.js'
 import { scanThreat } from './threat.js'
 import { isValidAt, readSkillValidity } from './store.js'
 import { getNeighbors } from './edges.js'
-import { readRecords } from './ledger-cache.js'
+import { ledgerPatchCount, ledgerVersion, readRecords } from './ledger-cache.js'
 import { getCachedSkillDocs, setCachedSkillDocs, skillDocsKey } from './skill-cache.js'
 
 /** v0.6: all four layers participate in retrieval. */
@@ -211,6 +211,18 @@ interface Document {
   title: string
   when?: string
   detail?: string
+  /**
+   * v1.1.0 P0+ — the injection scan result, computed ONCE.
+   *
+   * `isPoisoned` re-ran the threat regex over `contentOf(document)` for every document on
+   * every retrieval. With documents now cached, that scan was the largest remaining CPU cost
+   * after scoring (measured 7.2% of the turn) — for text that had already been scanned when
+   * it was added to the cache.
+   *
+   * `undefined` means "not yet decided" (a document built by an older path); the caller
+   * falls back to scanning, so this is a cache and never a bypass.
+   */
+  poisoned?: boolean
   conflictsWith?: string[]
   scope?: string
   aliases?: string[]
@@ -611,8 +623,19 @@ function contentOf(document: Document): string {
   )
 }
 
+/**
+ * Is this document allowed to enter a prompt at all?
+ *
+ * v1.1.0: the scan is MEMOISED ON THE DOCUMENT. Documents are cached and their text does not
+ * change once built, so re-scanning the same bytes on every retrieval was pure waste — 7.2%
+ * of a turn in the last profile. `undefined` still means "scan it", so a document produced by
+ * a path that does not pre-compute the flag keeps the original behaviour.
+ */
 function isPoisoned(document: Document): boolean {
-  return scanThreat(contentOf(document)) !== undefined
+  if (document.poisoned !== undefined) return document.poisoned
+  const poisoned = scanThreat(contentOf(document)) !== undefined
+  document.poisoned = poisoned
+  return poisoned
 }
 
 /**
@@ -852,20 +875,87 @@ function firstEvidence(value: unknown, fallbackSession?: string): { sessionId?: 
   }
 }
 
+/**
+ * v1.1.0 P0+ — INCREMENTAL DOCUMENT CACHE.
+ *
+ * The first version keyed only on `ledgerVersion`. In a write-then-read loop that version
+ * changes on every append, so every retrieval rebuilt every document — measured 33.79 →
+ * 32.54 ms, i.e. a 1.04× no-op. The cache existed and never hit.
+ *
+ * THE FIX IS TWO SIGNALS INSTEAD OF ONE:
+ *
+ *   patchCount unchanged + more records  → APPEND: build only `records.slice(built)`
+ *   patchCount changed / fewer records   → REBUILD: some already-built document is stale
+ *
+ * That is enough because an append is the overwhelmingly common case: harvest adds rows, it
+ * does not rewrite them. A `hits += 1` or an evidence union DOES rewrite, and those bump
+ * `patchCount`, so they still force the expensive path.
+ */
+interface DocumentCacheEntry {
+  version: number
+  patchCount: number
+  /** How many records have already been converted into `docs`. */
+  built: number
+  hour: number
+  docs: Document[]
+}
+const documentCache = new Map<string, DocumentCacheEntry>()
+
+/** Drop the cached documents for one ledger path (or all, with no argument). */
+export function invalidateDocuments(path?: string): void {
+  if (path === undefined) documentCache.clear()
+  else documentCache.delete(path)
+}
+
 function negativeDocuments(memoryDir: string, now: number): Document[] {
   const path = join(memoryDir, 'negatives.jsonl')
   /**
-   * v1.1.0 — READ THROUGH THE LEDGER CACHE, NOT THE FILE.
+   * ORDER MATTERS: read FIRST, then key.
    *
-   * The V8 profile put this function's forEach at 5.0% of a turn and its sibling at 8.2%:
-   * 13.2% spent re-parsing ledgers that had not changed since the last retrieval. The cache
-   * is stat-validated, so a write by another process still forces a reload.
+   * `readRecords` validates the ledger's stats and, on a miss, reloads and bumps the version.
+   * Keying before that read would use a stale version and serve documents built from content
+   * that is no longer on disk — measured as a bitemporal test still seeing an invalidated
+   * negative.
    */
   const records = readRecords(path)
-  if (records.length === 0) return []
+  const version = ledgerVersion(path)
+  const patchCount = ledgerPatchCount(path)
+  const hour = Math.floor(now / 3_600_000)
+  const cached = documentCache.get(path)
+  if (
+    cached !== undefined &&
+    cached.version === version &&
+    cached.hour === hour
+  ) {
+    return cached.docs
+  }
+  /** Incremental path: nothing was patched, and rows were only added. */
+  if (
+    cached !== undefined &&
+    cached.patchCount === patchCount &&
+    cached.hour === hour &&
+    records.length >= cached.built
+  ) {
+    for (let index = cached.built; index < records.length; index += 1) {
+      const doc = negativeDocumentOf(records[index], index, now)
+      if (doc !== undefined) cached.docs.push(doc)
+    }
+    cached.built = records.length
+    cached.version = version
+    return cached.docs
+  }
   const out: Document[] = []
-  records.forEach((record, index) => {
-    try {
+  for (let index = 0; index < records.length; index += 1) {
+    const doc = negativeDocumentOf(records[index], index, now)
+    if (doc !== undefined) out.push(doc)
+  }
+  documentCache.set(path, { version, patchCount, built: records.length, hour, docs: out })
+  return out
+}
+
+/** Build one negative Document. Extracted so the incremental path can reuse it verbatim. */
+function negativeDocumentOf(record: Record<string, unknown>, index: number, now: number): Document | undefined {
+  try {
       const symptom = String(record.symptom ?? '')
       const cause = String(record.cause ?? '')
       const avoid = String(record.avoid ?? '')
@@ -874,7 +964,7 @@ function negativeDocuments(memoryDir: string, now: number): Document[] {
       const scopeText = String(record.scope ?? 'project').toLowerCase()
       const sceneText = String(record.scene ?? 'general').toLowerCase()
       const firstEvidenceRef = firstEvidence(record.evidence, typeof record.sourceSessionId === 'string' ? record.sourceSessionId : undefined)
-      out.push({
+      return {
         kind: 'negative',
         id: `neg-${index}`,
         title: clipTitle(symptom, 60),
@@ -909,28 +999,60 @@ function negativeDocuments(memoryDir: string, now: number): Document[] {
           (isStaleNegative({ ageDays: ageDaysOf(typeof record.at === 'string' ? record.at : undefined, now), hits })
             ? NEGATIVE_STALE_WEIGHT
             : 1),
-      })
+      }
     } catch {
       // Skip a torn line.
+      return undefined
     }
-  })
-  return out
 }
 
 /** v0.6: facts and experiences are retrievable evidence, not just stored text. */
 function layerDocuments(memoryDir: string, file: string, kind: 'fact' | 'experience', now: number): Document[] {
   const path = join(memoryDir, file)
-  /** v1.1.0: through the ledger cache (this loop was 8.2% of a turn when re-parsing). */
+  /** Read BEFORE keying — the read is what refreshes the version (see negativeDocuments). */
   const records = readRecords(path)
-  if (records.length === 0) return []
+  const version = ledgerVersion(path)
+  const patchCount = ledgerPatchCount(path)
+  const hour = Math.floor(now / 3_600_000)
+  const cached = documentCache.get(path)
+  if (cached !== undefined && cached.version === version && cached.hour === hour) return cached.docs
+  /** Incremental path: no patch, rows only added. */
+  if (
+    cached !== undefined &&
+    cached.patchCount === patchCount &&
+    cached.hour === hour &&
+    records.length >= cached.built
+  ) {
+    for (let index = cached.built; index < records.length; index += 1) {
+      const doc = layerDocumentOf(records[index], index, kind, now)
+      if (doc !== undefined) cached.docs.push(doc)
+    }
+    cached.built = records.length
+    cached.version = version
+    return cached.docs
+  }
   const out: Document[] = []
-  records.forEach((record, index) => {
-    try {
+  for (let index = 0; index < records.length; index += 1) {
+    const doc = layerDocumentOf(records[index], index, kind, now)
+    if (doc !== undefined) out.push(doc)
+  }
+  documentCache.set(path, { version, patchCount, built: records.length, hour, docs: out })
+  return out
+}
+
+/** Build one fact/experience Document. Extracted for the incremental path. */
+function layerDocumentOf(
+  record: Record<string, unknown>,
+  index: number,
+  kind: 'fact' | 'experience',
+  now: number,
+): Document | undefined {
+  try {
       const text = String(record.text ?? '')
-      if (text.length === 0) return
+      if (text.length === 0) return undefined
       const sceneText = String(record.scene ?? 'general').toLowerCase()
       const ref = firstEvidence(record.evidence, typeof record.sourceSessionId === 'string' ? record.sourceSessionId : undefined)
-      out.push({
+      return {
         kind,
         id: `${kind}-${index}`,
         title: clipTitle(text, 60),
@@ -949,12 +1071,11 @@ function layerDocuments(memoryDir: string, file: string, kind: 'fact' | 'experie
         tokens: new Set(tokenize(`${text} ${sceneText}`)),
         ageDays: ageDaysOf(typeof record.at === 'string' ? record.at : undefined, now),
         importance: 1,
-      })
+      }
     } catch {
       // Skip a torn line.
+      return undefined
     }
-  })
-  return out
 }
 
 /** All stored memory documents, unfiltered. Shared by scoring and scene discovery. */
