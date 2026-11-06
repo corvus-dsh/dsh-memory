@@ -28,8 +28,26 @@ function dirs() {
   return { root, skills: join(root, 'skills'), memory: join(root, 'memory') }
 }
 
-test('dedupe: normalization strips punctuation and numbers', () => {
-  assert.equal(normalizeForMatch('改动迁移（v7.4）逻辑，seq=12'), normalizeForMatch('改动迁移逻辑 seq 12'.replace(' 12', '')))
+/**
+ * THE OLD ASSERTION WAS `normalizeForMatch('…（v7.4）…') === normalizeForMatch('…'.replace(' 12',''))`,
+ * which passed only because EVERY digit was stripped. That is the bug: it also made `端口 3000` and
+ * `端口 8080` identical.
+ *
+ * The INTENT survives — a parenthetical aside and stray punctuation are formatting and must not split a
+ * match — but the mechanism is now the parenthetical rule, not a blanket digit sweep. The two assertions
+ * below are the intent and the boundary, and they are deliberately adjacent: one would be satisfied by the
+ * old bug, the other would be violated by it.
+ */
+test('dedupe: normalization strips punctuation and parentheticals, NOT digits', () => {
+  /** Intent preserved: `（v7.4）` is commentary, so these two claims are the same. */
+  assert.equal(
+    normalizeForMatch('改动迁移（v7.4）逻辑，要证明修复有效。'),
+    normalizeForMatch('改动迁移逻辑 要证明修复有效'),
+    'a bracketed version is commentary and must not split a match',
+  )
+  /** The boundary the bug crossed: digits that CARRY MEANING must survive. */
+  assert.notEqual(normalizeForMatch('端口 3000 被占用'), normalizeForMatch('端口 8080 被占用'))
+  assert.equal(normalizeForMatch('端口 3000 被占用'), normalizeForMatch('端口3000被占用'), 'formatting still normalises')
 })
 
 test('dedupe: punctuation variants hit ≥0.85; different methods do not', () => {
@@ -61,6 +79,56 @@ test('dedupe: same symptom with a different cause is a conflict, not a duplicate
   const conflict = planNegative(existing, { symptom: '提交被拒', cause: '权限不足', avoid: '检查 ACL', evidence: [] })
   assert.equal(conflict.duplicate, false)
   assert.deepEqual(conflict.conflicts, [0])
+})
+
+/**
+ * THE P0 REGRESSION — 端口 3000 与 端口 8080 是两个不同的事件。
+ *
+ * HOW THIS FAILED BEFORE: `normalizeForMatch` ended with `.replace(/[0-9]+/gu, '')`, so both symptoms
+ * normalised to `端口被占用`, `planNegative` returned `duplicate: true`, and the second lesson was SILENTLY
+ * DROPPED on the write path.
+ *
+ * WHY THIS TEST IS AT THE `appendNegatives` LAYER AND NOT ONLY AT `normalizeForMatch`: a unit test on the
+ * normaliser proves the string differs; only an end-to-end assertion proves the SECOND ROW IS WRITTEN.
+ * The bug's cost was a missing row, so the assertion has to be about rows.
+ */
+test('dedupe: two different ports are two records, not one (P0 regression)', () => {
+  const { memory } = dirs()
+  const at = (port) => ({
+    symptom: `端口 ${port} 被占用`,
+    cause: '上一个开发服务器没有退出',
+    avoid: '启动前先确认端口释放',
+    evidence: [port],
+  })
+
+  assert.equal(appendNegatives(memory, [at(3000)], { sessionId: 's-a', boundarySeq: 1 }), 1, 'the first row is written')
+  /**
+   * THIS IS THE ASSERTION THAT MATTERS. Before the fix it returned `0` — the record was judged a duplicate
+   * of port 3000 and discarded.
+   */
+  assert.equal(appendNegatives(memory, [at(8080)], { sessionId: 's-b', boundarySeq: 2 }), 1, 'port 8080 is NOT a duplicate of port 3000')
+
+  const rows = readFileSync(join(memory, 'negatives.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+  assert.equal(rows.length, 2, `expected two rows, got ${rows.length}`)
+  assert.ok(rows.some((row) => String(row.symptom).includes('3000')), 'port 3000 survived')
+  assert.ok(rows.some((row) => String(row.symptom).includes('8080')), 'port 8080 survived')
+})
+
+test('dedupe: the SAME port is still a duplicate (the fix must not disable dedupe)', () => {
+  const { memory } = dirs()
+  const at = (evidence) => ({
+    symptom: '端口 3000 被占用',
+    cause: '上一个开发服务器没有退出',
+    avoid: '启动前先确认端口释放',
+    evidence,
+  })
+  assert.equal(appendNegatives(memory, [at([1])], { sessionId: 's-a', boundarySeq: 1 }), 1)
+  /** Same symptom AND same cause → genuinely the same event, so it merges rather than appending. */
+  assert.equal(appendNegatives(memory, [at([2])], { sessionId: 's-b', boundarySeq: 2 }), 0, 'an exact duplicate must still merge')
+  const rows = readFileSync(join(memory, 'negatives.jsonl'), 'utf8').trim().split('\n')
+  assert.equal(rows.length, 1)
+  /** And the merge kept both pieces of evidence rather than dropping one. */
+  assert.equal(JSON.parse(rows[0]).evidence.length, 2)
 })
 
 test('store: an exact duplicate negative merges evidence instead of appending', () => {

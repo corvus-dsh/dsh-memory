@@ -3,9 +3,12 @@
  *
  * Four gates, from hardest to softest (the user approved this order):
  *   ① name — a SKILL.md name IS the identity; same kebab name = same skill
- *   ② normalized exact — strip punctuation/numbers/whitespace, then compare
+ *   ② normalized exact — strip punctuation/whitespace/parentheticals, then compare
  *   ③ Jaccard on 3-grams of `when` — catches "换了说法但同一个方法"
  *   ④ conflict — same symptom with a different cause: keep BOTH and link them
+ *
+ * GATE ② DOES **NOT** STRIP DIGITS. It used to, and that merged `端口 3000 被占用` with
+ * `端口 8080 被占用` — see the note on `normalizeForMatch`.
  *
  * Gate ④ matters most for negative paths: two different causes for one symptom
  * is information, not duplication. Silently merging them would teach a wrong fix.
@@ -14,13 +17,52 @@
 import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
+/**
+ * NORMALISE FOR EXACT MATCH — and the two-digit rule that used to live here was a data-loss bug.
+ *
+ * WHAT CHANGED, AND WHY IT MATTERED
+ *
+ * This function used to end with `.replace(/[0-9]+/gu, '')`, stripping EVERY digit. The intent was
+ * defensible (`v7.4` and `v7.5` are the same skill, `seq=12` is noise), but the consequence was not:
+ *
+ *     端口 3000 被占用   →  端口被占用
+ *     端口 8080 被占用   →  端口被占用      ← identical, so `planNegative` called them duplicates
+ *
+ * The second lesson was then silently dropped — a WRITE-PATH data loss with no warning. Measured while
+ * looking for a concurrency bug: a fixture using `symptom + index` lost N-1 rows at every concurrency,
+ * because all the fixtures normalised to the same string.
+ *
+ * WHAT REPLACES IT: digits are KEPT as part of the normalised token stream. Two strings still match when
+ * their digits agree; `3000` and `8080` no longer do. The version-noise case is handled where it belongs —
+ * a parenthetical or bracketed version is removed by the rule above (`（v7.4）`), which is a SHAPE, not a
+ * blanket "all numbers are noise".
+ *
+ * WHAT IS STILL STRIPPED: punctuation, whitespace, parentheticals. Those are formatting.
+ *
+ * A NOTE ON WHY "JUST STRIP VERSION-SHAPED NUMBERS" WAS REJECTED: recognising a version in free text needs
+ * a grammar (`v?1.2.3`, `#42`, `2026-11-06`), and getting that grammar wrong in either direction is a
+ * silent failure — either two distinct symptoms merge, or two spellings of one symptom split. Keeping the
+ * digits and removing only the parenthetical is the rule whose failure mode is VISIBLE (a missed dedupe
+ * shows up as two rows; a wrong merge shows up as one row that should be two).
+ */
 export function normalizeForMatch(text: string): string {
   return text
     .toLowerCase()
+    /** A bracketed aside is commentary — `改动迁移（v7.4）逻辑` and `改动迁移逻辑` are the same claim. */
     .replace(/[（(][^）)]*[）)]/gu, '')
     .replace(/[^\p{L}\p{N}]+/gu, '')
-    .replace(/[0-9]+/gu, '')
 }
+
+/**
+ * ONE FUNCTION, ONE QUESTION. There is no digit-ignoring variant, and that is deliberate.
+ *
+ * The first draft of this fix added a `normalizeIgnoringDigits()` "for the skill-name gate" — and then a
+ * grep showed the skill-name gate does not use normalisation at all: gate ① compares the KEBAB NAME
+ * exactly, because a name IS the identity. The helper had zero call sites.
+ *
+ * Deleting it is the right outcome, and worth recording: a second function that exists "in case something
+ * needs it" is how the original bug happened — one normaliser silently answering two different questions.
+ */
 
 export function trigrams(text: string): Set<string> {
   const normalized = normalizeForMatch(text)
