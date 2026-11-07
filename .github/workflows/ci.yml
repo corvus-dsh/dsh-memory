@@ -74,6 +74,54 @@ jobs:
       - name: Install (no dependencies expected)
         run: npm install --no-audit --no-fund
 
+      - name: Prove the PUBLISHED layer resolves, not just the sibling
+        # ── WHY THIS EXISTS IN ADDITION TO THE SIBLING CHECKOUT ─────────────────────────────────
+        #
+        # The sibling checkout proves the LOCK works against this repository's HEAD of `dsh-paradise`.
+        # It does not prove a user who installs the published package can reach the layer, and those
+        # are different questions:
+        #
+        #   sibling   -> `../../dsh-paradise/index.js`  (our probe, works in CI)
+        #   published -> `@corvus-dsh/dsh-paradise`     (what a real install produces)
+        #
+        # `leaseSpecifiers()` tries the PACKAGE SPECIFIER FIRST, so a published install resolves with
+        # no sibling at all. If that package were published without a working `main`, or with a
+        # broken `exports` map, `acquireFileLock` would fail closed on every write — the store would
+        # simply stop accepting writes for every user — and CI would stay green because it only ever
+        # tested the sibling path.
+        #
+        # `not published yet` is NOT a failure: before the first release there is nothing to install,
+        # and failing here would make the first publish impossible. What must fail is the ambiguous
+        # state — the registry says it exists but npm cannot install it, or it installs without the
+        # `createSyncLeaseAdapter` the lock needs.
+        run: |
+          set -e
+          echo "── registry view of the peer dependency ──"
+          if ! npm view @corvus-dsh/dsh-paradise version --registry=https://registry.npmjs.org > /tmp/view.txt 2>/tmp/view.err; then
+            if grep -q 'E404' /tmp/view.err; then
+              echo "::notice::@corvus-dsh/dsh-paradise is NOT PUBLISHED YET — skipping the install probe."
+              echo "Sibling checkout remains the only resolution path until the first release."
+              exit 0
+            fi
+            echo "::error::registry lookup failed for a reason that is not 404:"
+            cat /tmp/view.err
+            exit 1
+          fi
+          PUBLISHED="$(cat /tmp/view.txt)"
+          echo "published version: $PUBLISHED"
+
+          echo "── install it the way a consumer does ──"
+          PROBE="$(mktemp -d)"
+          cd "$PROBE"
+          npm init -y > /dev/null
+          if ! npm install --no-audit --no-fund "@corvus-dsh/dsh-paradise@$PUBLISHED" > /tmp/inst.txt 2>&1; then
+            echo "::error::the published package exists but CANNOT BE INSTALLED — every consumer would hit this"
+            cat /tmp/inst.txt
+            exit 1
+          fi
+          echo "── and does it expose the SYNCHRONOUS LEASE this store's lock requires? ──"
+          node -e "const m=require('@corvus-dsh/dsh-paradise'); const need=['createSyncLeaseAdapter','createDshAdapters','readDiskEvents','escapeSessionDirName']; const miss=need.filter(k=>typeof m[k]!=='function'); if(miss.length){console.error('missing exports:',miss);process.exit(1)} console.log('published layer exports ok:', need.join(', '))"
+
       - name: Build
         run: npm run build
 
