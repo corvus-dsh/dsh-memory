@@ -345,10 +345,24 @@ export function whenSimilarity(withText: string, candidateText: string): number 
   const candidateNormalized = normalizeForMatch(candidateText)
   if (withNormalized === candidateNormalized) return 1
   /**
-   * WHICH BRANCH, AND WHY IT IS "EITHER SIDE IS SHORT". The failure being fixed only happens when
-   * there are too few grams for Jaccard to be stable. That is a property of the SHORTER string, so a
-   * short phrase compared against a long one must still take the stable branch — deciding by the
-   * longer side would reintroduce the defect whenever a candidate happened to be verbose.
+   * WHICH BRANCH: EDIT DISTANCE ONLY WHEN **BOTH** SIDES ARE SHORT.
+   *
+   * The failure being fixed happens when there are too few grams for Jaccard to be stable, and that
+   * is a property of a short string. So why not "either side short"? Because for a MIXED pair both
+   * measures already answer "not the same", and the reason is worth writing down:
+   *
+   *   edit distance is normalized by the LONGER string, so a short-vs-long pair scores at most
+   *   len(short)/len(long) — low;
+   *   Jaccard is bounded by grams(short)/grams(long) — also low.
+   *
+   * Neither can merge a mixed pair, so the branch choice cannot change the outcome; taking the gram
+   * branch keeps the cheaper O(n) path for the long side.
+   *
+   * ⚠️ THIS COMMENT PREVIOUSLY SAID "EITHER SIDE IS SHORT", which is what the code did NOT do. The
+   * discrepancy was found in review and is corrected here rather than by changing the code: `||`
+   * would route mixed pairs through the DP, which is slower and — by the argument above — decides
+   * the same way. If a future change makes mixed pairs mergable, revisit this: the `||` reading
+   * would become the correct one, and only then.
    */
   const bothShort =
     Array.from(withNormalized).length <= SHORT_WHEN_MAX_CHARS &&

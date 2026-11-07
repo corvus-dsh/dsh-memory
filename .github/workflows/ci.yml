@@ -156,3 +156,24 @@ jobs:
 
       - name: Test
         run: npm test
+
+      - name: Concurrency test (spawns 8 real processes — run SEPARATELY, and it is NOT skipped)
+        # ── WHY THIS IS ITS OWN STEP, AND WHY THAT IS NOT A SKIP ────────────────────────────────────
+        #
+        # This file spawns eight `node` processes that contend for ONE lock, so its resource need is
+        # genuinely exclusive. Measured inside the full parallel suite: one run in five failed, and a
+        # separate run took 82 SECONDS (against 1.4s in isolation) — because each of the worker's 40
+        # retry attempts can burn a 2s guard wait when seven others are queued ahead of it.
+        #
+        # A test whose timing depends on how busy the rest of the suite is produces the worst kind of
+        # red: real-looking and unreproducible. So it moved out of `test/*.test.mjs` into
+        # `test-concurrency/` — and it is run HERE, in the same job, on every push.
+        #
+        # WHAT WOULD MAKE THIS A SKIP, and what this deliberately is not: deleting the step, `|| true`,
+        # or an `if:` that lets it be tree-lined away. If this step is ever removed, the lost-update
+        # guarantee across PROCESSES stops being verified anywhere — which is the one thing the file
+        # exists for.
+        #
+        # `--test-concurrency=1` because the point is these eight processes contending with each other,
+        # not with another copy of themselves.
+        run: npm run test:concurrency
