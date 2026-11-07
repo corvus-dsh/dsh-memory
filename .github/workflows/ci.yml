@@ -37,12 +37,30 @@ jobs:
         run: npm run build
 
       - name: The build must not leave the committed artifact stale
+        # WHY `git diff --exit-code` AND NOT `git status --porcelain`
+        #
+        # The question is "did the build change what ships". `git status` does not answer that
+        # question: it compares against the stat cache and folds in attributes, so it can print
+        # ` M` for a worktree file whose filtered CONTENT is identical to the committed blob (the
+        # "LF will be replaced by CRLF the next time Git touches it" case).
+        #
+        # `git diff --exit-code` compares content after the repo's configured filters, which is the
+        # same normalization `git status` applies — so it agrees with `status` on real edits but not
+        # on pending-EOL noise. That is exactly the discrimination this gate needs.
+        #
+        # ⚠️ DO NOT "fix" this by pinning `core.autocrlf=false`. That disables the normalization
+        # instead of relying on it, and on a worktree with CRLF bytes it turns pure EOL churn into a
+        # whole-file diff. Measured on this repo: `lib/index.js` has 1664 CR bytes in the worktree,
+        # plain `git diff` exits 0, and `git -c core.autocrlf=false diff` reports 7 files changed /
+        # 7674 insertions / 7674 deletions of NOTHING. The pinned form fails on every Windows machine
+        # while the real gate passes on both.
         run: |
-          if [ -n "$(git status --porcelain -- lib)" ]; then
+          if ! git diff --exit-code -- lib; then
             echo "::error::The build changed committed artifacts. Run 'npm run build' and commit the result."
             git --no-pager diff --stat -- lib
             exit 1
           fi
+          echo "ok: lib/ matches the committed artifact"
 
       - name: Syntax-check the shipped entry point
         run: node --check lib/index.js
