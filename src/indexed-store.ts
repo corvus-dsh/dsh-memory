@@ -28,6 +28,22 @@
 import { appendFileSync, mkdirSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { SqliteIndex, rebuildIndexFromLedger, sqliteAvailable } from './sqlite-index.js'
+import { appendExperiences, appendFacts, appendNegatives } from './store.js'
+
+/**
+ * The outcome of one upsert batch.
+ *
+ * `appended` and `merged` are SEPARATE because they mean different things: the first grew the
+ * corpus, the second grew a confidence signal on an existing memory.
+ */
+export interface UpsertOutcome {
+  /** Rows the store appended as new memories. */
+  readonly appended: number
+  /** Rows the store merged into an existing row (evidence union + `hits` increment). */
+  readonly merged: number
+  /** Index rows written while synchronising. */
+  readonly indexed: number
+}
 
 export type IndexedKind = 'negative' | 'fact' | 'experience'
 
@@ -92,6 +108,102 @@ export class IndexedStore {
    * append and the index upsert, the index is merely stale — and `rebuild()` restores it from
    * the ledger. The reverse order would lose the memory itself.
    */
+  /**
+   * Store rows with FULL JSON-path semantics, then synchronise the index.
+   *
+   * ── WHY THIS DELEGATES TO `store.ts` INSTEAD OF WRITING SQL ──────────────────────────────
+   *
+   * The user's brief: "确保这个 upsert 的语义，与当前 JSON 模式下 store.ts 的合并逻辑完全等价
+   * （不能丢证据，不能算错 hits）". The obvious implementation is SQL:
+   *
+   *     INSERT INTO docs … ON CONFLICT(id) DO UPDATE SET evidence = …, hits = hits + 1
+   *
+   * That would be WRONG, and not subtly. The JSON path's merge rules are not "same key → merge":
+   *
+   *   negatives  `planNegative` runs four gates FIRST. A candidate with the same symptom but a
+   *              DIFFERENT cause is not a duplicate — it is a CONFLICT: the existing row is kept,
+   *              a `conflictsWith` edge is recorded, and the new incident is APPENDED as its own
+   *              row. A naive upsert would fuse two genuinely different failures into one and
+   *              silently erase the distinction.
+   *
+   *   facts      Dedup is exact-`text`; a hit increments `hits` AND unions evidence as composite
+   *              `{sourceSessionId, seq}` refs — not bare seq numbers.
+   *
+   *   both       Threat-scanned rows are skipped entirely; `domain`/`scene` are validated; the
+   *              archive cap can move rows out of the live file mid-write.
+   *
+   * Reimplementing all of that in SQL would drift the moment `store.ts` changes. So this calls
+   * the same functions and then updates the index. Equivalence is then not a property to be
+   * tested into existence — it follows from there being ONE implementation.
+   *
+   * The index is a derived read structure; the ledgers remain the record of truth.
+   */
+  upsert(kind: 'negative', rows: readonly Record<string, unknown>[], meta: Parameters<typeof appendNegatives>[2]): UpsertOutcome
+  upsert(kind: 'fact' | 'experience', rows: readonly Record<string, unknown>[], meta: Parameters<typeof appendFacts>[2]): UpsertOutcome
+  upsert(kind: IndexedKind, rows: readonly Record<string, unknown>[], meta: Parameters<typeof appendFacts>[2]): UpsertOutcome {
+    if (rows.length === 0) return { appended: 0, merged: 0, indexed: 0 }
+    const appended =
+      kind === 'negative'
+        ? appendNegatives(this.memoryDir, rows as never, meta as Parameters<typeof appendNegatives>[2])
+        : kind === 'fact'
+          ? appendFacts(this.memoryDir, rows as never, meta)
+          : appendExperiences(this.memoryDir, rows as never, meta)
+    /**
+     * `appended < rows.length` means the store MERGED the remainder: it found an existing row with
+     * the same identity and unioned evidence instead of adding a line. Reporting that split
+     * matters — "3 appended" grew the corpus, "3 merged" grew a confidence signal.
+     */
+    const merged = Math.max(0, rows.length - appended)
+    /** The ledgers are authoritative, so the index is rebuilt from them rather than patched. */
+    const indexed = this.syncIndexFrom(kind)
+    return { appended, merged, indexed }
+  }
+
+  /**
+   * Re-index one layer from its ledger.
+   *
+   * A full re-read of ONE layer is the honest choice here. Patching the index from the in-memory
+   * input would miss everything the store did to the row (merged evidence, incremented hits,
+   * assigned timestamp, added conflict edges, archived it) — the index would then disagree with
+   * the file it is derived from, which is the one failure mode an index must never have.
+   */
+  private syncIndexFrom(kind: IndexedKind): number {
+    const path = join(this.memoryDir, LEDGER_FILE[kind])
+    if (!existsSync(path)) return 0
+    return rebuildIndexFromLedger(this.index, path, {
+      kind,
+      batchSize: this.batchSize,
+      textOf: (record) =>
+        kind === 'negative'
+          ? `${String(record.symptom ?? '')} ${String(record.cause ?? '')} ${String(record.avoid ?? '')}`
+          : String(record.text ?? ''),
+      tokenize: this.tokenize,
+      describe: (record, lineIndex) => {
+        const body =
+          kind === 'negative'
+            ? `${String(record.symptom ?? '')} ${String(record.cause ?? '')} ${String(record.avoid ?? '')}`
+            : String(record.text ?? '')
+        return {
+          id: `${kind}:${lineIndex}`,
+          kind,
+          title: body.slice(0, 60),
+          when: '',
+          detail: String(record.avoid ?? body).slice(0, 120),
+          scene: String(record.scene ?? 'general'),
+          domain: String(record.domain ?? 'general'),
+          workspace: String(record.workspace ?? ''),
+          scope: String(record.scope ?? 'project'),
+          validAt: String(record.valid_at ?? ''),
+          invalidAt: String(record.invalid_at ?? ''),
+          provenance: String(record.provenance ?? 'inferred'),
+          at: String(record.at ?? record.timestamp ?? ''),
+          hits: Number(record.hits ?? 1),
+          scanText: body,
+        }
+      },
+    })
+  }
+
   append(kind: IndexedKind, rows: readonly IndexedRow[]): number {
     if (rows.length === 0) return 0
     const path = join(this.memoryDir, LEDGER_FILE[kind])

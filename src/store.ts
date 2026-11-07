@@ -1553,16 +1553,43 @@ export function appendNegatives(memoryDir: string, negatives: ExtractedNegative[
       // Gates ② (exact) and ④ (same symptom, different cause → link, never merge).
       const plan = planNegative(existing as never, negative)
       if (plan.duplicate) {
-        const same = existing.find((record) =>
-          plan.conflicts.length === 0 &&
-          String(record.symptom) === negative.symptom &&
-          String(record.cause) === negative.cause,
+        /**
+         * ── THE `plan.conflicts.length === 0` GUARD WAS A BUG ─────────────────────────────────
+         *
+         * The duplicate row was located with:
+         *
+         *     existing.find((record) => plan.conflicts.length === 0 && record.symptom === … && record.cause === …)
+         *
+         * `plan.conflicts` describes the WHOLE existing set, not this one candidate: it lists every
+         * row that shares the symptom and differs in cause. So as soon as the store held BOTH a
+         * duplicate AND a conflicting variant, `plan.conflicts.length` was non-zero and the find
+         * returned `undefined` — neither merged nor linked. Measured: three repeats of the same
+         * symptom+cause produced one row with `hits: 3` (correct, by luck of ordering), but a store
+         * holding a variant first kept re-appending instead of merging, and `conflictsWith` was
+         * never written on the duplicate path at all.
+         *
+         * The identity of a duplicate is `symptom + cause` and nothing else. The conflict list is
+         * a SEPARATE concern that is attached when the row is created.
+         */
+        const same = existing.find(
+          (record) => String(record.symptom) === negative.symptom && String(record.cause) === negative.cause,
         )
         if (same !== undefined) {
           const keyOf = (ref: any): string => (ref !== null && typeof ref === 'object' ? `${ref.sourceSessionId}@${ref.seq}` : String(ref))
           const merged = [...new Map([...(Array.isArray(same.evidence) ? same.evidence : []), ...negative.evidence].map((ref) => [keyOf(ref), ref])).values()]
           same.evidence = merged
           same.hits = Number(same.hits ?? 0) + 1
+          /**
+           * A repeat can ALSO reveal a conflict: the row was already there, and the store has since
+           * accumulated variants. Recording the indexes here is what makes the causal layer usable
+           * for rows that predate their conflicts — otherwise `conflictsWith` would only ever exist
+           * on the first incarnation of a symptom.
+           */
+          if (plan.conflicts.length > 0) {
+            const prior = Array.isArray(same.conflictsWith) ? same.conflictsWith : []
+            const union = [...new Set([...prior, ...plan.conflicts])].sort((left, right) => left - right)
+            same.conflictsWith = union
+          }
           patched = true
           dirty = true
         }
