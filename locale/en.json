@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Memory",
+    "description": "Capability memory for long sessions: mines finished sessions into four cognitive layers and filters retrieval with a cheap LLM relevance pass."
+  }
+}

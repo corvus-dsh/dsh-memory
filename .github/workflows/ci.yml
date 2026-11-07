@@ -30,6 +30,47 @@ jobs:
       - name: Show the runtime we are actually testing on
         run: node --version && npm --version
 
+      - name: Check out the layer this store's lock is built on
+        # ── WHY THIS REPO NEEDS A SIBLING CHECKOUT AT ALL ──────────────────────────────────────
+        #
+        # `src/lock.ts` does NOT own a lock implementation. It delegates to the SYNCHRONOUS LEASE
+        # ADAPTER in `dsh-paradise` (`createSyncLeaseAdapter`), and that is deliberate: the older
+        # `mkdir` lock had a real race (a reclaimer could delete the directory between `mkdir` and
+        # writing `owner`, crashing the writer that had already won) and was replaced rather than
+        # patched.
+        #
+        # `src/lease-bridge.ts` then FAILS CLOSED when the layer is absent — `acquireFileLock` throws
+        # instead of silently using a racy lock. So on a machine without `dsh-paradise`, every write
+        # path in this store dies, which is what the suite exercised here: `appendNegatives` is called
+        # by a large share of the tests, and the multi-process ones spawn child processes that hit the
+        # same wall.
+        #
+        # CI checked out ONLY this repo, so the layer was never present and the suite was red for a
+        # reason that has nothing to do with the code under test.
+        #
+        # ⚠️ The checkout path MUST stay INSIDE this job's workspace. `actions/checkout` refuses a
+        # destination it cannot prove is under `$GITHUB_WORKSPACE`:
+        #
+        #   Repository path '/home/runner/work/<repo>/dsh-paradise-checkout'
+        #   is not under '/home/runner/work/<repo>/<repo>'
+        #
+        # So it lands in a staging directory inside the workspace and the next step MOVES it out to
+        # the sibling position that `leaseSpecifiers()` probes (`../../dsh-paradise/index.js`,
+        # `../dsh-paradise/index.js`, then the bare package name).
+        uses: actions/checkout@v4
+        with:
+          repository: corvus-dsh/dsh-paradise
+          path: .siblings/dsh-paradise
+
+      - name: Place the layer where the lease probes expect it
+        # The probes look for the DIRECTORY NAME `dsh-paradise` beside this repo, not the scoped
+        # package name: `@corvus-dsh/dsh-paradise` is a module specifier, the folder is `dsh-paradise`.
+        run: |
+          set -e
+          mv .siblings/dsh-paradise ../dsh-paradise
+          rm -rf .siblings
+          node -e "console.log('lease layer at', require('node:fs').realpathSync('../dsh-paradise/index.js'))"
+
       - name: Install (no dependencies expected)
         run: npm install --no-audit --no-fund
 

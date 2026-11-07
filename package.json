@@ -25,7 +25,9 @@
     "README.md",
     "LICENSE",
     "ARCHITECTURE.md",
-    "RELEASE_NOTES.md"
+    "RELEASE_NOTES.md",
+    "icon.svg",
+    "locale"
   ],
   "scripts": {
     "build": "node scripts/build.mjs",
@@ -36,6 +38,14 @@
   "engines": {
     "node": ">=22.5.0",
     "dsh": ">=0.2.1-rc.5"
+  },
+  "peerDependencies": {
+    "@corvus-dsh/dsh-paradise": "*"
+  },
+  "peerDependenciesMeta": {
+    "@corvus-dsh/dsh-paradise": {
+      "optional": true
+    }
   },
   "keywords": [
     "dsh",
