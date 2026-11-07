@@ -30,6 +30,102 @@ import { scanThreat } from './threat.js'
 import { isValidAt, readSkillValidity } from './store.js'
 import { getNeighbors } from './edges.js'
 import { ledgerPatchCount, ledgerVersion, readRecords } from './ledger-cache.js'
+import { SqliteIndex, sqliteAvailable } from './sqlite-index.js'
+import type { IndexDocument } from './sqlite-index.js'
+
+/**
+ * v1.4.0 — THE RETRIEVAL TIER, AS MODULE STATE.
+ *
+ * WHY MODULE STATE AND NOT A PARAMETER: `scoreDocuments` is synchronous and is called from
+ * several places (retrieve, retrieveCandidates). Threading a tier through all of them would
+ * convert a synchronous hot path into an async one, which changes the contract for every caller
+ * including the existing tests. The tier is configuration, not per-call data.
+ *
+ * DEFAULT IS `'json'`. A caller opts in explicitly; nothing changes if they do not.
+ *
+ * The index handle is memoised so repeated retrievals reuse one connection. Re-opening per call
+ * would be correct but would pay SQLite startup on every query and leak a handle per retrieval.
+ */
+let activeStorageTier: 'json' | 'sqlite' = 'json'
+let tierIndexPath: string | undefined
+let tierIndex: SqliteIndex | undefined
+
+export function setStorageTier(tier: 'json' | 'sqlite', options: { indexDbPath?: string } = {}): void {
+  activeStorageTier = tier
+  tierIndexPath = options.indexDbPath
+  /** Switching config invalidates the handle: a different tier must not read the old database. */
+  if (tierIndex !== undefined) {
+    tierIndex.close()
+    tierIndex = undefined
+  }
+}
+
+export function getStorageTier(): 'json' | 'sqlite' {
+  return activeStorageTier
+}
+
+/** The memoised index handle, or undefined when the tier is json or sqlite is unavailable. */
+function currentIndex(memoryDir: string): SqliteIndex | undefined {
+  if (activeStorageTier !== 'sqlite') return undefined
+  if (tierIndex !== undefined) return tierIndex
+  if (!sqliteAvailable()) return undefined
+  const file = tierIndexPath ?? join(memoryDir, '.index.db')
+  try {
+    tierIndex = new SqliteIndex({ file })
+    return tierIndex
+  } catch {
+    /** An unopenable database degrades to json rather than failing the retrieval. */
+    return undefined
+  }
+}
+
+/**
+ * Memory documents for a query, from whichever tier is live.
+ *
+ * THIS IS THE ENTIRE TIER SEAM. Everything downstream — threat scan, bi-temporal gate, workspace
+ * gate, task gate, IDF, staleness demotion — runs on the returned documents unchanged, because
+ * those rules are the store's contract and a storage engine must not be able to alter them.
+ *
+ * SKILLS ARE NOT IN THE INDEX: a SKILL.md carries conflict edges and parsed frontmatter the index
+ * does not model, and skills number in the dozens against memories in the tens of thousands.
+ */
+function memoryDocumentsFor(query: string, memoryDir: string, now: number): Document[] {
+  const index = currentIndex(memoryDir)
+  if (index === undefined) {
+    return [
+      ...negativeDocuments(memoryDir, now),
+      ...layerDocuments(memoryDir, 'facts.jsonl', 'fact', now),
+      ...layerDocuments(memoryDir, 'experiences.jsonl', 'experience', now),
+    ]
+  }
+  const terms = tokenize(query)
+  if (terms.length === 0) return []
+  const ids = index.candidates(terms, 500)
+  return index.documentsByIds(ids).map((row) => tierDocumentOf(row, now))
+}
+
+/** Turn an index row into the retrieval `Document` shape, scoring fields included. */
+function tierDocumentOf(row: IndexDocument, now: number): Document {
+  const sceneText = row.scene.toLowerCase()
+  return {
+    kind: row.kind as DocumentKind,
+    id: row.id,
+    title: clipTitle(row.title, 60),
+    detail: row.detail.slice(0, 120),
+    scope: row.scope,
+    workspace: row.workspace,
+    domain: row.domain,
+    scanText: row.scanText,
+    validAt: row.validAt === '' ? undefined : row.validAt,
+    invalidAt: row.invalidAt === '' ? undefined : row.invalidAt,
+    provenance: provenanceOf(row.provenance),
+    scene: /^[a-z][a-z0-9-]{1,23}$/u.test(sceneText) ? sceneText : 'general',
+    tokens: new Set(tokenize(row.scanText)),
+    ageDays: ageDaysOf(row.at, now),
+    ...(Number.isFinite(row.hits) ? { hits: row.hits } : {}),
+    importance: 1,
+  }
+}
 import { getCachedSkillDocs, setCachedSkillDocs, skillDocsKey } from './skill-cache.js'
 
 /** v0.6: all four layers participate in retrieval. */
@@ -1139,7 +1235,10 @@ function scoreDocuments(
   // v0.8.1 D4: the injection scan runs FIRST. "Is this text allowed to enter a
   // prompt at all" is a stronger question than "is it from my workspace", and a
   // poisoned record must not be able to influence the IDF weights either.
-  const inSceneDocuments = collectAllDocuments(memoryDir, skillsDir, now).filter(inScene)
+  const inSceneDocuments = [
+    ...skillDocuments(skillsDir, now),
+    ...memoryDocumentsFor(query, memoryDir, now),
+  ].filter(inScene)
   const safeDocuments = inSceneDocuments.filter((document) => !isPoisoned(document))
   const blockedByThreat = inSceneDocuments.length - safeDocuments.length
   // v0.15: the activation gate runs before the workspace gate — "is this memory
