@@ -4,7 +4,9 @@
 # patch (duplicate ids crash the loader).
 - insert:
     - id: dsh-memory
-      name: 'dsh-memory'
+      # v2.1.0: the npm name is scoped, so the loader must resolve the SCOPED path. The `id`
+      # stays bare because it is a stable handle other patches refer to.
+      name: '@corvus-dsh/dsh-memory'
       config:
         # Where the slicing plugin keeps .retired.json / .transferred.json.
         # Read-only: dsh-memory never imports that plugin, it only reads the files.

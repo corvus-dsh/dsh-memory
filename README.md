@@ -1,5 +1,81 @@
 # dsh-memory
 
+<!-- INSTALL:BEGIN -->
+## 安装
+
+> 所有四个包都**没有发布到 npm**，且 npm 上的裸名 `dsh-memory` / `dsh-observer` 已被他人占用。
+> 因此统一使用 **GitHub 直装**——这是目前唯一可靠的安装方式。
+
+## 一键安装四个包
+
+```bash
+dsh plugin add github:corvus-dsh/dsh-paradise
+dsh plugin add github:corvus-dsh/dsh-memory
+dsh plugin add github:corvus-dsh/dsh-graft-slice
+dsh plugin add github:corvus-dsh/dsh-observer
+```
+
+**顺序有意义**：`dsh-paradise` 是内核，其余三个都依赖它提供的协议。先装内核，后装业务插件。
+
+## 装完确认
+
+```bash
+dsh plugin list
+```
+
+应该看到四行，`fiberPhase` 都是 `active`：
+
+```
+include:dsh-paradise       dsh-paradise        active
+include:dsh-graft-slice    dsh-graft-slice     active
+include:dsh-memory         dsh-memory          active
+include:dsh-observer       dsh-observer        active
+```
+
+如果某个是 `null` 或显示「异常」，看宿主日志里该包的启动错误——最常见的原因是 Node 版本低于 22.5。
+
+## 卸载
+
+```bash
+dsh plugin remove dsh-observer
+dsh plugin remove dsh-graft-slice
+dsh plugin remove dsh-memory
+dsh plugin remove dsh-paradise
+```
+
+## 从源码运行（不装插件）
+
+如果只是想跑独立宿主和 Web UI，不需要 DSH：
+
+```bash
+git clone https://github.com/corvus-dsh/dsh-paradise
+cd dsh-paradise
+node dist/harness-server.js
+# 浏览器打开 http://127.0.0.1:38080
+```
+
+详见《星火 OS 独立运行指南》。
+
+## 要求
+
+| 项 | 版本 |
+|---|---|
+| Node | ≥ 22.5.0（`node:sqlite` 需要） |
+| DSH | ≥ 0.2.1-rc.5 |
+| 外部依赖 | **零**。全部只用 Node 内置模块 |
+
+## 为什么不用 npm
+
+npm 上的 `dsh-memory` 和 `dsh-observer` 这两个名字已被第三方注册，包内容与我们无关。
+我们不愿为一个名字支付赎金，也不愿让用户装到别人的包，所以改用了作用域命名
+（`@corvus-dsh/*`）并主推 GitHub 直装。
+
+等 `@corvus-dsh` 作用域下的包正式发版后，`npm install @corvus-dsh/dsh-memory`
+也会可用，但**GitHub 直装始终是更稳妥的方式**——它直接取仓库当前状态，
+不经过 npm 的发布延迟。
+<!-- INSTALL:END -->
+
+
 **能力记忆**：把做过的会话沉淀成可复用的技能与负知识。DSH 开源生态插件（topic `dsh-plugin`）。
 
 > **里程碑 `v0.9.0-freeze`（2026-11-05）** —— 本项目已进入架构冻结点。

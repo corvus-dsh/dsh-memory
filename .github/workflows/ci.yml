@@ -1,0 +1,51 @@
+# CI — rebuild, prove the committed artifact is current, then test.
+#
+# THE FAILURE THIS CATCHES
+#
+# `lib/` is committed build output. A test suite can be fully green against `src/` while `lib/` is
+# one edit behind — and the consumer loads `lib/`. That is "tests green, artifact broken", and it is
+# invisible unless CI rebuilds and diffs.
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22.x, 24.x]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Show the runtime we are actually testing on
+        run: node --version && npm --version
+
+      - name: Install (no dependencies expected)
+        run: npm install --no-audit --no-fund
+
+      - name: Build
+        run: npm run build
+
+      - name: The build must not leave the committed artifact stale
+        run: |
+          if [ -n "$(git status --porcelain -- lib)" ]; then
+            echo "::error::The build changed committed artifacts. Run 'npm run build' and commit the result."
+            git --no-pager diff --stat -- lib
+            exit 1
+          fi
+
+      - name: Syntax-check the shipped entry point
+        run: node --check lib/index.js
+
+      - name: Test
+        run: npm test
