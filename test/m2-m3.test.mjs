@@ -243,6 +243,23 @@ test('pre-step: the hint rides messages once per user turn, non-blocking', async
   assert.match(text, /记忆提示/u)
   assert.match(text, /plugin:dsh-memory/u)
 
+  /**
+   * HOST CONTRACT: DSH appends every pre-step message as a `user/message` event and its
+   * validator requires event type and role to agree. A `developer` role here is not context —
+   * it is a fatal append error that killed a live run at seq 1046. Assert the SHAPE the host
+   * will receive, not just the payload's spelling.
+   */
+  const injected = first.messages.filter((message) => !payload.messages.includes(message))
+  assert.ok(injected.length > 0, 'the hint must be appended to the step')
+  for (const message of injected) {
+    assert.equal(
+      message.role,
+      'user',
+      'pre-step messages become user/message; a developer role makes the host throw "developer/message and developer role must occur together"',
+    )
+    assert.match(message.content?.[0]?.text ?? '', /^\[系统提示\]/u, 'a user-carried system note must say so')
+  }
+
   const same = await handler(payload, next)
   assert.doesNotMatch(JSON.stringify(same), /记忆提示/u, 'same user turn must not be nudged twice')
 })

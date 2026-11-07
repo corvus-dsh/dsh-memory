@@ -15,7 +15,17 @@
  * weeks of learned rules is one nobody clicks twice.
  */
 window.__ModuleLoader__.load({
-  id: 'dsh-memory',
+  /**
+   * THE REGISTRATION ID MUST BE THE PACKAGE NAME, NOT A SHORT ALIAS.
+   *
+   * The Host composes the boot graph from each package's `dsh.client` declaration and keys every
+   * row by its package.json `name` (`@corvus-dsh/dsh-memory`). The browser loader looks the row up
+   * by that id and refuses anything else — with the short id it reported
+   * `plugins/.../client.js: loaded without registering "@corvus-dsh/dsh-memory"`, then re-executed
+   * the bundle as a fallback and crashed on `duplicate factory registration`. The package rename
+   * to the scoped name updated package.json but not this line; that is the whole defect.
+   */
+  id: '@corvus-dsh/dsh-memory',
   /**
    * v0.21: `host` is the THIRD symbol the client sandbox hands the factory.
    *
