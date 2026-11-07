@@ -1,6 +1,6 @@
 {
   "name": "@corvus-dsh/dsh-memory",
-  "version": "2.2.0",
+  "version": "0.9.0-beta.1",
   "description": "星火 OS 记忆层 (memory): capability memory for long sessions. Consumes the handoff ledger, extracts four cognitive layers (facts with seq pointers, experiences, negative paths, structured SKILL.md skills) from finished sessions, filters retrieval with a cheap LLM relevance pass, and never imports the slicing plugin. Supports hybrid lexical+semantic recall and an optional node:sqlite inverted index.",
   "private": false,
   "type": "module",
@@ -40,7 +40,7 @@
     "dsh": ">=0.2.1-rc.5"
   },
   "peerDependencies": {
-    "@corvus-dsh/dsh-paradise": "*"
+    "@corvus-dsh/dsh-paradise": "^0.9.0-beta.1"
   },
   "peerDependenciesMeta": {
     "@corvus-dsh/dsh-paradise": {
