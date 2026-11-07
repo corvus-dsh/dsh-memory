@@ -97,7 +97,7 @@ jobs:
         run: |
           set -e
           echo "── registry view of the peer dependency ──"
-          if ! npm view @corvus-dsh/dsh-paradise version --registry=https://registry.npmjs.org > /tmp/view.txt 2>/tmp/view.err; then
+          if ! npm view @corvus-dsh/dsh-paradise versions --json --registry=https://registry.npmjs.org > /tmp/view.txt 2>/tmp/view.err; then
             if grep -q 'E404' /tmp/view.err; then
               echo "::notice::@corvus-dsh/dsh-paradise is NOT PUBLISHED YET — skipping the install probe."
               echo "Sibling checkout remains the only resolution path until the first release."
@@ -107,8 +107,29 @@ jobs:
             cat /tmp/view.err
             exit 1
           fi
-          PUBLISHED="$(cat /tmp/view.txt)"
-          echo "published version: $PUBLISHED"
+          # ── THE STAGING PLACEHOLDER IS NOT A RELEASE OF THIS CODE ────────────────────────────────
+          # `npm stage publish` claims a brand-new name by publishing a PLACEHOLDER package whose
+          # version is exactly `0.0.0-stage`. It is a real, installable version of the real name, and
+          # it carries NO `main` and NO `exports` — because it is not a build of this repository at
+          # all.
+          #
+          # MEASURED, and it is why this filter exists: before the placeholder, `npm view … version`
+          # answered E404 and this gate skipped. With the placeholder live, the lookup SUCCEEDS, the
+          # probe installs it, and `require('@corvus-dsh/dsh-paradise')` dies with MODULE_NOT_FOUND:
+          #
+          #     Error: Cannot find module '@corvus-dsh/dsh-paradise'
+          #
+          # …so CI went red for a reason that has nothing to do with the code under test.
+          #
+          # THE FILTER IS BY EXACT VERSION, NOT BY "ANY PRE-RELEASE": a genuine `0.9.0-beta.1` MUST
+          # still be probed, and that is the release this gate exists to protect.
+          PUBLISHED="$(tr -d '\n ' < /tmp/view.txt | grep -o '"[^"]*"' | tr -d '"' | grep -vx '0.0.0-stage' | tail -1 || true)"
+          if [ -z "$PUBLISHED" ]; then
+            echo "::notice::only the staging placeholder (0.0.0-stage) exists — there is no release to verify yet."
+            echo "The first real release will be probed here."
+            exit 0
+          fi
+          echo "published version to verify: $PUBLISHED"
 
           echo "── install it the way a consumer does ──"
           PROBE="$(mktemp -d)"
