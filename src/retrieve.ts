@@ -1429,6 +1429,73 @@ export function retrieveCandidates(
   return out
 }
 
+/**
+ * v1.6.0 — HYBRID RECALL: lexical net first, optional semantic rerank second.
+ *
+ * WHY THIS IS A SEPARATE FUNCTION AND NOT A FLAG ON `retrieve()`
+ *
+ * `retrieve()` is synchronous and sits on the hot path of every turn; the reranker is an async
+ * model call. Making the hot path async to support an optional stage would change the contract for
+ * every existing caller and all 281 tests. So the hybrid path is additive: a caller that wants it
+ * opts in and awaits; nothing else moves.
+ *
+ * THE ASYMMETRY IS THE DESIGN: the reranker may REORDER what lexical recall found, never ADD to
+ * it. That keeps every result explainable — each hit still reports the lexical rank it started
+ * from — while covering the synonym gap that lexical scoring cannot.
+ */
+export interface HybridRecallOptions extends CandidateOptions {
+  /** How many to recall lexically before reranking. Default 50. */
+  recallLimit?: number
+  /** Absent means lexical-only; the trace states which happened. */
+  rerank?: import('./hybrid-search.js').Reranker
+  /** Set false to keep lexical order while still collecting semantic scores (diagnostics). */
+  preferRerank?: boolean
+}
+
+export async function retrieveHybrid(
+  memoryDir: string,
+  skillsDir: string,
+  query: string,
+  options: HybridRecallOptions = {},
+): Promise<{ hits: MemoryHit[]; trace: import('./hybrid-search.js').HybridTrace }> {
+  const { rankHybrid } = await import('./hybrid-search.js')
+  const recallLimit = Math.max(1, Math.trunc(options.recallLimit ?? 50))
+  const limit = Math.max(1, Math.trunc(options.limit ?? 5))
+  /**
+   * RECALL WIDE: the lexical stage runs with the floor and a generous cap. A narrow recall would
+   * leave the reranker nothing to promote, which is how "hybrid" ends up measuring the same recall
+   * as lexical-only.
+   */
+  const recalled = retrieveCandidates(memoryDir, skillsDir, query, {
+    ...options,
+    limit: recallLimit,
+    threshold: options.threshold ?? 0.05,
+  })
+  const candidates = recalled.map((hit, index) => ({
+    /** `kind:id` is unique across layers, which `id` alone is not. */
+    id: `${hit.kind}:${hit.id}`,
+    /**
+     * THE TEXT THE JUDGE READS.
+     *
+     * Title plus detail plus the trigger phrasing: the reranker's job is to spot a synonym in the
+     * memory that lexical scoring missed, and the trigger (`when`) is where a memory states the
+     * situation it applies to. Showing only the title would hide exactly the field that carries the
+     * semantics.
+     */
+    text: [hit.title ?? '', hit.when ?? '', hit.detail ?? ''].filter(Boolean).join(' — '),
+    lexical: hit.score ?? 0,
+    rank: index + 1,
+    payload: hit,
+  }))
+  const ranked = await rankHybrid(query, candidates, {
+    recallLimit,
+    limit,
+    ...(options.rerank === undefined ? {} : { rerank: options.rerank }),
+    ...(options.preferRerank === undefined ? {} : { preferRerank: options.preferRerank }),
+  })
+  return { hits: ranked.hits.map((hit) => hit.payload as MemoryHit), trace: ranked.trace }
+}
+
 export interface RetrieveResult {
   skill?: MemoryHit
   negative?: MemoryHit
