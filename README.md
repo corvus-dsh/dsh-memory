@@ -514,3 +514,16 @@ CLI 直接用**本仓库自带的 zstd 读取器**读会话文件（DSH 的 v4 �
 ```bash
 npm run build && npm test
 ```
+
+**当前：415 / 415。**
+
+**测试专用出口（批次 3 第 1 组）：** 入口导出 31 个名字，其中 **2 个是 seam**（`resetMonotonicClockForTest`、
+`resolveMemoryConfigForTest`）；另有 **5 个模块级 seam** 由测试直接从 `lib/` 引入
+（`clearFilterCache` / `filterCacheStats`、`clearSceneCache` / `sceneCacheStats` / `clearCommitCache`）。
+它们**不是公开 API**，改它们不算破坏性变更。`test/v102-seam-inventory.test.mjs` 把入口导出面钉成字面量清单，
+并逐个断言模块级 seam 仍被导出；新增 seam 的规则写在 `src/index.ts` 的 `THE TEST-SEAM SURFACE` 块里
+（给 `…ForTest`/`clear…`/`…Stats` 形状的名字、优先放模块级而不是加宽入口）。
+
+口径说明（实测优先）：审计里本仓的"测试暴露"记的是 22 项；用「四个仓 + 脚本 + 文档全扫、只算测试消费」这把尺
+量出来是 **54 个"没有非测试消费者"的导出**，其中按形状算 seam 的只有上面这 7 个。差异在**方法**不在事实——
+其余 47 个是被单测覆盖的普通工具函数，不属于 seam，本批次不动它们。
