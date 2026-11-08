@@ -175,6 +175,24 @@ export interface ExtractedSkill {
   domain?: MemoryDomain
   /** v0.5: 2-3 alternate phrasings a future session might search with. */
   aliases: string[]
+  /**
+   * GLOBAL KNOWLEDGE BASE — the cross-cutting vocabulary ("python", "api", "auth").
+   *
+   * WHY THIS IS NOT `scene`: `scene` is a single routing tag that decides WHICH pool a memory is
+   * scored in, and it is deliberately one value. A tag list is a FILTER: a task in another
+   * workspace can ask "do I know anything about python + api" without knowing this repository
+   * exists. Absent/empty means "no cross-workspace reach", which is the safe default — a memory
+   * with no tags stays exactly as local as it was before this field existed.
+   */
+  tags?: string[]
+  /**
+   * GLOBAL KNOWLEDGE BASE — the PHASES this memory is useful in (`coding`, `testing`, …).
+   *
+   * The DAG node a model is standing on has a `node_type`; that is the query key. Kept separate
+   * from `tags` because the two axes are genuinely different: "auth" is a subject, "testing" is a
+   * moment, and a retrieval that conflates them returns a testing checklist to a design question.
+   */
+  applicableNodeTypes?: string[]
   /** v0.7: operational (a tool did something) vs observational (a tool read). */
   evidenceKind?: 'operational' | 'observational'
   /** v0.7.1: outcome-loop weight. 1.0 = untested, lowered by failed use, raised
@@ -222,6 +240,15 @@ export interface ExtractedNegative {
   scene: MemoryScene
   /** v0.17: the project/system this is about. */
   domain?: MemoryDomain
+  /**
+   * GLOBAL KNOWLEDGE BASE — same two cross-workspace axes as a skill.
+   *
+   * A PITFALL is the layer that most needs to travel: "this API returns 200 with an error body" is
+   * true in every repository that calls that API, and a workspace gate is exactly what kept three
+   * teams from learning it once. Absent/empty keeps the negative local.
+   */
+  tags?: string[]
+  applicableNodeTypes?: string[]
   /** v0.15: same bi-temporal + trust fields as skills. */
   provenance?: MemoryProvenance
   validAt?: string
@@ -261,6 +288,14 @@ export const EXTRACT_SYSTEM_PROMPT = [
   '6. name is ASCII kebab-case (a-z, 0-9, hyphens, <= 48 chars). title/description/when_to_use may be Chinese.',
   '6b. Every skill and negative carries `scope`: workspace (only this repo/dir), project (this project family) or global (any DSH session). Be conservative: when unsure, use project.',
   '6c. Every skill carries 2-3 `aliases`: other phrasings a future session might use to ask for this, e.g. ["连数据库", "mysql 查询", "pymysql 客户端"]. They feed lexical recall, so prefer the words a human would type.',
+  /**
+   * GLOBAL KNOWLEDGE BASE — the two axes that let a memory leave its workspace.
+   *
+   * Stated as a rule with a NEGATIVE half, because the failure mode is inflation: a model asked
+   * for tags will tag everything, and every memory becoming "global" is the same as none of them
+   * being global. `[]` must be an attractive answer.
+   */
+  '6d. Every skill and negative MAY carry `tags` (0-5 lowercase latin tags naming the SUBJECT, e.g. ["python","api","auth"]) and `applicable_node_types` (0-3 PHASES it is useful in, from: analysis, design, coding, testing, refactoring, debugging, docs, ops). These two fields are what makes a memory reachable from OTHER projects, so give them ONLY when the lesson genuinely travels beyond this repository. A repository-specific fix (a path, a local script, this project\'s schema) gets NEITHER — emit [] for both. When unsure, emit [].',
   '7. Be terse: step <= 40 words, verify <= 25 words, description <= 30 words. The JSON must stay complete.',
   '',
   'Every skill becomes one SKILL.md with exactly this shape:',
@@ -283,9 +318,10 @@ export const EXTRACT_SYSTEM_PROMPT = [
   'Return ONLY JSON:',
   '{"facts":[{"text":"...","scene":"database","seq":12}],',
   ' "experiences":[{"text":"...","scene":"database","seq":12}],',
-  ' "negatives":[{"symptom":"...","cause":"...","avoid":"...","scope":"project","scene":"database","evidence":[56]}],',
+  ' "negatives":[{"symptom":"...","cause":"...","avoid":"...","scope":"project","scene":"database","tags":["sqlite"],"applicable_node_types":["testing"],"evidence":[56]}],',
   ' "skills":[{"name":"kebab-name","title":"...","description":"...","when_to_use":"...",',
   '            "scope":"project","scene":"database","aliases":["连数据库","mysql 查询"],',
+  '            "tags":["python","mysql"],"applicable_node_types":["coding"],',
   '            "steps":["...","..."],"verify":["..."],"evidence":[12,34]}]}',
 ].join('\n')
 
@@ -350,8 +386,29 @@ function asTextList(value: unknown, max: number): string[] {
   return out
 }
 
-function asSeqList(value: unknown, allowed: Set<number>): number[] {
-  if (!Array.isArray(value)) return []
+/**
+ * GLOBAL KNOWLEDGE BASE — the shared vocabulary normaliser.
+ *
+ * Mirrors `knowledge.ts`'s `normalizeVocabList` deliberately rather than importing it: `extract.ts`
+ * is the deepest module in this package (it imports nothing local except types), and a cycle
+ * `extract -> knowledge -> store -> extract` would exist the moment `knowledge` needed a type from
+ * `store`. The grammar is three lines; duplicating it is cheaper than a load-order bug.
+ */
+const VOCAB_TAG = /^[a-z0-9][a-z0-9+#._-]{0,31}$/u
+function asVocabList(value: unknown, max = 8): string[] {
+  const raw = Array.isArray(value) ? value : typeof value === 'string' ? value.split(/[,\s]+/u) : []
+  const out: string[] = []
+  for (const item of raw) {
+    if (typeof item !== 'string') continue
+    const tag = item.trim().toLowerCase().replace(/\s+/gu, '-')
+    if (!VOCAB_TAG.test(tag) || out.includes(tag)) continue
+    out.push(tag)
+    if (out.length >= max) break
+  }
+  return out
+}
+
+function asSeqList(value: unknown, allowed: Set<number>): number[] {  if (!Array.isArray(value)) return []
   const out: number[] = []
   for (const item of value) {
     const seq = Number(item)
@@ -468,6 +525,13 @@ export function sanitizeExtraction(raw: unknown, episode: Episode): ExtractionRe
       scene: asScene(item.scene),
       aliases: asTextList(item.aliases ?? item.alias, 3),
       domain: asDomain(item.domain),
+      // GLOBAL KNOWLEDGE BASE: the two cross-workspace axes. Only written when the
+      // extractor actually named them — an invented tag would make a local memory
+      // look global, which is the one direction the gate must never drift.
+      ...(asVocabList(item.tags).length === 0 ? {} : { tags: asVocabList(item.tags) }),
+      ...(asVocabList(item.applicable_node_types ?? item.applicableNodeTypes ?? item.nodeTypes).length === 0
+        ? {}
+        : { applicableNodeTypes: asVocabList(item.applicable_node_types ?? item.applicableNodeTypes ?? item.nodeTypes) }),
       // v0.15: a HINT from the model, overridden by the runner's evidence-derived
       // tier. The model is not the authority on how much its own output is trusted.
       ...(asProvenance(item.provenance) === undefined ? {} : { provenance: asProvenance(item.provenance) }),
@@ -499,6 +563,10 @@ export function sanitizeExtraction(raw: unknown, episode: Episode): ExtractionRe
       scope: asScope(item.scope),
       scene: asScene(item.scene),
       domain: asDomain(item.domain),
+      ...(asVocabList(item.tags).length === 0 ? {} : { tags: asVocabList(item.tags) }),
+      ...(asVocabList(item.applicable_node_types ?? item.applicableNodeTypes ?? item.nodeTypes).length === 0
+        ? {}
+        : { applicableNodeTypes: asVocabList(item.applicable_node_types ?? item.applicableNodeTypes ?? item.nodeTypes) }),
       ...(asProvenance(item.provenance) === undefined ? {} : { provenance: asProvenance(item.provenance) }),
       evidence,
     })

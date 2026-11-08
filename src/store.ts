@@ -296,6 +296,14 @@ export function normalizeSkill(input: SkillInput | ExtractedSkill): ExtractedSki
     .map((alias) => String(alias).replace(/\s+/gu, ' ').trim())
     .filter(Boolean)
     .slice(0, 3)
+  /**
+   * GLOBAL KNOWLEDGE BASE — carried through the normaliser for the same reason `dependencies`
+   * had to be: `normalizeSkill` rebuilds the record from a whitelist, so a field it does not name
+   * is silently dropped. A skill written with tags and read back without them looks local, and the
+   * whole point of the field is that it is not.
+   */
+  const tags = asVocab((raw as any).tags)
+  const applicableNodeTypes = asVocab((raw as any).applicableNodeTypes ?? (raw as any).applicable_node_types)
   // v0.6: accept legacy numbers (a bare seq is resolved against the write's
   // session id) and composite refs (already carry their own session id).
   const evidence: EvidenceRef[] = []
@@ -324,9 +332,34 @@ export function normalizeSkill(input: SkillInput | ExtractedSkill): ExtractedSki
       ? String((raw as any).domain).trim().toLowerCase()
       : 'general',
     aliases,
+    ...(tags.length === 0 ? {} : { tags }),
+    ...(applicableNodeTypes.length === 0 ? {} : { applicableNodeTypes }),
     confidence: clampConfidence((raw as any).confidence),
     evidence,
   }
+}
+
+/**
+ * The shared vocabulary grammar, duplicated from `knowledge.ts` on purpose.
+ *
+ * `store.ts` is imported by `knowledge.ts`, so importing back would be a cycle. The grammar is a
+ * regex and a dedupe loop; the alternative — a cycle in a package that strips types at build time,
+ * where a cycle is a load-order bug rather than a linked warning — is decidedly worse.
+ */
+const VOCAB_TAG = /^[a-z0-9][a-z0-9+#._-]{0,31}$/u
+
+/** Normalise a tag / node-type list: lowercase, hyphenated, validated, deduped, capped. */
+export function asVocab(value: unknown, max = 8): string[] {
+  const raw = Array.isArray(value) ? value : typeof value === 'string' ? value.split(/[,\s]+/u) : []
+  const out: string[] = []
+  for (const item of raw) {
+    if (typeof item !== 'string') continue
+    const tag = item.trim().toLowerCase().replace(/\s+/gu, '-')
+    if (!VOCAB_TAG.test(tag) || out.includes(tag)) continue
+    out.push(tag)
+    if (out.length >= max) break
+  }
+  return out
 }
 
 /** v0.7.1: a feedback weight, kept in [0.2, 1.0]; a missing field is full trust. */
@@ -561,6 +594,14 @@ export function parseSkillFile(text: string, name: string): ExtractedSkill {
     scene: /^[a-z][a-z0-9-]{1,23}$/u.test(sceneText) ? sceneText : 'general',
     domain: /^[a-z][a-z0-9-]{1,31}$/u.test(domainText) ? domainText : 'general',
     aliases,
+    ...(() => {
+      const tags = asVocab(text.match(/^tags:\s*(.+)$/mu)?.[1] ?? '')
+      return tags.length === 0 ? {} : { tags }
+    })(),
+    ...(() => {
+      const nodeTypes = asVocab(text.match(/^applicable_node_types:\s*(.+)$/mu)?.[1] ?? '')
+      return nodeTypes.length === 0 ? {} : { applicableNodeTypes: nodeTypes }
+    })(),
     confidence,
     evidence,
   }
@@ -741,6 +782,21 @@ function renderSkill(
     ...(workspace.length === 0 ? {} : { workspace }),
     scene: skill.scene,
     ...(skill.aliases.length === 0 ? {} : { aliases: skill.aliases.join(', ') }),
+    /**
+     * GLOBAL KNOWLEDGE BASE — WRITTEN ONLY WHEN THE CALLER NAMED THEM.
+     *
+     * Same rule as `dependencies`: an invented tag would make a local memory look shareable, and
+     * a reader in another workspace would then trust it as a general rule. An omitted field reads
+     * back as "no cross-workspace reach", which is exactly the pre-existing behaviour.
+     */
+    ...(() => {
+      const tags = asVocab((skill as ExtractedSkill).tags)
+      return tags.length === 0 ? {} : { tags: tags.join(', ') }
+    })(),
+    ...(() => {
+      const nodeTypes = asVocab((skill as ExtractedSkill).applicableNodeTypes)
+      return nodeTypes.length === 0 ? {} : { applicable_node_types: nodeTypes.join(', ') }
+    })(),
     confidence: clampConfidence(skill.confidence).toFixed(2),
     evidence: skill.evidence
       .map((ref) => (ref.sourceSessionId.length > 0 ? `${ref.sourceSessionId}@${ref.seq}` : String(ref.seq)))
@@ -1273,6 +1329,9 @@ export interface SkillRecord {
   supersededBy: string
   supersedes: string[]
   evidence: number
+  /** GLOBAL KNOWLEDGE BASE: cross-workspace subject tags, and the phases this skill serves. */
+  tags: string[]
+  applicableNodeTypes: string[]
   path: string
 }
 
@@ -1309,6 +1368,8 @@ export function listSkillRecords(skillsDir: string): SkillRecord[] {
       supersededBy: validity.supersededBy,
       supersedes: validity.supersedes,
       evidence: (field('evidence').split(',').filter((part) => part.trim().length > 0)).length,
+      tags: asVocab(field('tags')),
+      applicableNodeTypes: asVocab(field('applicable_node_types')),
       path,
     })
   }
@@ -1615,6 +1676,14 @@ export function appendNegatives(memoryDir: string, negatives: ExtractedNegative[
         // can be superseded (and stop being retrieved) without being deleted.
         provenance: negative.provenance ?? meta.provenance ?? 'inferred',
         valid_at: meta.validAt ?? meta.at ?? new Date().toISOString(),
+        ...(() => {
+          const tags = asVocab((negative as ExtractedNegative).tags)
+          return tags.length === 0 ? {} : { tags }
+        })(),
+        ...(() => {
+          const nodeTypes = asVocab((negative as ExtractedNegative).applicableNodeTypes)
+          return nodeTypes.length === 0 ? {} : { applicable_node_types: nodeTypes }
+        })(),
         ...(plan.conflicts.length === 0 ? {} : { conflictsWith: plan.conflicts }),
       })
       appended += 1

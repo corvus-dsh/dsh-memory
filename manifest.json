@@ -17,7 +17,18 @@
     "memory_harvest",
     "memory_stats",
     "memory_search",
-    "memory_forget"
+    "memory_forget",
+    "memory_suggestions",
+    "memory_approve",
+    "memory_reject",
+    "memory_migrate_evidence",
+    "skill_read",
+    "memory_graph_read",
+    "memory_graph_update",
+    "knowledge_query",
+    "knowledge_harvest",
+    "knowledge_read",
+    "knowledge_stats"
   ],
   "engines": {
     "dsh": ">=0.2.1-rc.5",
@@ -27,6 +38,9 @@
     "Decoupling contract: reads .retired.json / .transferred.json from the slicing plugin's dataDir. No code import in either direction.",
     "v0.18.0: those ledgers are read as epoch envelopes. A newer writer's epoch, or an envelope with no payload, is REFUSED (reported as ledger.deferred) instead of being half-understood.",
     "Skills are written as structured SKILL.md (frontmatter with when_to_use + 执行步骤 + 验证标准) into the DSH skill directory, so the next generation picks them up with no plugin installed.",
-    "v0.2.0: four-layer extraction (fact/experience/negative/skill) and a stage-2 LLM relevance filter that may only drop candidates."
+    "v0.2.0: four-layer extraction (fact/experience/negative/skill) and a stage-2 LLM relevance filter that may only drop candidates.",
+    "v0.9.1 GLOBAL KNOWLEDGE BASE: ~/.dsh/global-knowledge holds entries carrying tags + applicable_node_types, queryable across workspaces with knowledge_query. An entry with NEITHER axis never travels — a local lesson stays local, and the per-workspace retrieval gate is untouched.",
+    "v0.9.1 DYNAMIC TASK GRAPH: <memoryDir>/task-graph.json. The start node is fixed; the goal node becomes immutable once lock-goal records it (unlock-goal needs a written reason), while paths stay editable. Every accepted edit appends one history entry and writes the reverse anchor into the knowledge base.",
+    "v0.9.1 PHASE NUDGE: when the DAG's active node changes, one [系统提示] line names the phase and how much global knowledge applies. It fires once per node — a banner repeated every turn is a banner nobody reads."
   ]
 }

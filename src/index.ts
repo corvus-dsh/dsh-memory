@@ -24,6 +24,24 @@ import { applySkillArchive, listSkillSummaries, planSkillArchive, DEFAULT_SKILL_
 import { currentWorkspaceOf, memoryAllowsWorkspace, workspaceOfSession } from './workspace.js'
 import { applySupersede, listSkillRecords, quarantineWorkspaceMemory, readSkillBody } from './store.js'
 import { installLedgerExitFlush, startLedgerFlushTimer } from './ledger-cache.js'
+import {
+  defaultKnowledgeDir,
+  normalizeVocabList,
+  queryKnowledge,
+  readKnowledge,
+  renderPhaseHint,
+  writeKnowledge,
+} from './knowledge.js'
+import {
+  GOAL_NODE_ID,
+  START_NODE_ID,
+  describeGraph,
+  harvestingPrompt,
+  markHarvested,
+  readGraph,
+  renderNodeBanner,
+  updateGraph,
+} from './graph.js'
 
 /**
  * v0.32 — THE STORE'S WRITE SURFACE, re-exported for the causal layer's tests and for any consumer that
@@ -234,6 +252,19 @@ export interface MemoryConfig {
    * Default 100 (see `DEFAULT_SKILL_LIMIT`). 0 disables the pass.
    */
   skillLimit?: number
+  /**
+   * GLOBAL KNOWLEDGE BASE — where the cross-workspace store lives.
+   * Default `~/.dsh/global-knowledge`, deliberately outside every profile and workspace.
+   */
+  knowledgeDir?: string
+  /**
+   * PHASE NUDGE — inject the current DAG node's phase banner at `agent/pre-step`. Default true.
+   *
+   * It fires only when a graph exists AND the active node changed since the last banner, so a
+   * session parked on one node is told once instead of every turn. Off exists for a differential
+   * test, not as a tuning knob.
+   */
+  phaseNudge?: boolean
 }
 
 interface ContextLike {
@@ -301,6 +332,13 @@ function resolveConfig(ctx: ContextLike, config: MemoryConfig) {
       Number.isFinite(Number(config.skillLimit)) && Number(config.skillLimit) >= 0
         ? Math.trunc(Number(config.skillLimit))
         : DEFAULT_SKILL_LIMIT,
+    knowledgeDir:
+      typeof config.knowledgeDir === 'string' && config.knowledgeDir.length > 0
+        ? config.knowledgeDir
+        : defaultKnowledgeDir(),
+    // GLOBAL KNOWLEDGE BASE: on by default, same reasoning as `taskAlignment` — a phase banner
+    // that is off by default protects nobody. It fires once per node, not once per turn.
+    phaseNudge: config.phaseNudge !== false,
   }
 }
 
@@ -897,6 +935,26 @@ export function apply(ctx: ContextLike, config: MemoryConfig = {}): void {
   }
 }
 
+/**
+ * The nodes a `knowledge_harvest` call is expected to mark as answered.
+ *
+ * THE ACTIVE NODE IS THE ONE THAT WAS ASKED. A `complete` returns its prompt for the node that just
+ * finished, and that node is usually activated-then-completed; but the model may harvest one step
+ * later, when a DIFFERENT node is active. So the answer marks every node that is `done` without a
+ * `harvestedAt` — the exact set the warning is about — which is also what keeps the reminder honest
+ * across a restart. `markHarvested` is idempotent, so an over-broad list costs nothing.
+ */
+function activeNodeIdsForHarvest(memoryDir: string): string[] {
+  try {
+    const graph = readGraph(memoryDir)
+    return graph.nodes
+      .filter((node) => node.status === 'done' && node.harvestedAt.length === 0 && node.id !== START_NODE_ID)
+      .map((node) => node.id)
+  } catch {
+    return []
+  }
+}
+
 function applyInner(ctx: ContextLike, config: MemoryConfig): void {
   const resolved = resolveConfig(ctx, config)
   /**
@@ -1159,6 +1217,279 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
   })
 
   /**
+   * ── GLOBAL KNOWLEDGE BASE ──────────────────────────────────────────────────────────────────────
+   *
+   * These four tools are the cross-workspace surface. Keep them clearly separate from the workspace
+   * memory tools above: `memory_*` answers "what did THIS project learn", `knowledge_*` answers
+   * "what is known about this SUBJECT and this PHASE, anywhere". Conflating them would either
+   * weaken the workspace gate or make the phase query depend on prompt wording.
+   */
+  ctx.tools?.register({
+    name: 'knowledge_query',
+    description:
+      'Cross-workspace retrieval by vocabulary: find skills and pitfalls whose tags and applicable node types match, regardless of which project produced them. ' +
+      'Use it when entering a DAG phase (pass nodeType) or when the task names a subject you may have solved before. Returns metadata only; read a skill body with knowledge_read.',
+    parameters: {
+      type: 'object',
+      properties: {
+        tags: { type: 'array', items: { type: 'string' }, description: 'Subject tags, e.g. ["python","api","auth"].' },
+        nodeType: { type: 'string', description: 'Phase key, e.g. analysis / coding / testing / refactoring.' },
+        kinds: { type: 'array', items: { type: 'string' }, description: 'Restrict to ["skill"] or ["negative"].' },
+        limit: { type: 'number' },
+      },
+      additionalProperties: false,
+    },
+    output: textOutput(),
+    execute: async (args: { tags?: unknown; nodeType?: string; kinds?: unknown; limit?: number } = {}) => {
+      const result = queryKnowledge(resolved.knowledgeDir, {
+        tags: args.tags,
+        nodeType: args.nodeType,
+        kinds: args.kinds,
+        limit: args.limit,
+      })
+      /**
+       * THE BANNER ONLY WHEN A PHASE WAS NAMED. `renderPhaseHint('', …)` produces "you are entering
+       * [当前]" — a sentence that announces nothing — because an empty phase key makes the label a
+       * placeholder. A tag-only query is a subject search, not a phase entry, so it returns the
+       * hits and no banner.
+       */
+      const nodeType = typeof args.nodeType === 'string' ? args.nodeType.trim() : ''
+      const hint = nodeType.length === 0 ? undefined : renderPhaseHint(nodeType, result)
+      return { ...result, knowledgeDir: resolved.knowledgeDir, ...(hint === undefined ? {} : { hint }) }
+    },
+  })
+
+  ctx.tools?.register({
+    name: 'knowledge_harvest',
+    description:
+      'Write what this phase taught you into the GLOBAL knowledge base: a reusable skill or a pitfall, plus the tags (subject) and applicable node types (phase) that make it reachable from other projects. ' +
+      'Entries with neither tags nor node types are stored but will not travel — that is the honest option for a project-specific lesson.',
+    parameters: {
+      type: 'object',
+      properties: {
+        entries: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: 'string', description: 'Lowercase kebab-case identity; a repeat id merges.' },
+              kind: { type: 'string', enum: ['skill', 'negative'] },
+              title: { type: 'string' },
+              when: { type: 'string', description: 'The trigger: when does this apply.' },
+              body: { type: 'string', description: 'The procedure, or the pitfall in plain text.' },
+              tags: { type: 'array', items: { type: 'string' } },
+              applicable_node_types: { type: 'array', items: { type: 'string' } },
+              evidence: { type: 'array', items: { type: 'string' } },
+            },
+            required: ['id'],
+            additionalProperties: false,
+          },
+        },
+        workspace: { type: 'string', description: 'Provenance only. Defaults to the calling session workspace.' },
+      },
+      required: ['entries'],
+      additionalProperties: false,
+    },
+    output: textOutput(),
+    execute: async (args: { entries?: unknown; workspace?: string } = {}, exec?: { agent?: { id?: string } }) => {
+      const raw = Array.isArray(args.entries) ? args.entries : []
+      if (raw.length === 0) return { error: 'entries is required and must be a non-empty array' }
+      const workspace =
+        typeof args.workspace === 'string' && args.workspace.trim().length > 0
+          ? args.workspace
+          : sessionWorkspaceOf(typeof exec?.agent?.id === 'string' ? exec.agent.id : '') || currentWorkspaceOf(undefined)
+      const result = writeKnowledge(
+        resolved.knowledgeDir,
+        raw.map((item) => {
+          const record = (item ?? {}) as Record<string, unknown>
+          return {
+            id: String(record.id ?? ''),
+            kind: record.kind === 'negative' ? ('negative' as const) : ('skill' as const),
+            title: typeof record.title === 'string' ? record.title : undefined,
+            when: typeof record.when === 'string' ? record.when : undefined,
+            body: typeof record.body === 'string' ? record.body : undefined,
+            tags: record.tags,
+            applicableNodeTypes: record.applicable_node_types ?? record.applicableNodeTypes,
+            evidence: record.evidence,
+          }
+        }),
+        { workspace },
+      )
+      /**
+       * AN ACTUAL WRITE IS WHAT CLEARS THE WARNING.
+       *
+       * A refused entry does not count: `written + merged === 0` means the store learned nothing,
+       * so stamping the node would silence the reminder without answering it. The active node is
+       * stamped, which is the node the warning was about.
+       */
+      const recorded = result.written + result.merged
+      const harvested = recorded === 0 ? [] : markHarvested(resolved.memoryDir, activeNodeIdsForHarvest(resolved.memoryDir))
+      return {
+        ...result,
+        knowledgeDir: resolved.knowledgeDir,
+        workspace,
+        ...(harvested.length === 0 ? {} : { harvestedNodes: harvested }),
+      }
+    },
+  })
+
+  ctx.tools?.register({
+    name: 'knowledge_read',
+    description: 'Read one global knowledge entry in full (body included) by id, after knowledge_query named it.',
+    parameters: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'], additionalProperties: false },
+    output: textOutput(),
+    execute: async (args: { id?: string } = {}) => {
+      const id = String(args.id ?? '').trim().toLowerCase()
+      if (id.length === 0) return { error: 'id is required' }
+      const entry = readKnowledge(resolved.knowledgeDir).find((item) => item.id === id)
+      if (entry === undefined) {
+        return {
+          error: `no knowledge entry "${id}" in ${resolved.knowledgeDir}`,
+          total: readKnowledge(resolved.knowledgeDir).length,
+        }
+      }
+      return entry
+    },
+  })
+
+  ctx.tools?.register({
+    name: 'knowledge_stats',
+    description: 'How large the global knowledge base is, by tag and by node type, and how many entries have ever been referenced by a task node.',
+    parameters: { type: 'object', properties: {}, additionalProperties: false },
+    output: textOutput(),
+    execute: async () => {
+      const entries = readKnowledge(resolved.knowledgeDir)
+      const tags = new Map<string, number>()
+      const nodeTypes = new Map<string, number>()
+      for (const entry of entries) {
+        for (const tag of entry.tags) tags.set(tag, (tags.get(tag) ?? 0) + 1)
+        for (const nodeType of entry.applicableNodeTypes) nodeTypes.set(nodeType, (nodeTypes.get(nodeType) ?? 0) + 1)
+      }
+      const counts = describeGraph(resolved.memoryDir, entries)
+      return {
+        knowledgeDir: resolved.knowledgeDir,
+        memoryDir: resolved.memoryDir,
+        entries: entries.length,
+        skills: entries.filter((entry) => entry.kind === 'skill').length,
+        negatives: entries.filter((entry) => entry.kind === 'negative').length,
+        /** An entry with neither axis can never be reached from another workspace — worth counting. */
+        localOnly: entries.filter((entry) => entry.tags.length === 0 && entry.applicableNodeTypes.length === 0).length,
+        tags: [...tags.entries()].sort((left, right) => right[1] - left[1]).map(([tag, count]) => ({ tag, count })),
+        nodeTypes: [...nodeTypes.entries()].sort((left, right) => right[1] - left[1]).map(([nodeType, count]) => ({ nodeType, count })),
+        graph: counts.counts,
+        /**
+         * THE WRITE HALF'S REPORT LINE.
+         *
+         * `graph.done` counts finished phases; `unharvested` counts the ones that finished WITHOUT
+         * recording anything. A DAG that keeps growing while this number keeps growing is a project
+         * learning nothing, and that is invisible from either number alone.
+         */
+        unharvested: counts.nodes.filter(
+          (node) => node.status === 'done' && node.harvestedAt.length === 0 && node.id !== START_NODE_ID,
+        ).length,
+      }
+    },
+  })
+
+  /**
+   * ── DYNAMIC TASK GRAPH ────────────────────────────────────────────────────────────────────────
+   *
+   * `memory_graph_read` is the read half (the DAG view, plus what each node is anchored to);
+   * `memory_graph_update` is the write half. They are two tools rather than one with a `read` op
+   * because a read must never take the write lock, and because a model that only wants to look at
+   * the graph should not have to construct a mutation.
+   */
+  ctx.tools?.register({
+    name: 'memory_graph_read',
+    description:
+      'Read the dynamic task DAG: the fixed start node, the (optionally locked) goal, every phase node with its node_type / requirements / status, ' +
+      'the resolved knowledge each node points at, and the reverse links. Use it before editing the graph or when asked what phase you are in.',
+    parameters: { type: 'object', properties: { graphId: { type: 'string' } }, additionalProperties: false },
+    output: textOutput(),
+    execute: async (args: { graphId?: string } = {}) => {
+      const id = typeof args.graphId === 'string' && args.graphId.length > 0 ? args.graphId : 'default'
+      const entries = readKnowledge(resolved.knowledgeDir)
+      const described = describeGraph(resolved.memoryDir, entries, id)
+      const active = described.nodes.find((node) => node.status === 'active')
+      return {
+        ...described,
+        graphId: described.graph.id,
+        goalLocked: described.graph.goalLockedAt.length > 0,
+        activeNodeId: active?.id ?? '',
+        activeBanner: renderNodeBanner(active) ?? '',
+        path: join(resolved.memoryDir, 'task-graph.json'),
+      }
+    },
+  })
+
+  ctx.tools?.register({
+    name: 'memory_graph_update',
+    description:
+      'Edit the dynamic task DAG. op: add | update | deprecate | activate | complete | lock-goal | unlock-goal. ' +
+      'The START node is fixed and the GOAL node becomes immutable once locked (unlock-goal needs a reason). ' +
+      'Nodes may carry knowledge_pointers; every accepted edit also records the reverse link in the global knowledge base.',
+    parameters: {
+      type: 'object',
+      properties: {
+        op: { type: 'string', enum: ['add', 'update', 'deprecate', 'activate', 'complete', 'lock-goal', 'unlock-goal'] },
+        nodeId: { type: 'string' },
+        graphId: { type: 'string' },
+        goal: { type: 'string', description: 'For lock-goal: the objective that becomes immutable.' },
+        reason: { type: 'string', description: 'Required for unlock-goal; recorded on every accepted edit.' },
+        node: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            title: { type: 'string' },
+            node_type: { type: 'string' },
+            requirements: { type: 'array', items: { type: 'string' } },
+            status: { type: 'string' },
+            depends_on: { type: 'array', items: { type: 'string' } },
+            knowledge_pointers: { type: 'array', items: { type: 'string' } },
+          },
+          additionalProperties: false,
+        },
+      },
+      required: ['op'],
+      additionalProperties: false,
+    },
+    output: textOutput(),
+    execute: async (args: Record<string, unknown> = {}) => {
+      const node = (args.node ?? {}) as Record<string, unknown>
+      const result = updateGraph(resolved.memoryDir, {
+        graphId: typeof args.graphId === 'string' ? args.graphId : undefined,
+        op: String(args.op ?? 'update') as never,
+        nodeId: typeof args.nodeId === 'string' ? args.nodeId : typeof node.id === 'string' ? node.id : undefined,
+        node: {
+          id: typeof node.id === 'string' ? node.id : undefined,
+          title: typeof node.title === 'string' ? node.title : undefined,
+          nodeType: typeof node.node_type === 'string' ? node.node_type : typeof node.nodeType === 'string' ? node.nodeType : undefined,
+          requirements: node.requirements,
+          status: typeof node.status === 'string' ? node.status : undefined,
+          dependsOn: node.depends_on ?? node.dependsOn,
+          knowledgePointers: node.knowledge_pointers ?? node.knowledgePointers,
+        },
+        goal: typeof args.goal === 'string' ? args.goal : undefined,
+        reason: typeof args.reason === 'string' ? args.reason : undefined,
+        // The reverse anchor is written here, by the tool, so a caller cannot forget it.
+        knowledgeDir: resolved.knowledgeDir,
+      })
+      /**
+       * A refusal is a normal result, not an error: the model must READ why and try again. When the
+       * edit gained pointers, the same call returns what those pointers resolve to, so the model
+       * does not have to make a second query to know what it just anchored.
+       */
+      if (!result.ok) return result
+      const pointers = result.node?.knowledgePointers ?? []
+      const knowledge =
+        pointers.length === 0
+          ? undefined
+          : queryKnowledge(resolved.knowledgeDir, { limit: Math.min(50, pointers.length) })
+      return { ...result, ...(knowledge === undefined ? {} : { knowledge }) }
+    },
+  })
+
+  /**
    * v0.22 P1: PROGRESSIVE DISCLOSURE — read a skill's procedure on demand.
    *
    * The pre-step hint carries only the trigger (`when_to_use`), because that is what
@@ -1296,6 +1627,96 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
   }
 
   const nudgeState = new Map<string, { userKey: string; lastId: string; lastAt: number }>()
+
+  /**
+   * ── PHASE NUDGE: "YOU ARE ENTERING [TESTING]" ─────────────────────────────────────────────────
+   *
+   * WHAT THIS IS: when the DAG's ACTIVE node changes, one sentence names the phase and how much
+   * global knowledge applies to it. It is the read half of the phase loop; the write half is
+   * `knowledge_harvest`, which the model calls when it finishes the node.
+   *
+   * WHAT IT IS NOT: a repeat. The key is `graphId:nodeId`, so a session parked on one node is told
+   * once — a banner printed every turn is a banner the reader learns to skip, which is the same
+   * reason the standing constraints are delivered once per process.
+   *
+   * IT DOES NOT RENDER A PROCEDURE. Only a count and up to three titles. The body is spent when the
+   * model calls `knowledge_read`, which is the progressive-disclosure rule the rest of this plugin
+   * already follows.
+   *
+   * FAILURE IS SILENT BY DESIGN. No graph, no active node, no matching knowledge, or a knowledge
+   * directory that cannot be read all mean "nothing to say" — a phase lookup must never break a
+   * step. The `lastPhaseKey` map is only advanced when a banner was actually produced, so a
+   * temporarily empty knowledge base does not permanently silence the phase.
+   */
+  const lastPhaseKey = new Map<string, string>()
+  /**
+   * The un-harvested reminder, keyed `graphId:nodeId` like the phase banner.
+   *
+   * WHY THIS IS A SECOND CHANNEL AND NOT PART OF THE BANNER. The banner fires when a phase STARTS;
+   * this fires when one finished without a harvest. They are about different nodes at different
+   * moments, and folding them together would make the third repetition of the same `complete`
+   * prompt the only reminder — which is exactly the case where the model ignored it.
+   */
+  const lastHarvestWarn = new Map<string, string>()
+  const harvestWarningFor = (agentId: string): { id: string; role: 'user'; content: Array<{ type: 'text'; text: string }>; source: { kind: string } } | undefined => {
+    if (!resolved.phaseNudge) return undefined
+    try {
+      const graph = readGraph(resolved.memoryDir)
+      const pending = graph.nodes.filter(
+        (node) => node.status === 'done' && node.harvestedAt.length === 0 && node.id !== START_NODE_ID,
+      )
+      if (pending.length === 0) return undefined
+      const key = `${graph.id}:${pending.map((node) => node.id).join(',')}`
+      if (lastHarvestWarn.get(agentId) === key) return undefined
+      lastHarvestWarn.set(agentId, key)
+      const names = pending
+        .slice(0, 3)
+        .map((node) => `${node.id}${node.nodeType.length > 0 ? `（${node.nodeType}）` : ''}`)
+      return {
+        id: `memory-harvest-warn-${agentId || 'session'}-${pending.map((node) => node.id).join('_')}`,
+        role: 'user',
+        content: [
+          {
+            type: 'text',
+            text:
+              `[系统提示] 节点 ${names.join('、')} 已完成，但还没有写入全局知识库。` +
+              '请调用 knowledge_harvest 把本阶段的技能与踩坑点写进去，并标注 tags 与 applicable_node_types。' +
+              '不写，下一个工作区就学不到这次的教训。',
+          },
+        ],
+        source: { kind: 'plugin:dsh-memory' },
+      }
+    } catch {
+      return undefined
+    }
+  }
+
+  const phaseNudgeFor = (agentId: string): { id: string; role: 'user'; content: Array<{ type: 'text'; text: string }>; source: { kind: string } } | undefined => {
+    if (!resolved.phaseNudge) return undefined
+    try {
+      const graph = readGraph(resolved.memoryDir)
+      const active = graph.nodes.find((node) => node.status === 'active' && node.id !== START_NODE_ID)
+      if (active === undefined) return undefined
+      const key = `${graph.id}:${active.id}`
+      if (lastPhaseKey.get(agentId) === key) return undefined
+      // Requirements are the node's own words; using them as tags would query with prose. The
+      // phase is the reliable axis, so the query is by node type only.
+      const result = queryKnowledge(resolved.knowledgeDir, { nodeType: active.nodeType, limit: 5 })
+      const banner = renderPhaseHint(active.nodeType, result)
+      if (banner === undefined) return undefined
+      lastPhaseKey.set(agentId, key)
+      const requirements = active.requirements.length === 0 ? '' : `\n本阶段要求：${active.requirements.slice(0, 3).join('；')}`
+      return {
+        id: `memory-phase-${agentId || 'session'}-${active.id}`,
+        role: 'user',
+        content: [{ type: 'text', text: `${banner}${requirements}` }],
+        source: { kind: 'plugin:dsh-memory' },
+      }
+    } catch {
+      return undefined
+    }
+  }
+
   if (resolved.retrieval) {
     ctx.on?.('agent/pre-step', async (payload: any, next: any) => {
       let decision: any
@@ -1308,8 +1729,30 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
         if (decision === undefined || decision === null) return decision
         if (decision.kind === 'reject') return decision
         const agentId = typeof payload?.agent?.id === 'string' ? payload.agent.id : ''
+        /**
+         * THE PHASE BANNER IS COMPUTED FIRST AND INDEPENDENTLY.
+         *
+         * It must not depend on the lexical hint's gates: the phase is known from the graph, not
+         * from the prompt, and the lexical path can legitimately return nothing (`userText` too
+         * short, no match above the floor). Folding it in after those checks would mean "entering
+         * testing" is announced only when the user's sentence happened to resemble a skill.
+         */
+        const phaseMessage = agentId.length === 0 ? undefined : phaseNudgeFor(agentId)
+        const harvestMessage = agentId.length === 0 ? undefined : harvestWarningFor(agentId)
+        const phaseMessages =
+          phaseMessage === undefined && harvestMessage === undefined
+            ? []
+            : [phaseMessage, harvestMessage].filter(
+                (message): message is { id: string; role: 'user'; content: Array<{ type: 'text'; text: string }>; source: { kind: string } } =>
+                  message !== undefined,
+              )
         const userText = lastUserText(payload?.messages)
-        if (userText === undefined || userText.length < 4) return decision
+        if (userText === undefined || userText.length < 4) {
+          // Even without a retrievable ask, a phase change is still worth one line.
+          if (phaseMessages.length === 0) return decision
+          const base = Array.isArray(decision.messages) ? decision.messages : Array.isArray(payload?.messages) ? payload.messages : []
+          return { ...decision, messages: [...base, ...phaseMessages] }
+        }
         const state = nudgeState.get(agentId) ?? { userKey: '', lastId: '', lastAt: 0 }
         const key = userText.trim().slice(0, 160)
         if (key === state.userKey) return decision
@@ -1369,7 +1812,18 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
         if (taskBlocked > 0) lastTaskBlocks.set(agentId, taskBlocked)
         else lastTaskBlocks.delete(agentId)
         const hint = renderHint(result)
-        if (hint === undefined) return decision
+        /**
+         * "NO LEXICAL HINT" IS NOT "NOTHING TO SAY".
+         *
+         * This used to `return decision`, which silently discarded the phase banner computed above
+         * — the phase is known from the graph, so it must survive an empty lexical result. The
+         * banner is delivered and the lexical path simply contributes nothing.
+         */
+        if (hint === undefined) {
+          if (phaseMessages.length === 0) return decision
+          const base = Array.isArray(decision.messages) ? decision.messages : Array.isArray(payload?.messages) ? payload.messages : []
+          return { ...decision, messages: [...base, ...phaseMessages] }
+        }
         // v0.5 decay bookkeeping: a recalled skill that is actually injected has
         // been used; its decay clock restarts.
         if (result.skill !== undefined) touchSkillUsage(resolved.skillsDir, result.skill.id)
@@ -1438,7 +1892,9 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
               '校验器随后以 "developer/message and developer role must occur together" 终止会话',
           )
         }
-        return { ...decision, messages: [...base, hintMessage] }
+        // The phase banner, when one was produced, precedes the lexical hint: it is context for the
+        // WHOLE turn, while the lexical hint is about the sentence in front of it.
+        return { ...decision, messages: [...base, ...phaseMessages, hintMessage] }
       } catch (error) {
         try {
           ctx.logger?.warn?.(`[dsh-memory] retrieval skipped: ${String((error as any)?.message ?? error)}`)
