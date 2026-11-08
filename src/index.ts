@@ -1107,6 +1107,13 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
           skipped: snapshot.skipped,
           graftDataDir: snapshot.directory.path,
           graftDataDirPresent: snapshot.directory.present,
+          /**
+           * The COUNTS, not just the epoch. "Which directory did you read, and did you see anything"
+           * is the question a misconfigured deployment makes urgent, and answering it from this tool
+           * is what turns a silent empty ledger into one line a reader can check.
+           */
+          retired: snapshot.retired.length,
+          transferred: Object.keys(snapshot.transferred).length,
           ...(snapshot.layoutRefusal === undefined ? {} : { layoutRefusal: snapshot.layoutRefusal }),
         }
       })(),
