@@ -33,8 +33,8 @@ import {
   readLayoutManifest,
   writeLayoutManifest,
 } from '../lib/layout.js'
-import { describeLedgerSkips, readLedgers } from '../lib/ledger.js'
-import { apply } from '../lib/index.js'
+import { describeLedgerSkips, describeMissingLedgerDir, readLedgers } from '../lib/ledger.js'
+import { apply, harvest } from '../lib/index.js'
 
 /** ── THE CONTRACT, AS LITERALS. Copied verbatim into graft's test; divergence is the alarm. ── */
 
@@ -199,4 +199,71 @@ test('P1-2 REGRESSION: a legacy directory with no manifest reads exactly as befo
   const snapshot = readLedgers(dir)
   assert.deepEqual(snapshot.retired, ['session-a', 'session-b'])
   assert.equal(snapshot.deferred, false)
+})
+
+/* ── THE LIVE FINDING: AN ABSENT DIRECTORY IS NOT AN EMPTY HISTORY ─────────────────────────────
+ *
+ * Measured on the running host (2026-11-08): this reader looked in `<data>/../dsh-graft-slice`, the
+ * slicing plugin's store had resolved to its own package directory, and the snapshot said
+ * `retired: []` — identical to "nothing was ever retired", with no complaint anywhere. Retirement
+ * mining simply never ran.
+ *
+ * "I cannot see the directory" and "there is nothing in it" have different next actions, so they must
+ * not produce the same sentence. These tests pin the distinction, and pin that it does NOT become a
+ * deferral: nothing in a directory that is not there can be misread, so no gate may change.
+ */
+
+test('P1-4 LIVE: an ABSENT ledger directory is reported as such, not as "no retired sessions"', () => {
+  const absent = join(temp('dsh-memory-layout-absent-'), 'dsh-graft-slice')
+  const snapshot = readLedgers(absent)
+  assert.deepEqual(snapshot.retired, [])
+  assert.equal(snapshot.directory.present, false, 'the snapshot must say the directory was not there')
+  assert.equal(snapshot.directory.path, absent, 'and name where it looked')
+  assert.equal(snapshot.deferred, false, 'an absent directory is not untrustworthy — there is nothing to misread')
+  const line = describeMissingLedgerDir(snapshot)
+  assert.match(line, /not found/u)
+  assert.match(line, /dsh-graft-slice/u)
+  assert.ok(line.includes(absent), 'the sentence carries the path an operator needs')
+  assert.match(line, /never "nothing was retired"/u, 'and refuses the conclusion it cannot support')
+})
+
+test('P1-4 LIVE: a directory that EXISTS and is merely empty stays quiet (no false alarm)', () => {
+  const empty = temp('dsh-memory-layout-empty-')
+  const snapshot = readLedgers(empty)
+  assert.equal(snapshot.directory.present, true)
+  assert.deepEqual(snapshot.retired, [])
+  assert.equal(describeMissingLedgerDir(snapshot), '', 'an empty store is a normal first run, not a fault')
+})
+
+test('P1-4 LIVE: harvest says the ledger directory is missing instead of mining nothing quietly', async () => {
+  const missing = join(temp('dsh-memory-layout-harvest-absent-'), 'dsh-graft-slice')
+  const memoryDir = temp('dsh-memory-layout-harvest-store-')
+  const ctx = {
+    get: () => undefined,
+    logger: { info: () => {}, warn: () => {} },
+    sessionQuery: { readSession: async () => ({ events: [] }) },
+  }
+  const report = await harvest(ctx, { memoryDir, skillsDir: join(memoryDir, 'skills'), graftDataDir: missing, extractor: 'off' })
+  assert.equal(report.scanned, 0)
+  assert.ok(
+    report.warnings.some((warning) => warning.includes('handoff ledger directory not found')),
+    `the report must name the missing directory: ${JSON.stringify(report.warnings)}`,
+  )
+  assert.ok(report.warnings.some((warning) => warning.includes(missing)), 'and carry the path it looked in')
+})
+
+test('P1-4 LIVE: a present, empty ledger directory adds NO such warning', async () => {
+  const empty = temp('dsh-memory-layout-harvest-empty-')
+  const memoryDir = temp('dsh-memory-layout-harvest-store2-')
+  const ctx = {
+    get: () => undefined,
+    logger: { info: () => {}, warn: () => {} },
+    sessionQuery: { readSession: async () => ({ events: [] }) },
+  }
+  const report = await harvest(ctx, { memoryDir, skillsDir: join(memoryDir, 'skills'), graftDataDir: empty, extractor: 'off' })
+  assert.equal(
+    report.warnings.some((warning) => warning.includes('handoff ledger directory not found')),
+    false,
+    'a first run in an empty store must not read as a deployment fault',
+  )
 })

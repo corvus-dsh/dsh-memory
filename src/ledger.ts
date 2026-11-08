@@ -29,7 +29,7 @@
  * are transient from this side, and neither of which is a reason to guess.
  */
 
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { GRAFT_LEDGER_LAYOUT_VERSION, assertLayoutSupported } from './layout.js'
@@ -62,6 +62,25 @@ export interface LedgerSnapshot {
   transferred: Record<string, TransferredRecord>
   /** v0.18: the epoch each file was written with (0 absent, 1 legacy, 2+ envelope). */
   epoch: { retired: number; transferred: number }
+  /**
+   * P1-4 (2026-11-08, found on a LIVE profile): WHERE this reader looked, and whether that directory
+   * is even there.
+   *
+   * ── WHY AN ABSENT DIRECTORY IS NOT "NO LEDGER" ────────────────────────────────────────────────
+   *
+   * Measured on the running host: this plugin reads `<data>/../dsh-graft-slice`, while the slicing
+   * plugin's store resolved to ITS OWN package directory. The directory this reader opened did not
+   * exist, every file read returned "absent", and the snapshot said `retired: []` with `deferred:
+   * false` — indistinguishable from "no session has ever been retired". The consequence is silent:
+   * retirement mining simply never runs, and "0 retired" looks like a fact rather than a
+   * misconfiguration.
+   *
+   * The ecosystem already states the rule this violated — `readable:false` with a reason, never "not
+   * there" — so the location and its existence are part of the snapshot now. It is REPORTED, not
+   * escalated: a missing directory does not make the read untrustworthy (there is nothing to be
+   * wrong about), so `deferred` stays false and no gate changes.
+   */
+  directory: { path: string; present: boolean }
   /** v0.18: files that must not be trusted this round. */
   skipped: LedgerSkip[]
   /** True when at least one file was refused, i.e. a retry is owed. */
@@ -133,11 +152,18 @@ export function readLedgers(dataDir: string): LedgerSnapshot {
       retired: [],
       transferred: {},
       epoch: { retired: 0, transferred: 0 },
+      directory: { path: dataDir, present: true },
       skipped: [layoutSkip],
       deferred: true,
       layoutRefusal: detail,
     }
   }
+
+  /**
+   * Whether the directory EXISTS is recorded for the report — see `LedgerSnapshot.directory`. A
+   * refusal above implies it exists (a manifest was read from it).
+   */
+  const directory = { path: dataDir, present: existsSync(dataDir) }
 
   const retiredPath = join(dataDir, '.retired.json')
   const transferredPath = join(dataDir, '.transferred.json')
@@ -175,9 +201,25 @@ export function readLedgers(dataDir: string): LedgerSnapshot {
     retired: [...new Set(retired)],
     transferred,
     epoch: { retired: retiredRead.epoch, transferred: transferredRead.epoch },
+    directory,
     skipped,
     deferred: skipped.length > 0,
   }
+}
+
+/**
+ * One line naming a directory this reader could not find, for the log and for a tool result.
+ *
+ * THE SENTENCE MATTERS: "0 retired" and "the other plugin is not where I looked" produce the same
+ * empty snapshot and completely different next actions. Returns `''` when the directory exists.
+ */
+export function describeMissingLedgerDir(snapshot: LedgerSnapshot): string {
+  if (snapshot.directory.present) return ''
+  return (
+    `handoff ledger directory not found: ${snapshot.directory.path} — ` +
+    'dsh-graft-slice stores its ledger elsewhere in this deployment, so an empty result here means ' +
+    '"not visible", never "nothing was retired"'
+  )
 }
 
 /** One line per refused file, for the log and for a tool result. */
