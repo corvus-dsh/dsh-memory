@@ -132,6 +132,35 @@ function asStringList(value: unknown, max = 12): string[] {
 /** Node ids are kebab-case, same grammar as everything else that travels between files. */
 const NODE_ID = /^[a-z0-9][a-z0-9._-]{0,47}$/u
 
+/**
+ * P1-5 (audit 2026-11-08) — `harvestedAt` IS A TIMESTAMP, AND AN UNPARSEABLE ONE MUST NOT COUNT.
+ *
+ * WHY THIS IS NOT PEDANTRY. `harvestedAt` answers exactly one question — "did this finished phase
+ * record what it learned?" — and the pre-step reminder, the `complete` receipt and the `unharvested`
+ * statistic all read it as a BOOLEAN (non-empty means "answered"). The file is a plain JSON document
+ * an external writer, a hand edit, or a half-finished migration can touch. Before this check any
+ * non-empty string counted, so `harvestedAt: "yes"` — or a stale `"pending"` — would silently silence
+ * the reminder FOREVER for that node, and nothing would report it.
+ *
+ * THE DIRECTION OF THE FAILURE MATTERS. Treating a bad value as `''` means "not harvested yet", so
+ * the worst outcome is ONE reminder too many rather than a phase whose lesson is silently lost. That
+ * is the same asymmetry the rest of this store uses for unreadable ledgers (fail toward asking again).
+ *
+ * The accepted form is a full ISO-8601 instant, which is what `new Date().toISOString()` produces —
+ * the only thing this plugin ever writes. A date without a time (`2026-11-08`) is refused on purpose:
+ * it parses, but it cannot order two harvests that happened the same day, and every consumer here
+ * compares instants.
+ */
+function asHarvestedAt(value: unknown): string {
+  if (typeof value !== 'string') return ''
+  const text = value.trim()
+  if (text.length === 0) return ''
+  // Accept only the canonical instant shape this plugin writes, then confirm it is a real date.
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/u.test(text)) return ''
+  const parsed = Date.parse(text)
+  return Number.isFinite(parsed) ? text : ''
+}
+
 function asNodeId(value: unknown): string {
   const text = typeof value === 'string' ? value.trim().toLowerCase() : ''
   return NODE_ID.test(text) ? text : ''
@@ -157,7 +186,11 @@ function asNode(raw: unknown, at: string): GraphNode | undefined {
       .map((item) => item.toLowerCase())
       .filter((item) => NODE_ID.test(item)),
     fixed: record.fixed === true || id === START_NODE_ID || id === GOAL_NODE_ID,
-    harvestedAt: typeof record.harvestedAt === 'string' ? record.harvestedAt : '',
+    /**
+     * A hand-edited or externally-written graph may carry a tag that is not a timestamp. It reads
+     * back as "not harvested" so the reminder still fires — see `asHarvestedAt`.
+     */
+    harvestedAt: asHarvestedAt(record.harvestedAt),
     createdAt: typeof record.createdAt === 'string' ? record.createdAt : at,
     updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : at,
   }

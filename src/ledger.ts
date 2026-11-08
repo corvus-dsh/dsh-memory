@@ -32,6 +32,8 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
+import { GRAFT_LEDGER_LAYOUT_VERSION, assertLayoutSupported } from './layout.js'
+
 /** The newest ledger epoch this reader understands. */
 export const SUPPORTED_LEDGER_EPOCH = 2
 
@@ -44,7 +46,13 @@ export interface LedgerSkip {
   file: string
   /** 0 when the file could not be parsed at all, 1 for a legacy payload. */
   epoch: number
-  reason: 'torn' | 'future-epoch'
+  /**
+   * `layout-unsupported` (P1-2) is decided BEFORE any file is opened: the directory's `.layout.json`
+   * declares a layout this build does not speak, so nothing in it may be read. It is a skip rather
+   * than a throw for the same reason `future-epoch` is: the writer may simply be newer than this
+   * reader, and a retry after an upgrade is the correct outcome — but NOT a silent empty history.
+   */
+  reason: 'torn' | 'future-epoch' | 'layout-unsupported'
 }
 
 export interface LedgerSnapshot {
@@ -58,6 +66,11 @@ export interface LedgerSnapshot {
   skipped: LedgerSkip[]
   /** True when at least one file was refused, i.e. a retry is owed. */
   deferred: boolean
+  /**
+   * P1-2: set when `.layout.json` refused the whole directory, carrying the `LAYOUT_UNSUPPORTED`
+   * message verbatim so the log names both the layout found and the layout understood.
+   */
+  layoutRefusal?: string
 }
 
 interface LedgerRead {
@@ -95,6 +108,37 @@ function readLedger(path: string): LedgerRead {
 }
 
 export function readLedgers(dataDir: string): LedgerSnapshot {
+  /**
+   * P1-2: THE LAYOUT GATE RUNS BEFORE ANY FILE IS OPENED.
+   *
+   * A renamed ledger reads as `{ epoch: 0 }` — indistinguishable from "no ledger yet" — so a writer
+   * that reorganised its directory used to make this side see an empty history and say nothing. The
+   * directory's own `.layout.json` is the only thing that can tell the two apart, so it is checked
+   * first, and a refusal produces NO entries rather than partial ones: half a ledger is worse than
+   * none of it, because a harvest would attribute work to a history it only half saw.
+   *
+   * `assertLayoutSupported` THROWS `LayoutUnsupportedError` (code `LAYOUT_UNSUPPORTED`). That throw is
+   * caught here and converted into this module's existing refuse-and-retry channel, deliberately: a
+   * throw escaping onto the activation path would turn "the other plugin is a version ahead" into a
+   * plugin that cannot load at all. The named error is what makes the condition greppable; the skip
+   * is what makes the outcome survivable.
+   */
+  let layoutSkip: LedgerSkip | undefined
+  try {
+    assertLayoutSupported(dataDir, { version: GRAFT_LEDGER_LAYOUT_VERSION, producer: 'dsh-graft-slice' })
+  } catch (error) {
+    const detail = String((error as any)?.message ?? error)
+    layoutSkip = { file: '.layout.json', epoch: 0, reason: 'layout-unsupported' }
+    return {
+      retired: [],
+      transferred: {},
+      epoch: { retired: 0, transferred: 0 },
+      skipped: [layoutSkip],
+      deferred: true,
+      layoutRefusal: detail,
+    }
+  }
+
   const retiredPath = join(dataDir, '.retired.json')
   const transferredPath = join(dataDir, '.transferred.json')
   const retiredRead = readLedger(retiredPath)
@@ -138,6 +182,7 @@ export function readLedgers(dataDir: string): LedgerSnapshot {
 
 /** One line per refused file, for the log and for a tool result. */
 export function describeLedgerSkips(snapshot: LedgerSnapshot): string {
+  if (snapshot.layoutRefusal !== undefined) return snapshot.layoutRefusal
   return snapshot.skipped
     .map((skip) => {
       if (skip.reason === 'future-epoch') {

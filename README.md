@@ -140,6 +140,19 @@ dsh --profile <name> --dump-config      # 应出现 dsh-memory 行
 | `semanticFilter` | 是否启用 LLM 精准裁决（默认 `true`；关掉则退化为严格词法检索） |
 | `filterProvider` / `filterModel` | 过滤调用使用的模型路由；默认取宿主当前默认选择（`agentDefaultModel.currentSelection()`） |
 
+## v0.22.0：跨仓布局契约 —— 读不懂就拒读，而不是读到空
+
+- **`.layout.json`（P1-2）**：本插件在 `<memoryDir>` 写入 `{layout, producer, files}`，声明这个目录里
+  `dsh-graft-slice` 会读的四个文件（`negatives.jsonl` / `facts.jsonl` / `experiences.jsonl` / `suggestions.jsonl`）。
+  反向：读取 graft 的 `.retired.json` / `.transferred.json` **之前**先校验它的 `.layout.json`。
+- **为什么已经有 epoch 还需要它**：epoch 只管文件**内容**格式。文件被改名时，读取端拿到的是"没有台账"——
+  与"还没退休过任何会话"完全同形，于是静默读到一份空历史。布局标记把这种沉默变成具名拒绝。
+- **拒读而不是猜**：`layout` 不等于本版本 → `LAYOUT_UNSUPPORTED`。reader 侧把抛出的具名错误转成现有的
+  `skipped` / `deferred` 通道（新增 `ledger.layoutRefusal`），所以"对方版本更新"不会让插件无法加载，
+  但也绝不会被当成"没有历史"。**缺失标记 = 旧目录，继续读**——否则升级即破坏所有存量安装。
+- **它能看出什么、看不出什么**：两个插件若在看**不同目录**，读取端找不到标记、按缺失处理；这属于部署检查，
+  不是版本检查，所以这里不猜。
+
 ## v0.21.0：LLM 静默降级告警、技能归档、负知识时效
 
 三件事，都关于**长期运行**：记忆库在几周尺度上会遇到的三种失效。
