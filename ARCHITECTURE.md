@@ -5,6 +5,17 @@
 
 ## 登记项
 
+### TD-M13 两套锁的实现差异与「等待策略」规则（2026-11-09 记录，已对齐）
+
+| 项 | 内容 |
+|---|---|
+| 现状 | 生态里有两套**互相独立、无共享依赖**的文件锁：<br>**memory**（`src/lock.ts`）：`dsh-paradise` 的**租约**（`createSyncLeaseAdapter`），8 个调用点，记录写在 `<file>.lock` 本身。<br>**graft**（`dsh-graft-slice/src/core/txn.ts`）：自己的 **`mkdir` 锁 + owner token**，12 个调用点，锁是一个目录。 |
+| 实测差异（2026-11-09） | 等待策略**相反**。graft 用 `Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)`（真睡眠）；memory 当时用 `while (Date.now() < until) {}`（忙等）。<br>`process.cpuUsage()` 实测，等 50 ms：**graft 0.0 ms CPU / memory 62.0 ms CPU = 单核 97.1%**。 |
+| 后果（为什么不是小事） | 忙等的等待者占满一个核，与**持有者**抢 CPU。跨进程基准里观测到「空临界区却 `hold p95 = 2004 ms`」，那不是持锁 2 秒，是饥饿。**自旋在制造它看起来正在承受的争用。** |
+| 已做 | memory 的 `sleepSync` 已对齐 graft 的实现（同一形状：`Int32Array` + `Atomics.wait`，保留 `catch` 里的自旋回退以应对无 Atomics 的运行时）。**签名未变，52 处同步调用与 8 个调用点均未改动。** 实测 CPU 97.1% → **0.0%**。 |
+| **规则（今后一律适用）** | **新增任何锁，等待策略一律用 `Atomics.wait`，不得自旋。** 同步签名与「不占 CPU」并不冲突——`Atomics.wait` 在主线程可用且是同步阻塞，这正是本仓需要的原语。 |
+| 防漂移 | 两处实现无共享依赖，**没有任何代码会因一方改动而报错**。所以 `test/v096-lock-sleep-parity.test.mjs` 直接读两个源文件：断言两边都含 `Atomics.wait`、都没有裸 `while (Date.now()`，且两边策略一致。另 `test/v096-lock-sleep-cpu.test.mjs` 用 `process.cpuUsage()` 断言等待期间 CPU 增量近零（**该测试在旧自旋实现下实测 exit 1、cpu/wall 96.7%，换成 Atomics 后 exit 0**）。 |
+
 ### TD-M1 归档 pass 的「合并」只报告不执行（P2，非阻塞）
 
 | 项 | 内容 |

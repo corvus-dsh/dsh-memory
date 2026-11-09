@@ -73,10 +73,45 @@ function nextHolderIdentity(): string {
   return `pid:${process.pid}:${acquisitionCounter}:${Math.random().toString(36).slice(2, 8)}`
 }
 
+/**
+ * Block the current thread without burning a core (Atomics.wait is a real sleep).
+ *
+ * ── WHY THIS IS NO LONGER A BUSY-WAIT (measured 2026-11-09) ─────────────────────────────────────
+ *
+ * It used to be `while (Date.now() < until) {}`. The comment beside it said the critical sections are
+ * "single file replacements", which is true and is also why the spin looked harmless — each wait was
+ * expected to be microseconds.
+ *
+ * It is not harmless once anyone else holds the lock. Measured with `process.cpuUsage()` across a
+ * 50 ms wait (`dsh-paradise/scripts/bench-lock-spin.mjs`):
+ *
+ *     memory (spin)           wall 61.6 ms   cpu 62.0 ms   97.1% of a core
+ *     graft  (Atomics.wait)   wall 61.6 ms   cpu  0.0 ms    0.0%
+ *
+ * So a waiter burned a whole core doing nothing. When several sessions contend, the waiters compete
+ * for CPU with the holder — which is why the cross-process benchmark observed `hold p95 = 2004 ms`
+ * inside an EMPTY critical section. That was not a slow critical section; it was starvation created
+ * by this function.
+ *
+ * ── SAME IMPLEMENTATION AS dsh-graft-slice, ON PURPOSE ──────────────────────────────────────────
+ *
+ * This body is `dsh-graft-slice/src/core/txn.ts:94-105` — same `Int32Array(new SharedArrayBuffer(4))`,
+ * same `Atomics.wait`, same fallback. The two MUST be kept identical: they are separate locks with no
+ * shared dependency, so nothing but a test can notice if one drifts back to spinning.
+ * `test/lock-sleep-parity.test.mjs` asserts both.
+ *
+ * `Atomics.wait` on the MAIN THREAD is legal and is exactly the primitive this store needs: it blocks
+ * synchronously (so every `withFileLock` caller keeps its signature) and releases the CPU.
+ */
 function sleepSync(ms: number): void {
-  const until = Date.now() + ms
-  while (Date.now() < until) {
-    // Busy-wait: the lock critical sections here are single file replacements.
+  try {
+    const waitArray = new Int32Array(new SharedArrayBuffer(4))
+    Atomics.wait(waitArray, 0, 0, ms)
+  } catch {
+    const end = Date.now() + ms
+    while (Date.now() < end) {
+      // Atomics unavailable (exotic runtime): the deadline loop still yields the CPU.
+    }
   }
 }
 
