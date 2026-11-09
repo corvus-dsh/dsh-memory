@@ -62,7 +62,7 @@ function waitOnHeldLock(lockPath, waitFor) {
   }
 }
 
-test('v0.9.6: waiting on a held lock consumes < 10% of wall time in CPU', () => {
+test('v0.9.6: waiting on a held lock does not burn CPU for the DURATION of the wait', () => {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-spin-'))
   const lockPath = join(dir, 'contended.json.lock')
   try {
@@ -70,43 +70,46 @@ test('v0.9.6: waiting on a held lock consumes < 10% of wall time in CPU', () => 
     waitOnHeldLock(lockPath, 30)
 
     /**
-     * ── WHY THE CATEGORICAL CHECK, AND WHY THE RATIO ALONE WAS FLAKY ────────────────────────────
+     * ── WHY THE PER-SAMPLE THRESHOLD WAS WRONG (measured, three revisions) ──────────────────────
      *
-     * `process.cpuUsage()` is CLOCK-TICK GRANULAR: on Windows the whole test suite run reported
-     * `cpu = 16.0 ms` for a wait that burned nothing — the sampling unit, not the work. With a
-     * ~70 ms wait that tick alone is 18.6%, which fails a 10% threshold on perfectly correct code.
-     * Measured: standalone the ratio is 0.0%; inside the full suite (other tests' CPU already
-     * accounted) the same code reports 18.6%. **The threshold was measuring the clock's resolution.**
+     * REVISION 1 — `cpu/wall < 10%` on one sample. Failed inside the full suite at 18.6%.
+     * REVISION 2 — median of 5 samples < 10% plus "3 of 5 under 1 ms". Failed **1 run in 5 on this
+     *   machine** (`got 2/5`, with samples `cpu=0.0 | 31.0 | 47.0 | …`). CI failed on BOTH Node
+     *   versions while Windows reported 423/423 green.
      *
-     * The property that actually separates the two implementations is not "how many ticks" but
-     * "does the CPU move at all, monotonically, every time":
+     * The cause is not the lock, it is the INSTRUMENT: `process.cpuUsage()` is accounted per thread
+     * (V8, GC, the libuv pool) with a coarse tick, so a 70 ms window can accrue 30–47 ms of CPU that
+     * this call never spent — a GC that happened to run, or tick attribution from a neighbouring
+     * sample. A SHORT window cannot distinguish "slept" from "a tick landed".
      *
-     *     busy-wait  →  ~62 ms CPU per 50 ms wait, EVERY sample   (~97%)
-     *     Atomics    →  0 ms, or occasionally one 16 ms tick      (≤ 19% at 70 ms, usually 0%)
+     * So the measurement window is made long enough that a real spin cannot be hidden, and the
+     * assertion is on the AGGREGATE, which is what the property actually is:
      *
-     * So the assertion is: a MAJORITY of samples burn less than one tick of CPU, and the MEDIAN
-     * ratio stays under 10%. A reintroduced spin fails both immediately — it scores ~97% on every
-     * single sample, which no amount of tick noise can produce.
+     *     spin    : ~62 ms of CPU per 50 ms waited  → ~1.24 ms CPU per ms waited
+     *     sleep   : ~0 ms                            → ~0.00 ms CPU per ms waited
+     *
+     * Over a 1-second window the sleeping implementation scores under 0.1 and the spinning one scores
+     * ~1.2 — an order of magnitude apart, and no neighbouring tick can move it across.
      */
-    const samples = []
-    for (let i = 0; i < 5; i += 1) samples.push(waitOnHeldLock(lockPath, 70))
-
-    const ratios = samples.map((sample) => sample.cpu / sample.wall).sort((a, b) => a - b)
-    const medianRatio = ratios[Math.floor(ratios.length / 2)]
-    const quiet = samples.filter((sample) => sample.cpu < 1).length
+    const WAIT_MS = 1000
+    const samples = [waitOnHeldLock(lockPath, WAIT_MS), waitOnHeldLock(lockPath, WAIT_MS)]
+    const totalWall = samples.reduce((sum, sample) => sum + sample.wall, 0)
+    const totalCpu = samples.reduce((sum, sample) => sum + sample.cpu, 0)
+    // CPU milliseconds consumed per wall millisecond spent waiting.
+    const cpuPerWall = totalCpu / totalWall
     const detail = samples
-      .map((sample) => `wall=${sample.wall.toFixed(1)}ms cpu=${sample.cpu.toFixed(1)}ms`)
+      .map((sample) => `wall=${sample.wall.toFixed(0)}ms cpu=${sample.cpu.toFixed(0)}ms`)
       .join(' | ')
 
     assert.ok(
-      quiet >= 3,
-      `at least 3 of 5 waits must burn under 1 ms of CPU (got ${quiet}/5) [${detail}]\n` +
-        'The busy-wait implementation burned ~62 ms on EVERY wait; it cannot pass this.',
+      cpuPerWall < 0.35,
+      `waiting must not burn the core it waits on: ${cpuPerWall.toFixed(2)} ms CPU per ms wall ` +
+        `(want < 0.35) [${detail}]\n` +
+        'The removed busy-wait scored ~1.24 here (62 ms CPU per 50 ms waited) and cannot pass; ' +
+        'a genuine sleep scores ~0.00.',
     )
-    assert.ok(
-      medianRatio < 0.1,
-      `median cpu/wall must stay under 10% (got ${(medianRatio * 100).toFixed(1)}%) [${detail}]`,
-    )
+    // And it must really have waited — a fast return would also burn nothing.
+    assert.ok(totalWall >= WAIT_MS * 2 * 0.9, `both waits must last ~${WAIT_MS}ms (got ${totalWall.toFixed(0)}ms total)`)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
