@@ -61,6 +61,18 @@
 | 影响 | 「当时报错上下文与当前不符」这一条目前用**年龄 + 未复发**代理，没有真正比对上下文 |
 | 为什么现在不动 | 真正比对上下文需要把当前任务词与负知识的 `symptom/cause` 做语义比较，属于 TD-M2 的同一类成本 || 退出条件 | 复用 task-alignment 的 `taskTerms`：当负知识的领域词与当前任务零交集时，额外降权并在前缀里写明「领域不符」；需一条「同领域旧负知识不降权」的对照测试 |
 
+### TD-M12 任务图从未被创建过：三个工具齐全、`phaseNudge` 默认开，整条链空转（P1，2026-11-09 登记）
+
+| 项 | 内容 |
+|---|---|
+| 现状 | `memory_graph_read` / `memory_graph_update` / `phaseNudgeFor` 三个都在，`phaseNudge` 默认 **开启**（`src/index.ts:368`：`config.phaseNudge !== false`）。但 `dsh-memory/.dsh-memory/task-graph.json` **不存在**。 |
+| 实测 | `readGraph`（`src/graph.ts:261`）对缺失文件返回 `emptyGraph`，**不抛错**；`phaseNudgeFor`（`src/index.ts:1765`）走 `readGraph` → `nodes.find(status === 'active' && id !== START)` → 空图无 active → `return undefined`。**每一次都 undefined。** |
+| 后果 | 「按节点类型拉知识库」整条链**空转**——用户设计的核心依赖（跨切片按 phase 取对应知识）从未生效过。`memory_graph_update` 是**模型主动调用**的工具，但没有任何一段文本告诉模型「多步任务要先建图」。**功能做完了，没接上电。** |
+| 为什么不自动建图 | 自动建图会丢失**「谁建的图」的可追溯性**——「这个节点是谁决定它是 phase 2 的」正是任务图存在的全部理由。代价是：模型不调就永远不建。这个代价是**刻意的**，不是疏漏。 |
+| 本轮已做（最小接线） | `memory_stats` 的返回值新增 `taskGraph: { present, path, nodes, phaseNodes, hint? }`；`present === false` 时追加一行 `[提示] 尚无任务图。多步任务建议先调用 memory_graph_update 创建阶段节点…`。**只改文本输出，不改任何工具行为，不自动建图，不碰 `phaseNudgeFor` 与 `graph.ts`。** |
+| 测试 | `test/v093-td12-graph-hint.test.mjs`（3 条）：无图 ⇒ 有 `hint` 且含工具名；有图 ⇒ 无 `hint` 且计数正确；**读 `memory_stats` 不得在磁盘上创建图**。 |
+| 退出条件（可验收） | 至少一条路径能创建 `start` 之外的第一个节点，并且**该节点带有可追溯的作者**（模型主动调用，或用户在面板上明确确认）。仅靠提示语不算达成。 |
+
 ### TD-M4 控制台与工具两条路径共享实现，但状态读取有重复（P3）
 
 | 项 | 内容 |
@@ -76,6 +88,7 @@
 - 不实现技能合并的落盘（TD-M1）。
 - 不给激活路径加任何 LLM 调用（TD-M2）。
 - 不改负知识时效的判据（TD-M7）。
+- **不自动建任务图（TD-M12）**：本轮只加 `memory_stats` 里的一行提示，`phaseNudgeFor` 的判定与 `graph.ts` 一律不动。
 - 不搬迁 `index.ts` / `retrieve.ts` 的大段代码，也不新建 `thresholds.ts`（TD-M6 只登记）。
 
 TD-M5 是**已修复的 P0**，登记在此是为了留住根因：一个常量放错层，被 ESM 循环导入掩盖成运行时未定义，而唯一的守卫在 catch 块内部。修复已由 `test/v022-progressive-disclosure.test.mjs` 的「超时后必须降级」一条锁定。
