@@ -1,0 +1,11 @@
+我来接着处理交接单的第一项：**接口已改名（`createAdapters` 别名已加），但解析点可能未同步**。先核实当前实际状态，再决定是补齐还是回滚。
+
+<｜DSML｜ calls>
+<｜DSML｜ invoke name="pwsh">
+<｜DSML｜ parameter name="command" string="true">cd 'D:\持久层能力架构'; Get-ChildItem -Name | Select-Object -First 40</｜DSML｜ parameter>
+<｜DSML｜ parameter name="description" string="true">列出工作区顶层目录</｜DSML｜ parameter>
+</｜DSML｜ invoke>
+<｜DSML｜ invoke name="read">
+<｜DSML｜ parameter name="path" string="true">D:\持久层能力架构\dsh-graft-slice\src\core\paradise-write.ts</｜DSML｜ parameter>
+</｜DSML｜ invoke>
+</｜DSML｜ calls>

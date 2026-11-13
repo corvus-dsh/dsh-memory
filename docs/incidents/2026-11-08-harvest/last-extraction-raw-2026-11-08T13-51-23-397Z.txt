@@ -1,0 +1,12 @@
+I'll verify the state after that last edit — build paradise and run graft's tests to see if the `SEEDED_HEADER` failure is resolved.
+
+<｜DSML｜ calls>
+<｜DSML｜ invoke name="pwsh">
+<｜DSML｜ parameter name="command" string="true">cd D:\持久层能力架构\dsh-paradise; npx tsc --noEmit -p tsconfig.json 2>&1 | Select-Object -First 40</｜DSML｜ parameter>
+<｜DSML｜ parameter name="description" string="true">Typecheck paradise after session-writer edit</｜DSML｜ parameter>
+</｜DSML｜ invoke>
+<｜DSML｜ invoke name="pwsh">
+<｜DSML｜ parameter name="command" string="true">cd D:\持久层能力架构\dsh-paradise; git status --short 2>&1 | Select-Object -First 20</｜DSML｜ parameter>
+<｜DSML｜ parameter name="description" string="true">Check paradise working tree state</｜DSML｜ parameter>
+</｜DSML｜ invoke>
+</｜DSML｜ calls>
