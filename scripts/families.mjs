@@ -33,17 +33,25 @@ const REPO = fileURLToPath(new URL('..', import.meta.url)).replace(/[\\/]+$/u, '
  * observer 的对应根是 `apply`（1,651 行，99% 的体积都在它体内）。
  */
 /**
- * ── 源文件参数化（`--src`）──────────────────────────────────────────────────────────────────────
+ * ── 参数解析必须**与顺序无关**，否则会产出"这个文件没有族"的假结论 ──────────────────────────────
  *
- * 这个仓有两个"根"要量：`index.ts` 的 `applyInner`（1,362 行）和 `store.ts` 的 `appendLayer` 一带
- * （`store.ts` 是最大单件，2,479 行 / 17.4%）。把文件名写死成 `index.ts` 的话，
- * 量 `store.ts` 会得到 **0 个声明 / 所有跨度都算 1 行** —— 而那不是"没有族"，是仪器看不见。
+ * 实测过的一种踩法（用户踩的）：
+ *
+ *     $ node scripts/families.mjs --src store.ts appendLayer
+ *     --src: 0 declaration(s), undefined lines
+ *     0 connected component(s), 0 lines in the table
+ *
+ * 旧的解析是 `const TARGET = process.argv[2] ?? 'applyInner'` —— 它把 `--src` **当成目标是量**，
+ * 于是 closure 拿到 `--src` 这个不存在的名字，返回空；而输出里那行 `--src: 0 declaration(s)`
+ * 又长得像在说"这个文件没有族"。**那不是没族，是参数吃错了。**
+ *
+ * 修法：先剥掉 `--src <file>` 这一对，剩下的第一个位置参数才是目标；不依赖谁在前。
  */
-const SRC_FILE = (() => {
-  const i = process.argv.indexOf('--src')
-  return i >= 0 && process.argv[i + 1] !== undefined ? process.argv[i + 1] : 'index.ts'
-})()
-const TARGET = process.argv[2] ?? 'applyInner'
+const argv = process.argv.slice(2)
+const srcIdx = argv.indexOf('--src')
+const SRC_FILE = srcIdx >= 0 && argv[srcIdx + 1] !== undefined ? argv[srcIdx + 1] : 'index.ts'
+const positional = argv.filter((_, i) => (srcIdx < 0 ? true : i !== srcIdx && i !== srcIdx + 1))
+const TARGET = positional[0] ?? 'applyInner'
 const SRC = `${REPO}/src/${SRC_FILE}`
 
 const run = (script, args) => {

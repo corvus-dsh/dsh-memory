@@ -412,55 +412,174 @@ filter.ts   -> retrieve.ts : type-only （import type { MemoryHit }，运行时�
 | **审计** | 3 | **59** | `appendMemoryAudit`、`rotateAuditIfNeeded`、`memoryAuditPath` |
 | 合计 | 44 | **1,447** | （其余 60 个声明是零散 helper 与类型，合计 452 行） |
 
-### 方案（按"先小后大"排，都不实施）
+### 方案：**四档按「闭包」填，不按「组跨度」填**
 
-| 方案 | 做法 | 切出来多大 | 好处 | 代价 |
-|---|---|---|---|---|
-| **B（先做）** | 抽 IO 原语到 `store/io.ts` | **63 行 / 5 声明**（另加 `updateJsonlFile` 归到 JSONL 层） | 最小、纯搬运、`OUTSIDE` 最少；**族边界会因此变清楚** | 收益小（`store.ts` 仍 2,400+ 行） |
-| **A1** | 抽 SKILL 读写到 `store/skill.ts` | **435 行 / 12 声明** | 概念上最独立（它读写的是 `SKILL.md` 文本，不是 JSONL） | 要处理 `atomicWrite` 依赖（B 做完就没问题） |
-| **A2** | 抽生命周期到 `store/lifecycle.ts` | **466 行 / 9 声明** | 最大的一块，语义完整（validity / supersede / quarantine / feedback） | 依赖 SKILL 读写的几个 helper，应排在 A1 之后 |
-| **A3** | 抽 JSONL 层写入到 `store/layer.ts` | **332 行 / 8 声明** | `appendNegatives` / `appendLayer` 是同构的，本来就该在一起 | 依赖 IO 原语（B 之后） |
-| **C（不建议）** | 按"写 / 读 / 校验"三分 | — | 职责听起来最清晰 | **读写共用大量私有 helper，强行三分会造出跨文件环** —— 本仓已有一个仅类型环，不该再加 |
+> ⚠️ **上一版这张表用"组跨度"当大小，那是错的。** 组跨度只数这些函数自己占的行；
+> 真正决定"能不能搬"的是 `move-gate --cluster` 的**闭包**（这些函数 + 它们必须一起带走的东西）。
+> 下面每个数都是实测，不是估：`move-gate --cluster … --src store.ts`。
+
+| 步骤 | 做法 | **B 闭包（实测）** | `mutable` | A | C2 生产调用者 | C3 outside | C4 | 结论 |
+|---|---|---|---|---|---|---|---|---|
+| **0（前置）** | 抽时钟三件套到 `store/clock.ts` | **9 行 / 3 声明** | `[lastIssuedMs]` ← **刻意的** | YES | YES（无） | **YES（无）** | YES | **可做，且必须最先做** |
+| **B** | 抽 IO 原语到 `store/io.ts` | **97 行 / 8 声明** | `none` | YES | REVIEW | REVIEW（`JSON_GATE_EXT`、`StoreWriteRejected`、`TRANSIENT_RENAME`） | YES | 可做，但 C3 要处理后搬的三个常量 |
+| **A1** | 抽 SKILL 读写到 `store/skill.ts` | **795 行 / 48 声明** | `none` | YES | REVIEW | REVIEW（`SkillMeta`、`VOCAB_TAG`、`asVocab`、`clampConfidence`、`SkillConflict`） | YES | **闭包 795 行接近 800 上限**，要先决定这些类型归属 |
+| **A2** | 抽生命周期到 `store/lifecycle.ts` | **865 行 / 47 声明** | `none` | **YES 但超 800** | YES | REVIEW（13 个 outside 引用，含 IO 五个） | YES | **闭包 865 > 800，当前不可搬** |
+| **A3** | 抽 JSONL 层写入到 `store/layer.ts` | **495 行 / 25 声明** | **`[lastIssuedMs]`** | YES | REVIEW | REVIEW（6 个，含 `lastIssuedMs`） | YES | **第 0 步做完才可搬** |
+
+**这张表推翻了上一版的两处判断**：
+
+1. **A3 现在不可搬** —— 它的闭包拖着 `lastIssuedMs`（`appendLayer` / `appendNegatives` 都调 `monotonicTimestamp`），
+   `mutable` 不是 `none`。上一版写"依赖 IO 原语（B 之后）"是**漏了时钟这条依赖**；
+2. **A2 当前不可搬** —— 闭包 **865 行 > 800**，触到 A 档上限。上一版按组跨度 466 行写的，那是**低估了近一倍**。
+
+### 第 0 步（前置条件）：`store/clock.ts`
+
+**为什么必须最先做**：`appendLayer` 与 `appendNegatives` 的闭包都含 `lastIssuedMs`，
+于是 A3 的 `mutable` 不是 `none`。把时钟独立出去，A3 才从"不可搬"变成"可搬"。
+
+**搬什么**（`store.ts:2062-2088`，**27 行含注释**）：
+
+```
+lastIssuedMs                    （模块级 let）
+monotonicTimestamp              （export function）
+resetMonotonicClockForTest      （export function，测试接缝）
+```
+
+**注释必须一起搬。** 特别是这一段（`:2074-2076`）：
+
+> It is a MODULE-LEVEL clock on purpose: this is a **per-process ordering guarantee**.
+> Across processes the ordering authority is `at` written under the file lock, and cross-machine
+> ordering is explicitly NOT promised — claiming otherwise would be the kind of overreach that
+> makes an audit trail untrustworthy.
+
+**这句丢了，下一个人就会以为模块级 `let` 是"还没清理干净的历史包袱"，然后把它改成参数传进去** ——
+那会把 per-process 单调性拆掉，因果图重新可能倒序。
+
+**预演实测**（副本里做，不碰真实树）：
+
+```
+=== 搬之前 ===
+  appendLayer: mutable = ["lastIssuedMs (let/var)"]
+  appendNegatives: mutable = ["lastIssuedMs (let/var)"]
+
+搬走的行区间: store.ts L2062..L2088（27 行，含注释）
+注释里包含 "per-process ordering guarantee"? true
+
+=== 搬之后 ===
+  appendLayer: mutable = none
+  appendNegatives: mutable = none
+  clock.ts（文件级）: mutable = ["lastIssuedMs (let/var)"]
+```
+
+> **`clock.ts` 自己的 `mutable` 仍是 `["lastIssuedMs"]` —— 这是对的，不是没修干净。**
+> 判据是「**被搬的东西**的闭包里还有没有可变状态」，不是「仓库里还有没有 `let`」。
+> 上一轮在 observer 上写的 `mutable: none = 作用域变化不是状态消失`，这里是它的镜像：
+> **`mutable: [lastIssuedMs] = 有意的 per-process 状态，不该消掉`。**
+
+**第 0 步要动什么**：
+
+| 位置 | 改动 |
+|---|---|
+| 新增 `src/store/clock.ts` | 27 行（原样搬，注释完整） |
+| `src/store.ts` | 删 27 行；加 `import { monotonicTimestamp } from './store/clock.js'` + `export { … } from './store/clock.js'`（保住公开面） |
+| `index.ts` / 其它调用方 | **零改动**（它们从 `store.js` import，re-export 接住了） |
+
+**必须同时验的**：
+1. `appendLayer` / `appendNegatives` 的 `mutable: none`（上表已预演）；
+2. `verify-pure-move --against <上一步>` 给出 `IDENTICAL`（纯搬运）；
+3. 全套测试 432/432 不变 —— 时钟是**有行为语义**的，必须确认 `resetMonotonicClockForTest` 仍能穿到同一个实例。
 
 ### 建议顺序与理由
 
-**B → A1 → A3 → A2**，理由是**依赖方向**而不是"哪个大先做"：
+**0 → B → A1 → A3 → A2**，理由是**依赖方向 + 规模门槛**，不是"哪个大先做"：
 
 ```
-IO 原语(63)  ←  JSONL 层写入(332)  ←  生命周期(466)
-     ↑                                      ↑
-     └────────  SKILL 读写(435)  ───────────┘
+0. clock.ts（9 行闭包，无 outside）   ← 先做，让 A3 的 mutable 归零
+        ↓
+B. io.ts（97 行闭包）               ← atomicWrite 被 A1/A3/A2 同时依赖
+        ↓
+A1. skill.ts（795 行闭包）           ← 接近上限，要先定类型归属
+        ↓
+A3. layer.ts（495 行闭包，0 之后 mutable none）
+        ↓
+A2. lifecycle.ts（865 行闭包）       ← 当前超 800，必须先让 A1/A3 把它瘦下来
 ```
 
-- `atomicWrite` 被 SKILL 读写和 JSONL 写入**同时**依赖，它必须**先**独立（B）；
-- 然后 A1 与 A3 互不依赖，可以任选（A1 更大，先做能更早看到收益）；
-- A2 依赖 A1 的 helper，排最后；
-- **每一步都是纯搬运**，每步都用 `verify-pure-move --against <上一步>` 验，红就停。
+- **0 是 A3 的前置条件**，也是唯一"搬它能让别的步骤从不可搬变可搬"的一步；
+- **B** 清掉 `atomicWrite` 这个三处共享依赖；
+- **A1** 闭包 795 行已接近 800 上限，**动手前必须先决定 `SkillMeta` / `SkillConflict` / `VOCAB_TAG` 的归属**
+  （它们是"类型和常量"，进 `types.ts` 还是随 A1 走）；
+- **A3** 在第 0 步之后才可搬；
+- **A2** 闭包 865 > 800，**当前就是不能搬**。它能搬的时机是 A1 + A3 做完、把 IO 五个 + skill helper 分出去之后；
+- 每步都是纯搬运，每步用 `verify-pure-move --against <上一步>` 验，红就停。
 
 ### 关键风险（必须先说）
 
 1. **`store.ts` 的对外面很宽**：它是本仓的"仓储层"，`index.ts`、`retrieve.ts`、`archive.ts` 都从它 import。
    任何拆分都必须**只加 re-export、不改调用点**，否则 diff 会大到自己都看不懂；
 2. **`104 个声明 / 1,899 行`意味着大量私有 helper**：它们会被多组共用。
-   分组时**先量闭包再动手**（`closure --cluster`），不要按名字猜测归属；
-3. **B 的 63 行是否值得**：单看收益很小。但它的价值是**为后三步清掉共享依赖** ——
-   这是"先做小步"的唯一正当理由，不是"小步安全所以做小步"。
+   分组时**先量闭包再动手**（`move-gate --cluster … --src store.ts`），不要按组跨度或名字猜测；
+3. **闭包 > 组跨度是常态**：A2 的组跨度 466，闭包 865（**1.86 倍**）。
+   拿组跨度当"这个模块多大"会低估近一倍，直接导致"看起来能搬、实际超限"；
+4. **第 0 步的 9 行不值得单看收益**，但它是**唯一**能让 A3 从不可搬变可搬的动作 —— 这才是它排第一的理由。
 
 ### 不做什么
 
-- **不搬族**（本清单不含任何搬运）；
+- **只立项，不动手**（本节不含任何实际搬运）；
+- **不搬族**；
 - **不动 paradise**；
 - **不在修 D-1..D-7 的同时动 `store.ts` 的结构** —— 两种改动混在一起，`verify-pure-move` 就没法当参照。
 
+> **裁定：D-1..D-7 全部等重构完成后再修。** 理由：重构会大范围移动 `store.ts` / `retrieve.ts` 的代码，
+> 而 D-2/D-4/D-5/D-6 的修法都落在这些文件里 —— 先修再搬，搬运就不再是纯搬运（`verify-pure-move` 会红在类型改动上，不是搬运上）；
+> 而 D-1 改的是行为，更需要一个稳定的参照。**顺序：重构 → 再修 D-1..D-7。**
+
 ---
 
-## 十一、附：`store.ts` 的分量表（families 实测）
+## 十一、附：`store.ts` 的实测（families 分量表 + move-gate 闭包表）
 
-> **测量入口先修了一次仪器**：`families.mjs` 原先把文件名 `index\.ts` **写死在成员正则与 `spanOf` 里**，
-> 于是 `families.mjs appendLayer`（在 `store.ts` 里）返回 **0 个声明**、所有跨度都算成 1 行，自校验红成 `0 != 225`。
-> 那不是"store.ts 没有族"，是**仪器只看得见 index.ts**。已加 `--src <file>` 参数（默认仍是 `index.ts`）。
+### 十一·〇　`families --src` 的正确用法（**踩过，必须记**）
 
-### 以 `appendLayer` 为根（`store.ts` 内最大的一条写入链）
+```bash
+# ✅ 正确：目标在前
+node scripts/families.mjs appendLayer --src store.ts
+
+# ❌ 错误：--src 在前
+node scripts/families.mjs --src store.ts appendLayer
+```
+
+**错误顺序会输出**：
+
+```
+--src: 0 declaration(s), undefined lines
+0 connected component(s), 0 lines in the table
+```
+
+**为什么这个陷阱必须记**：那行 `--src: 0 declaration(s), undefined lines` **长得像在说"这个文件没有族"**。
+不注意的话，结论会是「`store.ts` 没有分量，所以没什么可拆的」——
+而真相是 `families.mjs` 把 `--src` 当成了**要量的目标名**（旧解析是 `process.argv[2] ?? 'applyInner'`）。
+
+> **已从根上修掉**：现在先剥掉 `--src <file>` 这一对，剩下的第一个位置参数才是目标，**与顺序无关**。
+> 三种用法实测都正确：
+>
+> ```
+> node scripts/families.mjs --src store.ts appendLayer   → appendLayer: 9 declaration(s), 225 lines
+> node scripts/families.mjs appendLayer --src store.ts   → appendLayer: 9 declaration(s), 225 lines
+> node scripts/families.mjs                              → applyInner: 22 declaration(s), 2062 lines
+> ```
+>
+> 但**文档仍保留上面那个错误示例** —— "参数吃错会产出看起来合法的空结果"是这个仓反复出现的形状，留着比删掉有用。
+
+### 十一·一　仪器修了两次，两次都是"只看得见 index.ts"
+
+1. **文件名写死在成员正则与 `spanOf` 里** ⇒ `families.mjs appendLayer`（在 `store.ts` 里）
+   返回 **0 个声明**、所有跨度算成 1 行，自校验红成 `0 != 225`；
+2. **`--src` 的解析顺序敏感** ⇒ 见 §十一·〇。
+
+两次都指向同一件事：**仪器的"找不到"会被显示成一个看起来合法的数字（0 或 1）**，而不是报错。
+这与上一轮 `let/var`、`async` 两个缺口完全同族。
+
+### 十一·二　以 `appendLayer` 为根（`store.ts` 内最大的一条写入链）
 
 ```
 $ node scripts/families.mjs appendLayer --src store.ts
@@ -494,11 +613,36 @@ $ node scripts/families.mjs renderSkill --src store.ts
 #7  1 decl /   4 lines   SkillConflict
 ```
 
+### 十一·三　实测闭包表（`move-gate --cluster … --src store.ts`）
+
+> **口径**：`families` 报的是**声明跨度和**（这些函数自己占的行）；
+> `move-gate` 报的是**搬迁闭包**（这些函数 + 它们必须一起带走的东西）。**判断能不能搬要用后者。**
+
+| 组 | 声明跨度（families） | **闭包（move-gate）** | `mutable` | 倍数 |
+|---|---|---|---|---|
+| 第 0 步 `clock` 三件套 | 9 | **9 行 / 3 声明** | **`[lastIssuedMs]` ← 刻意** | 1.0× |
+| B `io` 原语 | 80 | **97 行 / 8 声明** | `none` | 1.2× |
+| A1 `skill` 读写 | 435 | **795 行 / 48 声明** | `none` | **1.8×** |
+| A3 `layer` 写入 | 332 | **495 行 / 25 声明** | **`[lastIssuedMs]`** | 1.5× |
+| A2 `lifecycle` | 466 | **865 行 / 47 声明** | `none` | **1.9×** |
+
+**这张表是本清单最重要的数据**，因为它直接改写了三条判断：
+
+1. **A2 闭包 865 > 800 ⇒ 当前不可搬**（上一版按组跨度 466 写，低估近一倍）；
+2. **A3 的 `mutable` 不是 `none`** —— 它拖着 `lastIssuedMs`，**现在不可搬**；
+3. **A1 闭包 795，距离 800 上限只剩 5 行** —— 随时会因为一个 helper 被拉进去而超限。
+
+**闭包普遍是组跨度的 1.5–1.9 倍。** 拿组跨度当"这个模块多大"，会系统性低估。
+
 ### 读法
 
-**两个根各牵出约 220 行、7–8 个分量，其中绝大多数是 1 声明的孤点。**
+**根换成 `appendLayer` 或 `renderSkill` 后，各牵出约 220 行、7–8 个分量，绝大多数是 1 声明的孤点。**
 这说明 `store.ts` 里**不存在 `applyInner` 那种"一个根吸走一切"的结构** ——
 这点很重要：它意味着按职责拆文件**不会**像拆 `applyInner` 那样撞上一个 1,362 行的巨物。
+
+**但"没有巨物"不等于"好拆"**：闭包普遍是跨度的 1.5–1.9 倍，
+说明 `store.ts` 的耦合是**弥散**的（很多小 helper 被多组共用），而不是集中在某一处。
+所以拆分的难度不在"切哪一刀"，而在**先把共享 helper 归位**（第 0 步与 B 就是干这个的）。
 
 > 关于"#2 的 C1 判定"的准确表述（上一版报告写成了"混杂"，那是**缩水**了机制结论）：
 >
@@ -520,17 +664,20 @@ $ node scripts/families.mjs renderSkill --src store.ts
 
 | 编号 | 位置 | 性质 | 运行时影响 | 修它行数 | 建议时机 |
 |---|---|---|---|---|---|
-| **D-1** | `retrieve.ts` `hitOf` / `MemoryHit` | **未完成功能**（降权生效、文案不生效） | **有**（过期前缀永不出现） | 2 + 测试~15 | **先修测试，再修代码** |
-| D-2 | `extract.ts` `ExtractedExperience` | 类型欠账 | 无 | 1 | 与 D-1 同批 |
-| D-3 | `extract.ts` `LlmLike.stream` | 类型欠账 | 无 | 1 | 与 D-1 同批（先确认取值集合） |
-| D-4 | `store.ts` `LayerRecord` | 类型欠账 | 无 | 1 | 与 D-5/D-6 同批 |
-| D-5 | `dedupe.ts` `NegativeRecord` | 类型欠账 | 无 | 2 | 与 D-4/D-6 同批 |
-| D-6 | `store.ts:2215` | 纯结构可赋值性 | 无 | 1 | 与 D-4/D-5 同批 |
-| D-7 | `index.ts:21,65` | 合并遗留 | 无 | 2 | 与上面任一批 |
-| （附） | 类型环 → `types.ts` | 结构优化 | 无 | 3 文件 / 4 处 | 排在 D-1 之后 |
+| **D-1** | `retrieve.ts` `hitOf` / `MemoryHit` | **未完成功能**（降权生效、文案不生效） | **有**（过期前缀永不出现） | 2 + 测试~15 | **重构完成后**，且先修测试再修代码 |
+| D-2 | `extract.ts` `ExtractedExperience` | 类型欠账 | 无 | 1 | 重构完成后，一批 |
+| D-3 | `extract.ts` `LlmLike.stream` | 类型欠账 | 无 | 1 | 重构完成后，一批（取值集合仍未验证，见 §十三） |
+| D-4 | `store.ts` `LayerRecord` | 类型欠账 | 无 | 1 | 重构完成后，一批 |
+| D-5 | `dedupe.ts` `NegativeRecord` | 类型欠账 | 无 | 2 | 重构完成后，一批 |
+| D-6 | `store.ts:2215` | 纯结构可赋值性 | 无 | 1 | 重构完成后，一批 |
+| D-7 | `index.ts:21,65` | 合并遗留 | 无 | 2 | 重构完成后，一批 |
+| （附） | 类型环 → `types.ts` | 结构优化 | 无 | 3 文件 / 4 处 | **只评估，不实施** |
 | （附） | `2339 ledger-cache.ts:472` | **环境产物** | 无（`?.()` 有 fallback） | 0（装 `@types/node` 自消） | 不修 |
 
 **合计：代码 10 行可清掉 D-1..D-7 这 7 条，其中只有 D-1 改行为。**
+
+> **裁定（按用户 2026-11-14）：D-1..D-7 全部等 `store.ts` 重构完成后再修。**
+> 理由见 §十末尾：先修再搬，`verify-pure-move` 会红在类型改动上而不是搬运上，参照就没了。
 
 ---
 
@@ -538,8 +685,10 @@ $ node scripts/families.mjs renderSkill --src store.ts
 
 | 项 | 状态 |
 |---|---|
-| D-3 的 `reasoningEffort` 合法取值集合 | **没读宿主 adapter 源码**；只知 `'off'` 会被某些 provider 拒绝 |
+| D-3 的 `reasoningEffort` 合法取值集合 | **保持标注，本轮不补测。** 只知 `'off'` 会被某些 provider 拒绝；宿主 adapter 源码未读。**修 D-3 时必须先补这一项**，否则写下的类型范围可能是错的 |
+| `validAt` 会不会将来被读 | **保持标注，本轮不补测。** 只核了当前代码没有读者；只要有读者，就是第 8 条同型缺陷 |
 | D-1 修复后是否影响既有测试 | 未实施，因此未测；但已证明 **v021 对它不敏感**，所以"测试通过"不能当验证 |
-| `store.ts` 的 A/B/C 方案哪个更好 | 只给了依据与建议，**没做四档实测**（B 的搬运闭包未量） |
-| `validAt` 会不会将来被读 | 只核了当前代码；只要有读者，就是第 8 条同型缺陷 |
+| 第 0 步搬走后时钟是否仍是同一个实例 | 只预演了 `mutable` 变化（`none` / `[lastIssuedMs]`），**没跑全套测试验证 `resetMonotonicClockForTest` 的穿通** |
+| A1 闭包 795 行的类型归属（`SkillMeta` / `VOCAB_TAG` 等） | 未决策；动手前必须先定，否则很容易超 800 |
+| A2 闭包 865 行怎么瘦到 800 以下 | 只知道要先做 A1/A3 把 IO 与 skill helper 分出去，**没实测瘦身后是多少** |
 | 类型环拆分后的对外 import | 验了 `lib/retrieve.js` 导出数 34→34，但**没验 `lib/index.js` 的导出面** |
