@@ -587,7 +587,11 @@ atomicWrite  assertCompleteJson  readJsonl  readJsonlFresh  sleepSyncLocal
 > 复算 B 组请用 `sleepSyncLocal`；数字对不上时先查是不是还写着旧名。
 
 
-**A1 · SKILL 读写（12 个）**
+**A1 · SKILL 读写（输入 12 个 / 闭包真实成员 39 个）**
+
+> ⚠️ **这一组有两份名单，别混**：下面是**输入名单**（`move-gate --cluster` 的实参，12 个）；
+> 真正要搬的是**闭包并集 39 个成员**（含 `shapeCache` 等被传递引用的声明）。
+> 39 个成员的逐名清单与精确行区间见 **`docs/A1-plan-and-handoff.md` 第一节**。
 
 ```
 renderSkill  writeSkill  parseSkillFile  readSkillBody  readSkillValidity
@@ -1279,6 +1283,8 @@ $ node scripts/families.mjs renderSkill --src store.ts
 | **B 搬走后 `causal.ts` 的处理** | **已决定（B-1 改名），且已执行**。`causal.ts` 保留自己的 `readJsonlLocal` 私有实现，**不 import `store/io.ts`**；三份实现的语义一致性**仍未逐行验过**，所以 B-2 不做 |
 | **A3 之后 `VOCAB_TAG` 仍有 2 处声明** | `extract.ts:397` 与 `store/layer.ts:73`，**内容逐字相同**（含注释都说明了"duplicated on purpose，因为反向 import 会成环"）。本轮**不动**——合并它们需要先证明 `extract.ts` 不被 `layer.ts` 依赖，属于另一件事 |
 | **A1 闭包的类型归属（`SkillConflict` 等）** | **已定：`SkillConflict` 随 A1 走**。实测 `writeSkill` 闭包含 `findConflicts`、`commitEdges`、`linkConflictBack`（A1 通过 `writeSkill → findConflicts → SkillConflict` 的传递闭包把它们拉进来）——这三个函数在 A1 的 12 名清单里**都没有**（是闭包成员不是名单成员），但它们全在 store.ts 且用 `SkillConflict`。A1 搬走时需把这些冲突处理函数一并带走，否则要在 store.ts / skill.ts 之间 import `SkillConflict`，形成依赖。`SkillMeta` / `VOCAB_TAG` / `asVocab` 已被 A3 定在 `store/layer.ts`（方案甲，见 §十一 A3 节） |
-| **A1 的额外门禁（比 A3 多一条）** | A3 已证明 `verify-pure-move` 看不见导出面被撑大，所以 A1 必须额外断言 **`store.js` 导出数仍 51**（或按 `SkillConflict` 归属决定增减并说明理由）。搬 A1 时若 `SkillConflict` 此前不是 `store.js` 公开面，则 A1 新增 re-export 会使导出数上升，需明确记录为何允许 |
-| A2 闭包 768 行怎么排期 | 规模门槛已过（768 ≤ 800），但**依赖 A1/A3 先分**；按裁定继续挂着，**不为降到 800 而提前拆** |
+| **A1 的额外门禁（两条，已订正）** | ① **`store.js` 导出数 = 51**（A3 已证明 `verify-pure-move` 看不见导出面被撑大）。② **shapeCache 行为测试**：写入 → `resetShapeCacheForTest()` → 断言回到冷启动。**原写法「必须有测试真的调用它」已作废**——接缝本身零消费者，硬凑调用点证明不了任何事 |
+| **接缝归属：`clearSkillShapeCache` / `resetShapeCacheForTest`** | **选 (b) 随 shapeCache 进 `skill.ts`**。三者与 `shapeCache` 物理耦合（都直接 `.clear()` / `.delete()` / `.get()` 它）。选 (a) 留在 store.ts 就必须跨模块共享同一个可写绑定，比现在更糟。`invalidateSkillShape` / `clearSkillShapeCache` **本来就在 51 条导出面里**（`1065ca1` 已核实）→ re-export 保住；`resetShapeCacheForTest` **不在 A3 基线里** → 只在 `skill.ts` 导出，**不进 store.ts re-export**，导出面因此仍是 51 |
+| **⚠️ `store.js` 导出面当前是 52，不是 51** | `f975e33` 加了 `resetShapeCacheForTest` 使 51 → 52。**我在那一轮的报告里说「store.js 51 条不变」是错的**（当时已是 52）。A1 落地时按上面的归属处理即可回到 51；在此之前不要用 51 当基线 |
+| A2 闭包 755 行怎么排期 | 规模门槛已过（**A3 后重测 755 ≤ 800**），但**依赖 A1 先分**；按裁定继续挂着，**不为降到 800 而提前拆** |
 | 类型环拆分后的对外 import | 验了 `lib/retrieve.js` 导出数 34→34，但**没验 `lib/index.js` 的导出面** |
