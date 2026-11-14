@@ -111,7 +111,7 @@ function refsPath(dir: string): string {
   return join(dir, 'knowledge-refs.jsonl')
 }
 
-function readJsonl<T>(path: string): T[] {
+function readJsonlLocal<T>(path: string): T[] {
   let text: string
   try {
     text = readFileSync(path, 'utf8')
@@ -159,7 +159,7 @@ function asEntry(raw: Record<string, unknown>): KnowledgeEntry | undefined {
 
 export function readKnowledge(dir: string): KnowledgeEntry[] {
   const out: KnowledgeEntry[] = []
-  for (const raw of readJsonl<Record<string, unknown>>(knowledgePath(dir))) {
+  for (const raw of readJsonlLocal<Record<string, unknown>>(knowledgePath(dir))) {
     const entry = asEntry(raw)
     if (entry !== undefined) out.push(entry)
   }
@@ -169,7 +169,7 @@ export function readKnowledge(dir: string): KnowledgeEntry[] {
 
 export function readKnowledgeRefs(dir: string): KnowledgeRef[] {
   const out: KnowledgeRef[] = []
-  for (const raw of readJsonl<Record<string, unknown>>(refsPath(dir))) {
+  for (const raw of readJsonlLocal<Record<string, unknown>>(refsPath(dir))) {
     const knowledgeId = typeof raw.knowledgeId === 'string' ? raw.knowledgeId : ''
     const graphId = typeof raw.graphId === 'string' ? raw.graphId : ''
     const nodeId = typeof raw.nodeId === 'string' ? raw.nodeId : ''

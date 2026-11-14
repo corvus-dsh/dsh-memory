@@ -448,7 +448,7 @@ filter.ts   -> retrieve.ts : type-only （import type { MemoryHit }，运行时�
 
 #### ⚠️ 两组数字的对账口径（**不存在两套真值**）
 
-之前出现过「同一组算出两个数」，原因不是有第二套真值，而是**量的名字个数不同**：
+之前出现过「同一组算出两个数」，原因不是有第二套真值，而是**量的名字集合不同**：
 
 | 组 | 用户按自己挑的名字量（少） | **文档名单量（全）** |
 |---|---|---|
@@ -456,12 +456,41 @@ filter.ts   -> retrieve.ts : type-only （import type { MemoryHit }，运行时�
 | A3 | **390 行**（2 个名字） | **478 行**（8 个名字） |
 | B | **76 行**（3 个名字） | **91 行**（5 个名字） |
 
-**所以差值是"少量了 7 / 6 / 2 个名字"，不是"谁算错了"。**
-
 > 正确表述是：**用户用自己挑的 5 / 2 / 3 个名字量，得出 779 / 390 / 76；文档名单是 12 / 8 / 5 个名字，得出 795 / 478 / 91。**
 > 下一个人看到这张表就知道差在哪，**不会以为项目里有两套并存的真值**。
 
-**复算的唯一权威名单就是下面这四组。** 若数字对不上，先确认你量的名字个数，再怀疑口径。
+#### ⚠️ A1 的 779 **不是"少挑了几个名字"，是"名单里有 2 个名字不在这 12 名中"**
+
+我原先写「从 12 个名字里任取 2–7 个都算不出 779，所以那 5 个可能不属于这份名单」——
+**后半句是对的，前半句的措辞会误导**：它听起来像"名单不同"，实际是**集合不同**。
+
+用户那 5 个名字里有 **2 个不在文档的 12 名之中**：
+
+```
+listSkillRecords      ← 不在文档 A1 名单
+isConflictingSkill    ← 不在文档 A1 名单
+```
+
+**已实测复现**：
+
+```
+$ node union-closure2.mjs --prefer store.ts \
+    renderSkill writeSkill listSkillRecords isConflictingSkill parseSkillFile
+并集：47 个声明（按「文件:名字」为身份），跨度之和 779 行      ← 精确等于用户报的数
+```
+
+所以两条结论要分开说：
+
+1. **779 与 795 都是对的**，量的是两个**不同的名字集合**（5 个 vs 12 个，且有 2 个不重叠）；
+2. **不是"子集问题"** —— 不能靠"从 12 名里挑 5 个"复现 779，因为其中 2 个名字根本不在那 12 名里。
+   这一点很重要：它说明"对账"不能只数个数，还要比**名字集合**。
+
+> 顺带说明为什么 `isConflictingSkill` / `listSkillRecords` 会出现在"SKILL 读写"这一组里：
+> 前者做冲突判定、后者列出技能记录，它们在概念上都属于 SKILL 域，
+> 只是文档那份 12 名名单选了 `renderSkill`/`writeSkill` 这条**写入链**，把这两件留在了外面。
+> **两种划分都合理，只是边界画在不同地方。**
+
+**复算的唯一权威名单就是下面这四组。** 若数字对不上，先比**名字集合**（不是只比个数），再怀疑口径。
 
 **第 0 步 · clock（3 个）**
 
@@ -611,9 +640,52 @@ resetMonotonicClockForTest(0);  monotonicTimestamp(1000)  ===  1970-01-01T00:00:
 
 **必须同时验的**：
 1. `appendLayer` / `appendNegatives` 的 `mutable: none`（上表已预演）；
-2. `verify-pure-move --against <上一步>` 给出 `IDENTICAL`（纯搬运）；
+2. `verify-pure-move --against <上一步>` 的结论（**注意：纯搬运也会因为注释而红，见下**）；
 3. **`clock-seam.test.mjs` 搬前搬后各跑一次都绿** —— 这是接缝真的穿上了的唯一判据；
 4. 全套测试数不变 —— 加了两条接缝用例后是 **434 / 434 / 0**（原 432）。
+
+### 第 0 步落地后的实测（2026-11-14，提交 `14c1d59`）
+
+| 项 | 结果 |
+|---|---|
+| `clock-seam.test.mjs` | **2 / 2 pass**（搬后，与搬前一致） |
+| 时钟簇闭包 | **9 行 / 3 声明 / `mutable: ["lastIssuedMs"]`** —— 与预期一致（let 只是换了文件） |
+| 同一实例 | `store.js` 与 `store/clock.js` 导出的 `monotonicTimestamp` / `resetMonotonicClockForTest` **`===` 相等** |
+| `appendLayer` | 225 行/9 声明/`["lastIssuedMs"]` → **219 行/7 声明/`none`** |
+| `appendNegatives` | 204 行/11 声明/`["lastIssuedMs"]` → **198 行/9 声明/`none`** |
+| 全套 | 434 / 434 / 0 |
+| `check-cycles` | nodes 27 → 28，value edges 43 → 44，**ACYCLIC** |
+
+**A3 的阻塞已解除** —— 这是第 0 步排第一的唯一理由。
+
+#### `verify-pure-move` 的红：**已解释**（不是"纯搬运就该绿"）
+
+```
+$ node scripts/verify-pure-move.mjs --against HEAD
+ref   : 13034 内容行
+tree  : 13055 内容行   （差 +21）
+DISAPPEARED 0 条 / 0 行
+APPEARED   17 条 / 21 行
+```
+
+**逐条明细**：
+
+| 类别 | 行数 | 位置 |
+|---|---|---|
+| **注释**（`/**`、5 个 `*`、`*/` 与 4 行正文） | **19** | `store/clock.ts` 新增的「WHY THIS LIVES IN ITS OWN FILE」段 |
+| **注释**（`/**`、`*` 分隔线与 8 行正文、`*/`） | （含在上面的 19 内） | `store.ts` 的 re-export 说明段 |
+| **管线**：`import { monotonicTimestamp } from './store/clock.js'` | **1** | `store.ts` 导入区 |
+| **管线**：`export { monotonicTimestamp, resetMonotonicClockForTest } from './store/clock.js'` | **1** | `store.ts` re-export |
+| **逻辑代码** | **0** | —— |
+
+准确表述：**+21 = 19 行注释 + 2 行管线（import / re-export），0 行逻辑代码。**
+（上一版我写"0 行代码新增"，**那是错的** —— import 与 re-export 也是新增行，只是它们是管线不是逻辑。）
+
+**消失侧是 0 行** —— 这证明搬迁是逐字的：那 27 行原文一行没被改写，只是挪到了另一个文件。
+所以这条红**不是"搬得不纯"**，而是"纯搬运 + 我给它写了说明 + 加上 import/re-export 两条管线"。
+
+**注释保留**（按裁定）。它记录的是"为什么这个 `let` 必须留在模块级"——
+删掉它，下一个人就会把它参数化，而那条注释是唯一挡住这件事的东西。
 
 ### 建议顺序与理由
 

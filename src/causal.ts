@@ -83,7 +83,7 @@ interface RawRecord {
  * silently came back empty while the code looked perfectly reasonable. A test caught it; nothing else would
  * have. The import is now static, and the catch below only tolerates REAL read failures.
  */
-function readJsonl(path: string): RawRecord[] {
+function readJsonlLocal(path: string): RawRecord[] {
   let text: string
   try {
     text = readFileSync(path, 'utf8')
@@ -137,7 +137,7 @@ export function fileCausalSource(memoryDir: string, skillsDir: string): CausalRe
   return {
     skills: () => listSkillRecords(skillsDir),
     skillBody: (name) => readSkillBody(skillsDir, name),
-    layer: (name) => readJsonl(join(memoryDir, `${name}.jsonl`)),
+    layer: (name) => readJsonlLocal(join(memoryDir, `${name}.jsonl`)),
   }
 }
 
