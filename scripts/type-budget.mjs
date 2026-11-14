@@ -87,8 +87,17 @@ const BASELINE = new Map([
   // 实测：CODE HEALTH 12 条 / 5 个文件；ENVIRONMENT 61 条（不进这张表）。
   // 这张表从这里开始**只许降**：再加一条真缺陷就会红。
   // 数字全部来自 `node scripts/type-budget.mjs --baseline`，没有一个手抄值。
+  //
+  // 2026-11-14 A3 搬移后重冻结：`store.ts` 3 → 0、`store/layer.ts` 0 → 3，**总数仍是 12**。
+  // 那 3 条不是新缺陷，是随代码搬过去的同一批：
+  //   · `ExtractedNegative` → `NegativeRecord`    (HEAD store.ts:1493 `planNegative(existing as never, …)`)
+  //   · `timestamp` 不在 `LayerRecord` 里           (HEAD store.ts:1548)
+  //   · `LayerRecord[]` → `readonly Record<…>[]`   (HEAD store.ts:1964)
+  // 三处在 `git show HEAD:src/store.ts` 里逐字存在，只是换了文件 —— 也就是本清单的 D-4 / D-5。
+  // **冻结的是身份，不是数字**：真正的判据是下面的 BASELINE_IDENTITIES 里那三条仍在，
+  // 而不是"哪个文件背了它"。搬文件必然改文件名，把基线钉死在文件上会把每一步搬运都报成新债。
   ['retrieve.ts', 5],
-  ['store.ts', 3],
+  ['store/layer.ts', 3],
   ['index.ts', 2],
   ['extract.ts', 1],
   ['ledger-cache.ts', 1],
@@ -233,6 +242,13 @@ const BASELINE_IDENTITIES = new Map([
   // 这里是 11 个**不同的身份**，合计 12 条 ——
   // 两个数不同是因为同一身份可能出现多次（如 index.ts 的 2300 'Duplicate identifier' 有 2 处，
   // 它们共享同一条 message，所以在表里是一行、计数 2）。
+  //
+  // ⚠️ 2026-11-14 A3 搬移：三条 `store.ts` 的身份原地改名为 `store/layer.ts`，message 逐字未变。
+  // 这是**身份跟着代码走**，不是新债也不是"冻结一条新缺陷"：
+  // 那三行代码在 `git show HEAD:src/store.ts` 里逐字存在（L1493 / L1548 / L1964），
+  // 搬完只是换了文件。若把身份钉死在文件名上，**每一次搬运都会报成引入新债**，
+  // 而"搬文件"正是这个仓库当前唯一在做的事 —— 那样这条门禁会逼人每次都去改基线。
+  // 记法：文件路径是**位置**，不是身份；身份是 code + message。
   ["extract.ts\u00002353\u0000Object literal may only specify known properties, and 'domain' does not exist in type 'ExtractedExperience'.", 1],
   ["index.ts\u00002300\u0000Duplicate identifier 'EvidenceRef'.", 2],
   ["ledger-cache.ts\u00002339\u0000Property 'unref' does not exist on type 'number'.", 1],
@@ -241,9 +257,9 @@ const BASELINE_IDENTITIES = new Map([
   ["retrieve.ts\u00002339\u0000Property 'currentCommit' does not exist on type 'CandidateOptions'.", 1],
   ["retrieve.ts\u00002339\u0000Property 'updatedAt' does not exist on type 'MemoryHit'.", 1],
   ["retrieve.ts\u00002353\u0000Object literal may only specify known properties, and 'reasoningEffort' does not exist in type '{ provider?: string; model?: string; system?: string; messages: { role: string; content: { type: \"text\"; text: string; }[]; }[]; maxTokens?: number; signal?: AbortSignal; }'.", 1],
-  ["store.ts\u00002345\u0000Argument of type 'ExtractedNegative' is not assignable to parameter of type 'NegativeRecord'.   Types of property 'evidence' are incompatible.     Type 'EvidenceRef[]' is not assignable to type 'number[]'.       Type 'EvidenceRef' is not assignable to type 'number'.", 1],
-  ["store.ts\u00002345\u0000Argument of type 'LayerRecord[]' is not assignable to parameter of type 'readonly Record<string, unknown>[]'.   Type 'LayerRecord' is not assignable to type 'Record<string, unknown>'.     Index signature for type 'string' is missing in type 'LayerRecord'.", 1],
-  ["store.ts\u00002353\u0000Object literal may only specify known properties, and 'timestamp' does not exist in type 'LayerRecord'.", 1],
+  ["store/layer.ts\u00002345\u0000Argument of type 'ExtractedNegative' is not assignable to parameter of type 'NegativeRecord'.   Types of property 'evidence' are incompatible.     Type 'EvidenceRef[]' is not assignable to type 'number[]'.       Type 'EvidenceRef' is not assignable to type 'number'.", 1],
+  ["store/layer.ts\u00002345\u0000Argument of type 'LayerRecord[]' is not assignable to parameter of type 'readonly Record<string, unknown>[]'.   Type 'LayerRecord' is not assignable to type 'Record<string, unknown>'.     Index signature for type 'string' is missing in type 'LayerRecord'.", 1],
+  ["store/layer.ts\u00002353\u0000Object literal may only specify known properties, and 'timestamp' does not exist in type 'LayerRecord'.", 1],
 ])
 
 const argOf = (flag) => {

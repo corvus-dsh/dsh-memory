@@ -66,13 +66,41 @@ if (beforeRef === undefined) {
  */
 const ARTIFACT_DIR = 'lib'
 
-/** 取产物清单：ref 为 undefined ⇒ 工作树；否则 `git ls-tree`。 */
+/**
+ * 取产物清单：ref 为 undefined ⇒ 工作树；否则 `git ls-tree`。
+ *
+ * ── 必须**递归**：`lib/` 从第 0 步起就有子目录了 ────────────────────────────────────────────────
+ *
+ * 这里原先是 `readdirSync(lib).filter(.js)`，只看得见**顶层**。
+ * 第 0 步（`store/clock.ts`）第一次造出 `lib/store/`，于是：
+ *
+ *   - 工作树侧：`store.js`、`store/clock.js` 被当成两份互不相关的产物；
+ *   - ref 侧：`git ls-tree --name-only HEAD:lib` 返回的 `store` 是个**目录项**，不是 `.js`，
+ *     直接被 `filter` 丢掉 ⇒ 历史侧的 `lib/store/*.js` 一行都没被读进来。
+ *
+ * 两边都"少读一个子目录"，看起来还能比 —— 但比对的是**不同的文件集合**：
+ * 搬进子目录的那个模块在 after 侧出现、在 before 侧缺席，于是每一次搬运
+ * 都会报出成百条"代码行被增删"，而实际上只是位置变了。
+ *
+ * 这条缺陷的形状与 `families.mjs` 只看得见 `index.ts` 完全同族：
+ * **仪器的"看不见"被显示成一个看起来合法的差异数字**，而不是报错。
+ */
 const artifactFiles = (ref) => {
   try {
     if (ref === undefined) {
-      return readdirSync(join(REPO, ARTIFACT_DIR)).filter((f) => f.endsWith('.js')).sort()
+      const out = []
+      const walk = (relative) => {
+        for (const entry of readdirSync(join(REPO, ARTIFACT_DIR, relative), { withFileTypes: true })) {
+          const next = relative === '' ? entry.name : `${relative}/${entry.name}`
+          if (entry.isDirectory()) { walk(next); continue }
+          if (entry.name.endsWith('.js')) out.push(next)
+        }
+      }
+      walk('')
+      return out.sort()
     }
-    const listing = execFileSync('git', ['ls-tree', '--name-only', `${ref}:${ARTIFACT_DIR}`], { cwd: REPO, encoding: 'utf8' })
+    const listing = execFileSync('git', ['ls-tree', '-r', '--name-only', `${ref}:${ARTIFACT_DIR}`], { cwd: REPO, encoding: 'utf8' })
+    // `-r` 让 git 递归；输出是相对 ARTIFACT_DIR 的路径（如 `store/clock.js`）
     return listing.split('\n').map((s) => s.trim()).filter((f) => f.endsWith('.js')).sort()
   } catch {
     return undefined

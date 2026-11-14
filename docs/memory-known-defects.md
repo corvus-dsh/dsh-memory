@@ -26,6 +26,60 @@
 
 ---
 
+## 〇·一　常驻警戒：**设错一个环境变量，会得到"合理但错误"的结论**
+
+> 这一节不是某一轮的记录，是**每次动测量仪器前都要先读**的警戒。
+> 放在最前面，是因为它出错时**不会报错**，只会给你一个可信的数字。
+
+### 警戒 1：`GRAFT_MOVE_GATE_SRC` ≠ `GRAFT_CLOSURE_SRC`
+
+```
+GRAFT_MOVE_GATE_SRC   ← move-gate 用它决定「量哪棵树」。设它才有用。
+GRAFT_CLOSURE_SRC     ← 它只是被转发给 closure.mjs 的值。
+```
+
+**踩过的坑（2026-11-14，B 步之后量"搬前 vs 搬后"）**：
+
+我先把 `HEAD` 的 `src/` 导出到 `_scratch/src-at-head`，只设了 `GRAFT_CLOSURE_SRC`，
+量出的 A1 / A3 / A2 / B / 第 0 步**五组数字全部与工作区一模一样**（连一个字节的差都没有）。
+
+差一点就写成「搬 B 没有减重」。真实原因是 `move-gate` 仍读真实 `src/`，
+两边量的是**同一棵树** —— 所以当然相同。
+
+**两个变量都设之后，真实数字才出来**：A1 −73 / A3 −76 / A2 −80。
+
+**为什么这条必须常驻**：它产出的不是报错、不是空值，而是**一个看起来非常合理的结论**
+（"纯位移不影响闭包，符合预期"）。任何"搬了但数字没变"的观察，
+**先怀疑自己设错了变量，再怀疑结论**。
+
+### 警戒 2：`artifactFiles` 只读顶层 → 子目录里的产物被整个跳过
+
+**踩过的坑（2026-11-14，A3 搬完）**：`verify-bundle-purity` 报 **179 处差异**，
+其中 `2 -> 1 ": 'general',"` 看起来像"产物里丢了一行代码"。
+
+真相是仪器缺陷：`readdirSync(lib).filter(.js)` 只看得见**顶层**，
+而 `lib/store/` 从第 0 步起就存在。`git ls-tree --name-only HEAD:lib` 返回的 `store` 是**目录项**，
+被 `.endsWith('.js')` 过滤掉 —— 于是**历史侧的 `lib/store/*.js` 一行都没读进来**。
+
+修法：两侧都递归（工作树用 `withFileTypes` 走目录，git 侧加 `-r`）。
+修完 179 → **20**，且 20 条**全部**是导入/导出行，逻辑 0 条。
+
+**同一个形状的第三次出现**（前两次：`families.mjs` 只看得见 `index.ts`、`--src` 参数顺序）。
+三次都指向同一件事：
+
+> **仪器的"找不到"会被显示成一个看起来合法的差异/数字，而不是报错。**
+
+### 判定规则（从此按这个走）
+
+| 现象 | 先查什么 | 再查什么 |
+|---|---|---|
+| 搬了，但数字**一点没变** | **环境变量是不是设错了**（警戒 1） | 被量的对象是否本来就跨模块 |
+| 搬了，但差异**特别多** | **仪器是否漏读了新位置**（警戒 2） | 真的有代码被改写 |
+| 数字**看起来对**，但解释不通 | 口径（哪一套行数？哪一份名单？） | 结论 |
+
+---
+
+
 ## 一、D-1　`ageDays` 没被复制进 `MemoryHit`
 
 ### 是什么
@@ -424,7 +478,7 @@ filter.ts   -> retrieve.ts : type-only （import type { MemoryHit }，运行时�
 | **B** | 抽 IO 原语到 `store/io.ts` | **80 行 / 8 声明** | `none` | YES | **REVIEW：`graph.ts`、`knowledge.ts`、`suggest.ts`** | REVIEW（`JSON_GATE_EXT`、`StoreWriteRejected`、`TRANSIENT_RENAME`） | YES | **✅ 已完成（本轮）** |
 | **A1** | 抽 SKILL 读写到 `store/skill.ts` | **722 行 / 42 声明**（搬 B 前 795 / 48） | `none` | YES | REVIEW（`causal.ts`、`retrieve.ts`、`suggest.ts`） | REVIEW（`SkillMeta`、`VOCAB_TAG`、`asVocab`、`clampConfidence`、`SkillConflict`） | YES | 可做；**离 800 上限已有 78 行余量**，类型归属仍要先定 |
 | **A2** | 抽生命周期到 `store/lifecycle.ts` | **768 行 / 39 声明**（搬 B 前 848 / 47） | `none` | YES | YES | REVIEW（13 个 outside 引用，含 IO 五个） | YES | **降到 800 以下了**，但它依赖 A1/A3 先分完 |
-| **A3** | 抽 JSONL 层写入到 `store/layer.ts` | **396 行 / 16 声明**（搬 B 前 472 / 23） | `none` ← **第 0 步之后** | YES | REVIEW | REVIEW（6 个） | YES | 可做 |
+| **A3** | 抽 JSONL 层写入到 `store/layer.ts` | **396 行 / 16 声明** | `none` ← **第 0 步之后** | YES | REVIEW | REVIEW（6 个） | YES | **✅ 已完成（本轮）** |
 
 
 **这一版又推翻了上一版的两处数字**（上一版用 move-gate 的旧口径，按**名字**求并集，会重复计数）：
@@ -813,6 +867,176 @@ import 的都是 `store.js`，**零改动**。`readJsonl` / `readJsonlFresh` 搬
 
 **时钟接缝在搬 B 之后仍是 2/2 绿** —— 这是"第 0 步的接缝没被后续搬迁扯断"的复核。
 
+### A3 步骤落地后的实测（2026-11-14，搬完、**尚未提交**）
+
+**搬了什么**：`store.ts` 里 16 个声明 → `src/store/layer.ts`（逐字搬运，无改写）：
+
+```
+SkillMeta  VOCAB_TAG  asVocab  updateJsonlFile
+MAX_NEGATIVES  NEGATIVE_ARCHIVE_FILE  NegativeArchivePlan  planNegativeArchive  appendNegatives
+LayerRecord  normalizeEvidenceRefs
+appendLayer  MAX_LAYER_RECORDS  planLayerArchive  appendFacts  appendExperiences
+```
+
+`store.ts` 2330 → **1887 行**（-443）；`store/layer.ts` 新增 **523 行**。
+
+#### ⚠️ 一个必须先说清的决定：`SkillMeta` / `VOCAB_TAG` / `asVocab` **随 A3 走了**
+
+这三个名字读起来像「SKILL 读写」（A1），但它们出现在 A3 的闭包里：
+`appendNegatives` 用 `SkillMeta` 做写入戳、用 `asVocab` 规范化 tags，而 `asVocab` 用 `VOCAB_TAG` 做校验。
+
+**如果把它们留在 `store.ts`、让 `layer.ts` 反向 import，就会造出 `store.ts ⇄ layer.ts` 的值边** ——
+`check-cycles.mjs` 是**计值边**的（type-only 才豁免）。搬过去才保持单向：`store.ts → layer.ts`。
+
+实测（`check-cycles`）：nodes 29 → 30、value edges 46 → 54、**ACYCLIC / unresolved 0**。
+
+**这对 A1 是有约束力的，等于提前回答了 A1 的归属问题的一半**：
+A1 的 skill 写入链要用这三个名字，应当**从 `store/layer.js` import**，不要再声明一份；
+除非将来建 `store/types.ts` 把它们搬出去（那时是**移走**，不是复制）。
+
+#### `verify-pure-move`：按类别拆开（要求的三段式）
+
+```
+ref     : HEAD   content lines: 13433
+tree    : working   content lines: 13489   （差 +56）
+DISAPPEARED 0 条 /  0 行        ← 关键：消失侧为 0
+APPEARED   44 条 / 56 行
+```
+
+| 类别 | 行数 | 说明 |
+|---|---|---|
+| **注释** | **46** | `layer.ts` 顶部说明段 + `store.ts` 的 re-export 说明段（`/**`×4、` *`×7、` */`×4 与正文） |
+| **管线** | **10** | 多行 re-export 列表的成员行（`    VOCAB_TAG,` 一类）与 `} from './store/layer.js'` |
+| **逻辑** | **0** | —— |
+| 合计 | **56** | 46 + 10 + 0 = 56，与"差 +56"一致 |
+
+**消失侧 0 行**：16 个声明连注释一起逐字搬走，一行都没被改写。
+
+> 分类是**机械**做的（`_scratch/puremove-classify.mjs`）：注释 = 去前导空格后以 `/` 或 `*` 开头；
+> 管线 = 形如 `  NAME,` / `  NAME as X,` / `} from '…'` / 单独的 `{`；其余算逻辑。
+> 脚本里 `sum` 第一版写成了 `xs.length`（数**条数**不是**行数**），导致"46+15≠56"——
+> 是我自己工具的计数 bug，不是搬运问题。修正后三类严格相加等于 56。
+
+#### `move-gate` 的新数字：**量得到，而且和搬前一致**
+
+```
+$ node scripts/move-gate.mjs --cluster appendLayer appendNegatives planNegativeArchive \
+      planLayerArchive normalizeEvidenceRefs appendFacts appendExperiences updateJsonlFile \
+      --src store/layer.ts
+A 模块大小 : YES   332 行
+B 闭包     : 396 行 / 16 声明 / mutable: none
+A=YES  C2=REVIEW  C3=REVIEW  C4=YES   无机器否决
+```
+
+**注意两件事**：
+
+1. **没有变成"量不到"** —— 因为 `move-gate` 已经会跨全树解析（`resolveDeclaration` 带 file），
+   名单里的名字现在都指向 `store/layer.ts`，照样量得出来；
+2. **396 / 16 与搬前完全相同**。这不是"没搬"，而是**闭包本来就只包含这个簇自己**：
+   搬完之后 `store.ts` 里已经没有任何 A3 的成员，所以"这 16 个声明 + 它们依赖的东西"
+   本来就是同一批。**判据仍是 `mutable: none` 且 A=YES，不是数字变了。**
+
+#### 导出面：**必须钉住 51 条**（这一条第一版做错了）
+
+`verify-bundle-purity` 的等价判据在这里，第一版我**做错了**：
+
+```
+第一版：HEAD 51 条 → 工作区 56 条，新增 5：VOCAB_TAG, appendLayer, normalizeEvidenceRefs,
+                                             planLayerArchive, updateJsonlFile
+```
+
+原因：我在 `layer.ts` 里给 **16 个声明全加了 `export`**，然后 `store.ts` 又把它们**全 re-export**。
+但那 6 个名字（`VOCAB_TAG` / `updateJsonlFile` / `LayerRecord` / `normalizeEvidenceRefs` /
+`appendLayer` / `planLayerArchive`）**搬前就不是公开面** —— 它们没有"既有 import 路径"可言，
+导出它们就是**扩大对外面**，而不是"保住既有路径"。
+
+修法：`layer.ts` 里去掉这 6 个的 `export` 前缀；`store.ts` 的 re-export 只留原本公开的 8 值 + 2 类型。
+
+```
+修完：HEAD 51 条 → 工作区 51 条，消失 0 / 新增 0
+```
+
+> **这条错误的形状值得记**：`verify-pure-move` 会**放过**多出来的 `export`
+> （`normaliseContentLine` 把 `export ` 剥掉，导出列表整行判为管线），
+> 所以只跑纯位移判据**发现不了导出面被撑大**。得单独数一遍导出面。
+
+**被搬出的公开值 === 新模块里的同一个**（不是复制）：
+
+| 名字 | 在 `store.js` | `===` |
+|---|---|---|
+| `appendLayer` / `appendNegatives` / `appendFacts` / `appendExperiences` | ✓ | ✓ |
+| `planNegativeArchive` / `planLayerArchive` | ✓ | ✓ |
+| `asVocab` / `MAX_NEGATIVES` / `NEGATIVE_ARCHIVE_FILE` / `MAX_LAYER_RECORDS` | ✓ | ✓ |
+
+13 个名字全部 `===` 相等。
+
+#### `verify-bundle-purity`：修了仪器才量得对
+
+第一版报 **179 处差异**，其中 `2 -> 1 ": 'general',"` 看起来像"产物里丢了一行"。
+
+根因是仪器缺陷（见 §〇·一 警戒 2）：`lib/store/` 子目录从未被读进来。
+两侧都递归之后：
+
+```
+file set changed: 29 -> 30 file(s)
+  added  : store/layer.js
+before : HEAD   code lines: 7767
+after  : working tree   code lines: 7787
+BUNDLE NOT PURE — 20 distinct line(s) differ
+  → 机械分类：管线 20 / 逻辑 0
+```
+
+**产物侧同样是"20 条全是 import/export 行，0 行逻辑代码被增删或改写"。**
+
+#### `type-budget`：3 条是**跟着文件搬过去的旧债**，不是新债
+
+搬完 `type-budget` 报红，说 `store/layer.ts` 有 3 条不在冻结基线里。逐条核对：
+
+| 诊断 | HEAD 里的原始位置 | 结论 |
+|---|---|---|
+| `2345 ExtractedNegative` → `NegativeRecord` | `store.ts:1493` `planNegative(order as never, …)` | 同一行代码 |
+| `2353 'timestamp' 不在 LayerRecord 里` | `store.ts:1548` | 同一行代码 |
+| `2345 LayerRecord[]` → `readonly Record<…>[]` | `store.ts:1964` | 同一行代码 |
+
+三处在 `git show HEAD:src/store.ts` 里**逐字存在**，也就是本清单的 **D-4 / D-5**。
+`type-budget` 按**文件**记账，于是"`store.ts` 3 → 0、`store/layer.ts` 0 → 3、总数仍 12"看起来像新债。
+
+**处理方式：冻结的是身份（code + message），不是文件名。**
+基线表改为 `['store/layer.ts', 3]`，`BASELINE_IDENTITIES` 里三条的 file 字段同步改名，message 逐字未动，
+并在代码里写明了理由。**没有新增任何一条豁免** —— 总数仍是 12。
+
+> 若把身份钉死在文件名上，**每一次搬运都会报成引入新债**，
+> 而这个仓库当前唯一在做的事就是搬文件 —— 那条门禁会逼人每步都去改基线，最后失去意义。
+
+#### D 档与门禁
+
+| 项 | 结果 |
+|---|---|
+| `npm test` | **434 / 434 / 0**（搬完、修完导出面后复跑） |
+| `clock-seam` | **2 / 2 pass**（第 0 步的接缝在两次搬迁后仍绿） |
+| `check-cycles` | nodes 30 / value edges 54 / **ACYCLIC** / unresolved 0 |
+| 导出面 | **51 → 51**，消失 0 / 新增 0；13 个搬出的名字全部 `===` |
+| `verify-pure-move` | 消失 0 行；新增 56 = 46 注释 + 10 管线 + **0 逻辑** |
+| `verify-bundle-purity` | 产物侧 20 条差异，全为管线，**0 逻辑**（仪器已修） |
+| `type-budget` | strict:false **0**；strict:true 94 → **96**（`store/layer.ts` 缺 `@types/node`，环境产物） |
+
+#### 一处构建期的坑（记录，因为不报类型错误）
+
+`store.ts` 的 re-export 第一版把 `SkillMeta` / `NegativeArchivePlan` / `LayerRecord` 写在**值**列表里，
+构建后运行时报：
+
+```
+SyntaxError: The requested module './store/layer.js' does not provide an export named 'SkillMeta'
+```
+
+原因是 `scripts/build.mjs` 用 `stripTypeScriptTypes` 剥类型 —— 类型在产物里**不存在**，
+而 `tsc` 不会把"值列表里混了类型名"当错误（它按类型上下文解释得通）。
+**必须单独写 `export type { … }`。**
+
+同一次还漏了本文件自己仍在用的三个名字：`asVocab`（9 处）、`SkillMeta`（3 处）、`canonicalizeEntities`。
+这类缺口**构建不报、`tsc` 只报"未声明"、运行期才炸成 `ReferenceError`** ——
+所以**搬完任何一步都必须跑全套测试，不能只看 `built N module(s)`**。
+
 ### 建议顺序与理由
 
 **0 → B → A1 → A3 → A2**，理由是**依赖方向 + 规模门槛**，不是"哪个大先做"：
@@ -820,28 +1044,33 @@ import 的都是 `store.js`，**零改动**。`readJsonl` / `readJsonlFresh` 搬
 ```
 0. clock.ts（9 行闭包，无 outside）   ← ✅ 已完成 14c1d59，让 A3 的 mutable 归零
         ↓
-B. io.ts（80 行闭包）                ← ✅ 已完成（本轮），清掉 atomicWrite 这个共享依赖
+B. io.ts（80 行闭包）                ← ✅ 已完成 b269fbd，清掉 atomicWrite 这个共享依赖
         ↓
-A1. skill.ts（722 行闭包）           ← 离上限 78 行，要先定类型归属
+A3. layer.ts（396 行闭包，mutable none）← ✅ 已完成（本轮），顺带把 SkillMeta/asVocab/VOCAB_TAG 定在 layer
         ↓
-A3. layer.ts（396 行闭包，mutable none）
+A1. skill.ts（722 行闭包）           ← 下一步；三个类型的归属已被 A3 部分回答
         ↓
-A2. lifecycle.ts（768 行闭包）       ← 搬 B 之后已降到 800 以下，但仍依赖 A1/A3 先分
+A2. lifecycle.ts（768 行闭包）       ← 仍挂着，等 A1 分完再重新量
 ```
+
+> **顺序与上一版不同了**：原计划是 `A1 → A3`，实际做的是 `A3 → A1`。
+> 理由是 A3 **没有类型归属争议**（它的类型只有 `SkillMeta` / `LayerRecord` / `NegativeArchivePlan`，
+> 而 `SkillMeta` 反正要跟着 `appendNegatives` 走），A1 则卡在 `SkillMeta` / `VOCAB_TAG` / `SkillConflict`
+> 的归属上。**先把无争议的做掉，能把有争议那步的闭包进一步压小。**
 
 - **0 已完成**，A3 的 `mutable` 从 `[lastIssuedMs]` 变成 `none`（实测复核过）；
 - **B 已完成**，`atomicWrite` 这个三处共享依赖已收进 `store/io.ts`，四个调用者零改动；
 - **A1 闭包 722 行**（搬 B 前 795），**动手前仍必须先决定 `SkillMeta` / `SkillConflict` / `VOCAB_TAG` 的归属**
   （它们是"类型和常量"，进 `types.ts` 还是随 A1 走）——这条裁定没变，**因为类型归属与搬 B 无关**；
-- **A3 现在可搬**（`mutable: none`，第 0 步之后成立）；
+- **A3 已完成**（`mutable: none`，第 0 步之后成立；搬完仍 396 / 16）；
 - **A2 不应因为"降到 768"就提前拆**：它依赖 A1/A3 先把 skill helper 与 IO 分走，
   按裁定**继续挂着**，等 A1/A3 做完再重新量一次；
 - 每步都是纯搬运，每步用 `verify-pure-move --against <上一步>` 验，红就停并逐条解释。
 
 > **当前裁定（2026-11-14，第 8 代会话）**：
-> - **第 0 步 + B-1 + sleepSync 消歧 + B 搬运**：已做；
-> - **A1 / A3 未开工** —— 按用户要求"B 搬完先停，贴数字给我，不要连着做 A3"；
-> - **A1 动手前必须先定 `SkillMeta` / `VOCAB_TAG` / `SkillConflict` 的归属**（795 距 800 只剩 5 行时的顾虑，现在有 78 行余量，但归属仍未决定）；
+> - **第 0 步 + B-1 + sleepSync 消歧 + B 搬运 + A3 搬运**：已做；
+> - **A1 未开工** —— 按用户要求"A3 搬完先停"；
+> - **A1 动手前必须先定 `SkillMeta` / `VOCAB_TAG` / `SkillConflict` 的归属**。注意：A3 已经把 `SkillMeta` / `VOCAB_TAG` / `asVocab` 搬到 `store/layer.ts`，所以 A1 的归属问题**已经被 A3 部分回答**（见下节）；
 > - **A2 不动**，即使闭包已降到 768；
 > - **D-1…D-7 继续挂着**，等重构完成；
 > - `validAt` / `reasoningEffort` 两个未验证项**保持标注，不补测**；
@@ -958,11 +1187,12 @@ $ node scripts/families.mjs renderSkill --src store.ts
 | 第 0 步 `clock` 三件套 | 9 | **9 行 / 3 声明** | **`[lastIssuedMs]` ← 刻意** | 1.0× |
 | B `io` 原语（搬完） | 63 | **80 行 / 8 声明** | `none` | 1.3× |
 | A1 `skill` 读写 | 435 | **722 行 / 42 声明** | `none` | **1.7×** |
-| A3 `layer` 写入 | 332 | **396 行 / 16 声明** | `none` | 1.2× |
+| A3 `layer` 写入（搬完） | 332 | **396 行 / 16 声明** | `none` | 1.2× |
 | A2 `lifecycle` | 466 | **768 行 / 39 声明** | `none` | 1.6× |
 
-> 表里的闭包是**搬完 B 之后**的数（同一份名单重测）。
-> 搬 B 之前的对应数是 91 / 795 / 472 / 848 —— 那 4 个数**不要再拿去判断可搬性**，它们包含了已被搬走的 IO 原语。
+> 表里的闭包是**搬完 B 之后**的数（同一份名单重测）。A3 搬完后它自己的 396 / 16 **没有变化**
+> —— 因为闭包本来就只包含这个簇自己，搬文件不改变"这 16 个声明 + 它们的依赖"这个集合。
+> 搬 B 之前的对应数是 91 / 795 / 472 / 848 —— 那 4 个数**不要再拿去判断可搬性**。
 
 **这张表是本清单最重要的数据**，因为它直接改写了三条判断：
 
@@ -1027,8 +1257,9 @@ $ node scripts/families.mjs renderSkill --src store.ts
 | D-3 的 `reasoningEffort` 合法取值集合 | **保持标注，本轮不补测。** 只知 `'off'` 会被某些 provider 拒绝；宿主 adapter 源码未读。**修 D-3 时必须先补这一项**，否则写下的类型范围可能是错的 |
 | `validAt` 会不会将来被读 | **保持标注，本轮不补测。** 只核了当前代码没有读者；只要有读者，就是第 8 条同型缺陷 |
 | D-1 修复后是否影响既有测试 | 未实施，因此未测；但已证明 **v021 对它不敏感**，所以"测试通过"不能当验证 |
-| 第 0 步搬走后时钟是否仍是同一个实例 | **已实测**：`store.js` 与 `store/clock.js` 导出的 `monotonicTimestamp` / `resetMonotonicClockForTest` `===` 相等；接缝测试 2/2 在搬第 0 步后、搬 B 后各跑一次都是绿的 |
+| 第 0 步搬走后时钟是否仍是同一个实例 | **已实测**：`store.js` 与 `store/clock.js` 导出的 `monotonicTimestamp` / `resetMonotonicClockForTest` `===` 相等；接缝测试 2/2 在搬第 0 步后、搬 B 后、搬 A3 后各跑一次都是绿的 |
 | **B 搬走后 `causal.ts` 的处理** | **已决定（B-1 改名），且已执行**。`causal.ts` 保留自己的 `readJsonlLocal` 私有实现，**不 import `store/io.ts`**；三份实现的语义一致性**仍未逐行验过**，所以 B-2 不做 |
-| A1 闭包 722 行的类型归属（`SkillMeta` / `VOCAB_TAG` 等） | **仍未决策**（搬 B 让它从"只剩 5 行余量"变成"78 行余量"，但归属问题本身没变）；动手前必须先定 |
+| **A3 之后 `VOCAB_TAG` 仍有 2 处声明** | `extract.ts:397` 与 `store/layer.ts:73`，**内容逐字相同**（含注释都说明了"duplicated on purpose，因为反向 import 会成环"）。本轮**不动**——合并它们需要先证明 `extract.ts` 不被 `layer.ts` 依赖，属于另一件事 |
+| A1 闭包 722 行的类型归属（`SkillMeta` / `VOCAB_TAG` 等） | **已被 A3 部分回答**：`SkillMeta` / `VOCAB_TAG` / `asVocab` 现在住在 `store/layer.ts`，A1 应从那里 import。只剩 **`SkillConflict`** 未定（实测 7 处引用，全在 `store.ts` 内，不在 A3 闭包里） |
 | A2 闭包 768 行怎么排期 | 规模门槛已过（768 ≤ 800），但**依赖 A1/A3 先分**；按裁定继续挂着，**不为降到 800 而提前拆** |
 | 类型环拆分后的对外 import | 验了 `lib/retrieve.js` 导出数 34→34，但**没验 `lib/index.js` 的导出面** |
