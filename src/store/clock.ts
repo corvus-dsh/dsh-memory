@@ -1,0 +1,39 @@
+/**
+ * v0.32 — THE STRICTLY MONOTONIC WRITE CLOCK.
+ *
+ * WHY NOT JUST `new Date().toISOString()`: the causal graph (Fact → Experience → Negative/Skill) is only
+ * meaningful if its nodes are ORDERED, and wall clocks are not monotonic — an NTP correction, a VM restore,
+ * or two machines a few seconds apart all produce "the cause happened after the effect". A trace that can
+ * run backwards is not a physical trace.
+ *
+ * So the clock never goes back: it returns `max(now, lastIssued + 1ms)`. Under a correct clock it is
+ * indistinguishable from `now`; under a jumping one it keeps ordering intact instead of silently inverting
+ * causality.
+ *
+ * It is a MODULE-LEVEL clock on purpose: this is a per-process ordering guarantee. Across processes the
+ * ordering authority is `at` written under the file lock, and cross-machine ordering is explicitly NOT
+ * promised — claiming otherwise would be the kind of overreach that makes an audit trail untrustworthy.
+ *
+ * ── WHY THIS LIVES IN ITS OWN FILE (step 0 of the store.ts split) ────────────────────────────────
+ *
+ * `appendLayer` / `appendNegatives` call `monotonicTimestamp()`, so every closure that contains them
+ * also dragged `lastIssuedMs` — and `move-gate` reported `mutable: ["lastIssuedMs"]` for those clusters,
+ * which is a STOP signal ("that is shared state, not a closure").
+ *
+ * Pulling the clock out gives those clusters `mutable: none` **without touching the semantics**:
+ * the `let` is still module-level, it just lives one file over. The paragraph above is the reason it
+ * must STAY module-level — moving it again (into a parameter, an instance field, a context object)
+ * would break the per-process ordering guarantee it exists to provide.
+ */
+let lastIssuedMs = 0
+
+export function monotonicTimestamp(now = Date.now()): string {
+  const next = now > lastIssuedMs ? now : lastIssuedMs + 1
+  lastIssuedMs = next
+  return new Date(next).toISOString()
+}
+
+/** Test seam: reset the clock so a suite can assert from a known origin. */
+export function resetMonotonicClockForTest(at = 0): void {
+  lastIssuedMs = at
+}
