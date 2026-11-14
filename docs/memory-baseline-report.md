@@ -417,8 +417,8 @@ npm 11.19.0（本机 Node 24）
 2. **memory 的真实画像（最终态）**：27 个模块 / 14,211 行 / 3 个 >800 /
    最大 `store.ts` 2,479 行（17.4%）/ **0 个值依赖环** / **12 CODE HEALTH + 61 ENV + 0 ARTIFACT**。
 3. **与 observer 的结构差异**：observer 是「单文件 + 一个核心模块」；memory 是
-   **27 个扁平模块，最大家族只占 17.4%** —— 它没有"巨型单文件"问题，
-   但有 12 条类型债和 1 个值环（已确认没有）+ 1 个仅类型环。
+   **27 个扁平模块，最大单件只占 17.4%** —— 它没有"巨型单文件"问题，
+   但有 12 条类型债和 1 个仅类型环（**值环 0 个**）。
 4. **下一步的候选（只列，不定序）**：
    - 12 条 CODE HEALTH（`retrieve.ts` 占 5 条，`store.ts` 占 3 条）；
    - `store.ts` 2,479 行是最大单件，但 17.4% 的占比远低于 graft-slice 的 58.2%；
@@ -430,11 +430,27 @@ npm 11.19.0（本机 Node 24）
 
 | 项 | 状态 |
 |---|---|
-| 改 `src/` | **零改动**（`git status` 只有新增仪器与文档） |
+| 改 `src/` | **零改动**（`git diff --stat -- src/` 为空） |
 | 搬族 | **一个都没搬** |
 | publish / paradise | 未触碰 |
 | `verify-pure-move` 在真实位移上的表现 | 只跑了 `--self-test`（PASS）与工作树 `VACUOUS`。**真实位移未构造** —— 没有搬族就没有位移可测。 |
 | 12 条 CODE HEALTH 是否真是缺陷 | 只做了分类，**未逐条追调用方**。 |
 | `retrieve ⇄ filter` 的类型环是否值得拆 | 未评估。 |
-| 别的机器上套件是否也稳定 | 只在本机连跑 3 次。 |
-| memory 的 CI 结果 | 未推送，因此未取。 |
+| 别的机器上套件是否也稳定 | **已用两个 npm 版本分别验证**：npm 10.9.7 + Node 22（本机复现 CI 那一档）连跑 2 次 432/432；npm 11.19 + Node 24 连跑 3 次 432/432。 |
+| memory 的 CI 结果 | **已核**（run 43553013130，`588098b`）：`total_count 2`，`build-and-test (22.x)` 与 `(24.x)` 均 success，各 17 个 step 无一失败。判据是「`matrix.node` 两个取值 **且** `/jobs` 返回 `total_count: 2` **且** 逐 job 的 step 无失败」——只看 run 的 conclusion 不算数。 |
+
+---
+
+## 十二、最终提交清单
+
+```
+f1d4104  docs: harvest-hardening backlog 进仓（原在无 git 的工作区根目录）
+2b0bb70  feat(memory): 移植仪器层 7 件 + 基线（不搬族、src/ 零改动）
+588098b  fix(memory): 打包门禁改在临时副本里跑 —— npm 10 的 --ignore-scripts 拦不住 prepare
+```
+
+`588098b` 顺带删掉了全部临时诊断件（`zz-diagnostic-pack` / `_diag-annotate` /
+`zz-test-annotated` / `t2()` 包装），并把 `package.json` 的 `test` 脚本改回原样。
+
+**CI 由红转绿的关键不是"再试一次"，而是查清了 npm 10 与 npm 11 对
+`--ignore-scripts` 的处理差异** —— 这一条单 Node 的 CI 永远不会暴露。
