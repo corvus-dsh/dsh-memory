@@ -22,6 +22,18 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { annotate } from './_diag-annotate.mjs'
+
+/** 临时诊断包装：失败原因写进 annotation（job 日志需认证，annotation 不需要）。定位后删除。 */
+const t2 = (name, fn) => test(name, async (t) => {
+  try {
+    await fn(t)
+  } catch (error) {
+    const msg = String(error?.message ?? error).replace(/\r?\n/gu, ' ⏎ ').slice(0, 800)
+    console.log('::error::ANNOTATE FAIL ' + name + ': ' + (error?.name ?? 'Error') + ': ' + msg)
+    throw error
+  }
+})
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
@@ -69,7 +81,7 @@ const packedFiles = (t) => {
   }
 }
 
-test('pack: every pointer in package.json resolves to a file that is actually packed', (t) => {
+t2('pack: every pointer in package.json resolves to a file that is actually packed', (t) => {
   const packed = packedFiles(t)
   if (packed === undefined) return
   const set = new Set(packed)
@@ -99,7 +111,7 @@ test('pack: every pointer in package.json resolves to a file that is actually pa
   assert.deepEqual(badExports, [], `exports contains dangling pointers:\n  ${badExports.join('\n  ')}`)
 })
 
-test('pack: no development files leaked into the tarball', (t) => {
+t2('pack: no development files leaked into the tarball', (t) => {
   const packed = packedFiles(t)
   if (packed === undefined) return
   /**
@@ -127,7 +139,7 @@ test('pack: no development files leaked into the tarball', (t) => {
   }
 })
 
-test('pack: the files list and the tarball agree on what is shipped', (t) => {
+t2('pack: the files list and the tarball agree on what is shipped', (t) => {
   /**
    * 第三条：`files` 里写了却没进包（或反之）是一种静默的不一致 ——
    * 作者以为在发，实际没发。只对**非 glob** 的条目前缀做检查。
