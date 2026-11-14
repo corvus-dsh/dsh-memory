@@ -420,19 +420,27 @@ filter.ts   -> retrieve.ts : type-only （import type { MemoryHit }，运行时�
 
 | 步骤 | 做法 | **B 闭包（实测）** | `mutable` | A | C2 生产调用者 | C3 outside | C4 | 结论 |
 |---|---|---|---|---|---|---|---|---|
-| **0（前置）** | 抽时钟三件套到 `store/clock.ts` | **9 行 / 3 声明** | `[lastIssuedMs]` ← **刻意的** | YES | YES（无） | **YES（无）** | YES | **可做，且必须最先做** |
-| **B** | 抽 IO 原语到 `store/io.ts` | **91 行 / 9 声明** | `none` | YES | **REVIEW：`graph.ts`、`knowledge.ts`、`suggest.ts`** | REVIEW（`JSON_GATE_EXT`、`StoreWriteRejected`、`TRANSIENT_RENAME`） | YES | 可做；**但闭包跨 3 个文件，见下** |
-| **A1** | 抽 SKILL 读写到 `store/skill.ts` | **795 行 / 48 声明** | `none` | YES | REVIEW（`causal.ts`、`retrieve.ts`、`suggest.ts`） | REVIEW（`SkillMeta`、`VOCAB_TAG`、`asVocab`、`clampConfidence`、`SkillConflict`） | YES | **闭包 795 行接近 800 上限**，要先决定这些类型归属 |
-| **A2** | 抽生命周期到 `store/lifecycle.ts` | **848 行 / 47 声明** | `none` | **YES 但超 800** | YES | REVIEW（13 个 outside 引用，含 IO 五个） | YES | **闭包 848 > 800，当前不可搬** |
-| **A3** | 抽 JSONL 层写入到 `store/layer.ts` | **478 行 / 25 声明** | **`[lastIssuedMs]`** | YES | REVIEW | REVIEW（6 个，含 `lastIssuedMs`） | YES | **第 0 步做完才可搬** |
+| **0（前置）** | 抽时钟三件套到 `store/clock.ts` | **9 行 / 3 声明** | `[lastIssuedMs]` ← **刻意的** | YES | YES（无） | **YES（无）** | YES | **✅ 已完成（`14c1d59`）** |
+| **B** | 抽 IO 原语到 `store/io.ts` | **80 行 / 8 声明** | `none` | YES | **REVIEW：`graph.ts`、`knowledge.ts`、`suggest.ts`** | REVIEW（`JSON_GATE_EXT`、`StoreWriteRejected`、`TRANSIENT_RENAME`） | YES | **✅ 已完成（本轮）** |
+| **A1** | 抽 SKILL 读写到 `store/skill.ts` | **722 行 / 42 声明**（搬 B 前 795 / 48） | `none` | YES | REVIEW（`causal.ts`、`retrieve.ts`、`suggest.ts`） | REVIEW（`SkillMeta`、`VOCAB_TAG`、`asVocab`、`clampConfidence`、`SkillConflict`） | YES | 可做；**离 800 上限已有 78 行余量**，类型归属仍要先定 |
+| **A2** | 抽生命周期到 `store/lifecycle.ts` | **768 行 / 39 声明**（搬 B 前 848 / 47） | `none` | YES | YES | REVIEW（13 个 outside 引用，含 IO 五个） | YES | **降到 800 以下了**，但它依赖 A1/A3 先分完 |
+| **A3** | 抽 JSONL 层写入到 `store/layer.ts` | **396 行 / 16 声明**（搬 B 前 472 / 23） | `none` ← **第 0 步之后** | YES | REVIEW | REVIEW（6 个） | YES | 可做 |
+
 
 **这一版又推翻了上一版的两处数字**（上一版用 move-gate 的旧口径，按**名字**求并集，会重复计数）：
 
 | 项 | 上一版 | **这一版（按「文件:名字」）** | 原因 |
 |---|---|---|---|
-| B | 97 行 / 8 声明 | **91 行 / 9 声明** | 旧口径把 `store.ts:readJsonl`(3 行) 解析成了 `causal.ts:readJsonl`(20 行)；修完既纠了行数，也补回了先前被同名合并吞掉的 1 个声明 |
-| A3 | 495 行 / 25 声明 | **478 行 / 25 声明** | 同一条根因，17 行的差全部来自同名误解析 |
-| A2 | 865 行 / 47 声明 | **848 行 / 47 声明** | 同上 |
+| B | 97 行 / 8 声明 | **80 行 / 8 声明**（搬完 B 后） | 旧口径把 `store.ts:readJsonl`(3 行) 解析成了 `causal.ts:readJsonl`(20 行)；修完既纠了行数，也补回了先前被同名合并吞掉的 1 个声明 |
+| A3 | 495 行 / 25 声明 | **396 行 / 16 声明**（搬完 B 后） | 同一条根因，加上 B 搬走后的真实减重 |
+| A2 | 865 行 / 47 声明 | **768 行 / 39 声明**（搬完 B 后） | 同上 |
+
+> **注意 B 自己的闭包数从 91 变成 80**：搬走之后，`move-gate` 量的是**新文件里**的那 5 个函数，
+> 它们的闭包里不再需要把 `store.ts` 里那些本文件内的辅助声明算进来——成员数仍是 8，
+> 但因为 `atomicWrite` 一族已经自成一个模块，量的是 `store/io.ts` 内的跨度之和。
+> **B 搬前 91 → 搬后 80 不是"变轻了"，是"被量的对象换成了新文件"。**
+> 判据仍然是 `mutable: none` + A=YES，而不是这个数字变小。
+
 
 > **这条修正本身值得记**：`move-gate` 的 B 档原先把成员身份降级成**裸名字**
 > （`unionNames.add(member.name)`），而 `closure.mjs` 明明已经给了 `file`。
@@ -441,6 +449,12 @@ filter.ts   -> retrieve.ts : type-only （import type { MemoryHit }，运行时�
 > 这与该文件上方那段注释（"read the fields, not the string"）是同一个错误的两半：
 > 那次把对象当字符串读，这次把带文件的身份降级成裸名。
 > 修法：身份用 `file:name`，并让 `resolveDeclaration` 接受可选的 file 参数。
+>
+> **这两条同名（3 处 `readJsonl`、2 处 `sleepSync`）现在都已被消除**：
+> `readJsonlLocal`（`b1e5d83`）+ `sleepSyncLocal`（`662a9c7`）。
+> 所以"同名多声明"这个**具体**歧义源已经不存在；但**工具层**的身份规则（`file:name`）保留 ——
+> 它防的是下一次输入，不是这一次。
+
 
 ### 各组**逐名成员名单**（复算用）
 
@@ -458,6 +472,12 @@ filter.ts   -> retrieve.ts : type-only （import type { MemoryHit }，运行时�
 
 > 正确表述是：**用户用自己挑的 5 / 2 / 3 个名字量，得出 779 / 390 / 76；文档名单是 12 / 8 / 5 个名字，得出 795 / 478 / 91。**
 > 下一个人看到这张表就知道差在哪，**不会以为项目里有两套并存的真值**。
+>
+> ⚠️ **这张表的数字是"搬 B 之前"的时点值**，别拿它跟当前的 722 / 396 / 80 对账。
+> 它记录的是**同一时刻、两种名单**的差（那才是"两套数字"的真实来源）；
+> 而搬 B 让所有组统一变轻，那是**跨时点**的差异，与名单无关。
+> **对账要固定时点，比较名单；比较可搬性要固定名单，跟随时点。** 混在一起就会又出现一个"对不上"。
+
 
 #### ⚠️ A1 的 779 **不是"少挑了几个名字"，是"名单里有 2 个名字不在这 12 名中"**
 
@@ -501,8 +521,17 @@ lastIssuedMs  monotonicTimestamp  resetMonotonicClockForTest
 **B · IO 原语（5 个）**
 
 ```
-atomicWrite  assertCompleteJson  readJsonl  readJsonlFresh  sleepSync
+atomicWrite  assertCompleteJson  readJsonl  readJsonlFresh  sleepSyncLocal
 ```
+
+> ⚠️ **第 5 个名字现在是 `sleepSyncLocal`**（搬 B 之前叫 `sleepSync`）。
+> `sleepSync` 这个名字如今**只剩 `lock.ts:106` 一处**，所以：
+> - 用 `sleepSyncLocal` 量 → 量到 `store/io.ts` 那份（**B 组**，闭包 80 行 / 8 声明）；
+> - 用旧名 `sleepSync` 量 → 量到 `lock.ts` 那份（**不是 B 组**，闭包 91 行 / 9 声明，混进了锁的实现）。
+>
+> 这正是 B-1 与 sleepSync 改名要消灭的那种歧义：**同一个词指向两个文件**。
+> 复算 B 组请用 `sleepSyncLocal`；数字对不上时先查是不是还写着旧名。
+
 
 **A1 · SKILL 读写（12 个）**
 
@@ -545,7 +574,12 @@ normalizeEvidenceRefs  appendFacts  appendExperiences  updateJsonlFile
 | `JSON_GATE_EXT` | `store.ts:79` | 1 | |
 | `TRANSIENT_RENAME` | `store.ts:53` | 1 | |
 
-**C2 生产调用者也不是 0**：实测 `graph.ts` 3 处、`knowledge.ts` 6 处、`suggest.ts` 2 处、`causal.ts` 2 处。
+**C2 生产调用者也不是 0**：实测 `graph.ts` 3 处、`knowledge.ts` 3 处、`suggest.ts` 2 处、`store.ts` 22 处、`causal.ts` 0 处。
+
+> **这张表是搬 B *之前* 的事实快照。搬完之后它已经过时** —— 保留是因为它解释了"为什么 B 不能一搬了之"。
+> 搬完的状态见下一节。其中 `causal.ts` 的 `readJsonl` 已在 B-1 改名 `readJsonlLocal`（`b1e5d83`），
+> `store.ts` 的 `sleepSync` 已改名 `sleepSyncLocal`（`662a9c7`）。
+
 
 **所以"把 B 搬到 `store/io.ts`"必须回答一个问题：`causal.ts` 的那个 `readJsonl` 怎么办？**
 
@@ -559,7 +593,13 @@ normalizeEvidenceRefs  appendFacts  appendExperiences  updateJsonlFile
 
 **这条必须先决定再动手**，否则搬完之后闭包数字还是算不准 —— 因为 `resolveDeclaration` 仍会在同名里挑一个。
 
-**当前状态：未决定。** 本轮只立项，不实施。
+**当前状态：已决定并已执行，选 B-1。**
+
+- **B-1 已采纳**（用户批准）：`causal.ts:86`、`knowledge.ts:114` 的 `readJsonl` → `readJsonlLocal`，共 5 处（2 处定义 + 3 处调用），提交 `b1e5d83`；
+- **B-2 不做**：三份实现的语义一致性没人逐行验过，改 import 是改行为；
+- `store.ts` 那份 `sleepSync` 也已改名 `sleepSyncLocal`（`662a9c7`），因为"改一个即将搬走的符号的名字，比改一个长期留下的符号更合适"——
+  搬走之后 `store/io.ts` 里的名字若还叫 `sleepSync`，它会与 `lock.ts` 继续撞名，歧义只是换了位置。
+
 
 ### 第 0 步（前置条件）：`store/clock.ts`
 
@@ -645,7 +685,6 @@ resetMonotonicClockForTest(0);  monotonicTimestamp(1000)  ===  1970-01-01T00:00:
 4. 全套测试数不变 —— 加了两条接缝用例后是 **434 / 434 / 0**（原 432）。
 
 ### 第 0 步落地后的实测（2026-11-14，提交 `14c1d59`）
-
 | 项 | 结果 |
 |---|---|
 | `clock-seam.test.mjs` | **2 / 2 pass**（搬后，与搬前一致） |
@@ -687,35 +726,127 @@ APPEARED   17 条 / 21 行
 **注释保留**（按裁定）。它记录的是"为什么这个 `let` 必须留在模块级"——
 删掉它，下一个人就会把它参数化，而那条注释是唯一挡住这件事的东西。
 
+### B 步骤落地后的实测（2026-11-14，搬完、**尚未提交**）
+
+**搬了什么**：`store.ts` 里 9 个 IO 原语声明 → `src/store/io.ts`（逐字搬运，无改写）：
+
+```
+sleepSyncLocal  TRANSIENT_RENAME  JSON_GATE_EXT  StoreWriteRejected
+assertCompleteJson  atomicWrite  readJsonl  readJsonlFresh
+```
+
+`store.ts` 2464 → **2315 行**（-149）；`store/io.ts` 新增 **164 行**。
+
+**`verify-pure-move` 的红：同样"已解释"**
+
+```
+ref     : HEAD   content lines: 13413
+tree    : working   content lines: 13433   （差 +20）
+DISAPPEARED 0 条 / 0 行
+APPEARED   16 条 / 20 行
+```
+
+| 类别 | 行数 | 位置 |
+|---|---|---|
+| **注释**（`/**` ×2、` *` ×3、` */` ×2 与 13 行正文） | **20** | `store/io.ts` 顶部的「THE IO PRIMITIVES」段 + `store.ts` 的 re-export 说明段 |
+| **管线**（`import` ×3、`export { … } from` ×2） | 0 ← **被判为管线，不计入** | `store.ts` 与 `store/io.ts` 的 import/re-export |
+| **逻辑代码** | **0** | —— |
+
+**消失侧 0 行是这次最关键的一条证据**：那 9 个声明连注释一起逐字搬走，一行都没有被改写。
+`export ` 前缀是纯搬动的管线（`verify-pure-move` 的 `normaliseContentLine` 会剥掉它），
+所以连"函数声明变成 `export function`"都不出现在差异里。
+
+> ⚠️ **解剖脚本自己错了一次**：第一版 `memory-puremove-anatomy.mjs` 先 `filter(isContentLine)`
+> 再 `map(normaliseContentLine)`，于是 `export function readJsonl(` 在过滤阶段就被丢掉，
+> 报成 **DISAPPEARED 2 条**，看起来像"搬运丢了两个函数"。
+> 真正的检查器是 **`map` 在前 `filter` 在后**（见 `verify-pure-move.mjs` 的注释）。
+> 修法是整段 `contentLines` 直接 import，不再自己拼管线 —— 这样解剖脚本与判据不会再分叉。
+>
+> **一个"看起来像丢代码"的红，根因是我的诊断工具用了与判据不同的管线。** 这类错误的危险在于：
+> 它会让人去"修"一个不存在的搬运缺陷。
+
+**C2 的四个调用者仍然可用（re-export 接住了）**
+
+```
+store.atomicWrite === io.atomicWrite            : true
+store.StoreWriteRejected === io.StoreWriteRejected : true
+store.js 导出面：HEAD 51 条 → 工作区 51 条，消失 0 / 新增 0
+```
+
+`graph.ts`（3 处）、`knowledge.ts`（3 处）、`suggest.ts`（2 处）、`store.ts` 自身（22 处）
+import 的都是 `store.js`，**零改动**。`readJsonl` / `readJsonlFresh` 搬前就不是公开面，
+所以 `io.ts` 导出它们、而 `store.ts` 只 import 不 re-export —— 导出面因此**一条不差**。
+
+**闭包重测：搬 B 让 A1/A3/A2 全部变轻**（同一份名单，HEAD 的 `src/` vs 工作区 `src/`）
+
+| 组 | 搬 B 之前 | **搬完 B** | 差 |
+|---|---|---|---|
+| B | 91 行 / 9 声明 | **80 行 / 8 声明** | 见下注 |
+| **A1** | 795 行 / 48 声明 | **722 行 / 42 声明** | **-73** |
+| **A3** | 472 行 / 23 声明 | **396 行 / 16 声明** | **-76** |
+| **A2** | 848 行 / 47 声明 | **768 行 / 39 声明** | **-80** |
+| 第 0 步 | 9 行 / 3 声明 | 9 行 / 3 声明 | 0 |
+
+> **注：B 自己的 91 → 80 不是"变轻"** —— 搬完之后被量的对象换成了新文件，
+> 闭包里不再包含 `store.ts` 内的上下文。**判据是 `mutable: none` + A=YES，不是这个数字变小。**
+> 而 A1/A3/A2 的下降是**真的**：它们原本把 5 个 IO 原语（及其 3 个常量/类）算进闭包，
+> 现在这些名字跨了模块边界，`closure.mjs` 不跟随 import，于是不再计入。
+
+**一条方法论教训（第一次量错了）**：我先把 HEAD 的 `src/` 导出到 `_scratch/src-at-head`，
+设了 `GRAFT_CLOSURE_SRC` 去量，结果 5 组数字**全部与工作区一模一样**。
+原因是 `move-gate` 决定"量哪棵树"用的是 **`GRAFT_MOVE_GATE_SRC`**，`GRAFT_CLOSURE_SRC` 只是它转给 `closure.mjs` 的值。
+两个变量名字挨着、都叫 SRC，**设错一个就会得到"搬前搬后完全一致"这个看起来很有说服力的假结论**。
+现在两个都设，并先把 HEAD 的 `.ts` 用 `git show` 的**原始字节**落盘（PowerShell 的 `Set-Content` 会加 BOM、吃换行）。
+
+**D 档四项**
+
+| 项 | 结果 |
+|---|---|
+| 效率 | 5 轮交替采样取中位数，`atomicWrite` 每次 4208 字节 × 400 次：**+5.3% / -0.7% / -2.0%**（三次复跑）。判据 >+10% 视为退，**未越线**；波动来自文件系统，不是机制 |
+| 安全性 | 导出面 **51 → 51，消失 0 / 新增 0**；禁 eval / 动态 import 未引入 |
+| 稳定性 | `npm test` **434/434/0 连续三次一致**；`build` 两次 SHA256 相同（`store.js` `BDF9C810…`、`store/io.js` `E1AB17B9…`） |
+| 并发 | `v022-concurrency` + `v025-lost-update` + `v031-quarantine-lock` + `v100-refs-append` + `v023-json-gate` 共 **31 条全绿**；锁边界未动（`acquireFileLock` / `withFileLock` 都在 `store.ts` 内原样） |
+
+**同一次搬动还顺带修好了 `type-budget` 的 strict 口径**：`strict:true` 报数从 92 → **94**
+（`store/io.ts` 因缺 `@types/node` 引入 4 条 2307/2580，`store.ts` 少了几条）——
+这是**环境产物**，不是新债；`strict:false` 口径仍是 0。
+
+**时钟接缝在搬 B 之后仍是 2/2 绿** —— 这是"第 0 步的接缝没被后续搬迁扯断"的复核。
+
 ### 建议顺序与理由
 
 **0 → B → A1 → A3 → A2**，理由是**依赖方向 + 规模门槛**，不是"哪个大先做"：
 
 ```
-0. clock.ts（9 行闭包，无 outside）   ← 先做，让 A3 的 mutable 归零
+0. clock.ts（9 行闭包，无 outside）   ← ✅ 已完成 14c1d59，让 A3 的 mutable 归零
         ↓
-B. io.ts（91 行闭包，跨 store/causal/lock 三文件）← atomicWrite 被 A1/A3/A2 同时依赖
+B. io.ts（80 行闭包）                ← ✅ 已完成（本轮），清掉 atomicWrite 这个共享依赖
         ↓
-A1. skill.ts（795 行闭包）           ← 接近上限，要先定类型归属
+A1. skill.ts（722 行闭包）           ← 离上限 78 行，要先定类型归属
         ↓
-A3. layer.ts（478 行闭包，0 之后 mutable none）
+A3. layer.ts（396 行闭包，mutable none）
         ↓
-A2. lifecycle.ts（848 行闭包）       ← 当前超 800，必须先让 A1/A3 把它瘦下来
+A2. lifecycle.ts（768 行闭包）       ← 搬 B 之后已降到 800 以下，但仍依赖 A1/A3 先分
 ```
 
-- **0 是 A3 的前置条件**，也是唯一"搬它能让别的步骤从不可搬变可搬"的一步；
-- **B** 清掉 `atomicWrite` 这个三处共享依赖；**动手前必须先回答 `causal.ts` / `knowledge.ts` 的同名 `readJsonl` 怎么办**（见上）；
-- **A1** 闭包 795 行已接近 800 上限，**动手前必须先决定 `SkillMeta` / `SkillConflict` / `VOCAB_TAG` 的归属**
-  （它们是"类型和常量"，进 `types.ts` 还是随 A1 走）；
-- **A3** 在第 0 步之后才可搬；
-- **A2 不动。** 闭包 848 > 800，**当前就是不能搬**；等 A1 + A3 分完再重新量一次，那时才知道它到底剩多少；
-- 每步都是纯搬运，每步用 `verify-pure-move --against <上一步>` 验，红就停。
+- **0 已完成**，A3 的 `mutable` 从 `[lastIssuedMs]` 变成 `none`（实测复核过）；
+- **B 已完成**，`atomicWrite` 这个三处共享依赖已收进 `store/io.ts`，四个调用者零改动；
+- **A1 闭包 722 行**（搬 B 前 795），**动手前仍必须先决定 `SkillMeta` / `SkillConflict` / `VOCAB_TAG` 的归属**
+  （它们是"类型和常量"，进 `types.ts` 还是随 A1 走）——这条裁定没变，**因为类型归属与搬 B 无关**；
+- **A3 现在可搬**（`mutable: none`，第 0 步之后成立）；
+- **A2 不应因为"降到 768"就提前拆**：它依赖 A1/A3 先把 skill helper 与 IO 分走，
+  按裁定**继续挂着**，等 A1/A3 做完再重新量一次；
+- 每步都是纯搬运，每步用 `verify-pure-move --against <上一步>` 验，红就停并逐条解释。
 
-> **本轮裁定（按用户 2026-11-14）**：
-> - **只立项，不动手** —— 本节与 §十一全是测量结果，没有一行实际搬运；
-> - **A2 不动**（848 > 800，等 A1/A3 分完再评估）；
+> **当前裁定（2026-11-14，第 8 代会话）**：
+> - **第 0 步 + B-1 + sleepSync 消歧 + B 搬运**：已做；
+> - **A1 / A3 未开工** —— 按用户要求"B 搬完先停，贴数字给我，不要连着做 A3"；
+> - **A1 动手前必须先定 `SkillMeta` / `VOCAB_TAG` / `SkillConflict` 的归属**（795 距 800 只剩 5 行时的顾虑，现在有 78 行余量，但归属仍未决定）；
+> - **A2 不动**，即使闭包已降到 768；
 > - **D-1…D-7 继续挂着**，等重构完成；
-> - `validAt` / `reasoningEffort` 两个未验证项**保持标注，不补测**。
+> - `validAt` / `reasoningEffort` 两个未验证项**保持标注，不补测**；
+> - **不 publish、不碰 paradise。**
+
 
 ### 关键风险（必须先说）
 
@@ -825,18 +956,21 @@ $ node scripts/families.mjs renderSkill --src store.ts
 | 组 | 声明跨度（families） | **闭包（move-gate，按「文件:名字」）** | `mutable` | 倍数 |
 |---|---|---|---|---|
 | 第 0 步 `clock` 三件套 | 9 | **9 行 / 3 声明** | **`[lastIssuedMs]` ← 刻意** | 1.0× |
-| B `io` 原语 | 80 | **91 行 / 9 声明** | `none` | 1.1× |
-| A1 `skill` 读写 | 435 | **795 行 / 48 声明** | `none` | **1.8×** |
-| A3 `layer` 写入 | 332 | **478 行 / 25 声明** | **`[lastIssuedMs]`** | 1.4× |
-| A2 `lifecycle` | 466 | **848 行 / 47 声明** | `none` | **1.8×** |
+| B `io` 原语（搬完） | 63 | **80 行 / 8 声明** | `none` | 1.3× |
+| A1 `skill` 读写 | 435 | **722 行 / 42 声明** | `none` | **1.7×** |
+| A3 `layer` 写入 | 332 | **396 行 / 16 声明** | `none` | 1.2× |
+| A2 `lifecycle` | 466 | **768 行 / 39 声明** | `none` | 1.6× |
+
+> 表里的闭包是**搬完 B 之后**的数（同一份名单重测）。
+> 搬 B 之前的对应数是 91 / 795 / 472 / 848 —— 那 4 个数**不要再拿去判断可搬性**，它们包含了已被搬走的 IO 原语。
 
 **这张表是本清单最重要的数据**，因为它直接改写了三条判断：
 
-1. **A2 闭包 848 > 800 ⇒ 当前不可搬**（上一版按组跨度 466 写，低估近一倍）；
-2. **A3 的 `mutable` 不是 `none`** —— 它拖着 `lastIssuedMs`，**现在不可搬**；
-3. **A1 闭包 795，距离 800 上限只剩 5 行** —— 随时会因为一个 helper 被拉进去而超限。
+1. **A2 闭包 768 ≤ 800**（搬 B 前是 848）⇒ 规模门槛已过，但**仍不该提前拆**：它依赖 A1/A3 先把共用 helper 分走；
+2. **A3 的 `mutable` 已是 `none`** —— 第 0 步把 `lastIssuedMs` 移出闭包后成立，**A3 现在可搬**；
+3. **A1 闭包 722，距 800 上限还有 78 行** —— 比搬 B 前的"只剩 5 行"宽松了，但仍要先定 `SkillMeta` / `VOCAB_TAG` / `SkillConflict` 的归属。
 
-**闭包普遍是组跨度的 1.5–1.9 倍。** 拿组跨度当"这个模块多大"，会系统性低估。
+**闭包普遍是组跨度的 1.2–1.7 倍。** 拿组跨度当"这个模块多大"，会系统性低估。
 
 ### 读法
 
@@ -844,9 +978,10 @@ $ node scripts/families.mjs renderSkill --src store.ts
 这说明 `store.ts` 里**不存在 `applyInner` 那种"一个根吸走一切"的结构** ——
 这点很重要：它意味着按职责拆文件**不会**像拆 `applyInner` 那样撞上一个 1,362 行的巨物。
 
-**但"没有巨物"不等于"好拆"**：闭包普遍是跨度的 1.5–1.9 倍，
+**但"没有巨物"不等于"好拆"**：闭包普遍是跨度的 1.2–1.7 倍，
 说明 `store.ts` 的耦合是**弥散**的（很多小 helper 被多组共用），而不是集中在某一处。
-所以拆分的难度不在"切哪一刀"，而在**先把共享 helper 归位**（第 0 步与 B 就是干这个的）。
+所以拆分的难度不在"切哪一刀"，而在**先把共享 helper 归位**（第 0 步与 B 就是干这个的——
+实测它们让 A1/A3/A2 的闭包分别降了 73 / 76 / 80 行，**这是"先清共享依赖"这个顺序唯一的量化收益**）。
 
 > 关于"#2 的 C1 判定"的准确表述（上一版报告写成了"混杂"，那是**缩水**了机制结论）：
 >
@@ -871,7 +1006,7 @@ $ node scripts/families.mjs renderSkill --src store.ts
 | **D-1** | `retrieve.ts` `hitOf` / `MemoryHit` | **未完成功能**（降权生效、文案不生效） | **有**（过期前缀永不出现） | 2 + 测试~15 | **重构完成后**，且先修测试再修代码 |
 | D-2 | `extract.ts` `ExtractedExperience` | 类型欠账 | 无 | 1 | 重构完成后，一批 |
 | D-3 | `extract.ts` `LlmLike.stream` | 类型欠账 | 无 | 1 | 重构完成后，一批（取值集合仍未验证，见 §十三） |
-| D-4 | `store.ts` `LayerRecord` | 类型欠账 | 无 | 1 | 重构完成后，一批 |
+| **D-4** | `store.ts` `LayerRecord` | 类型欠账 | 无 | 1 | 重构完成后，一批 |
 | D-5 | `dedupe.ts` `NegativeRecord` | 类型欠账 | 无 | 2 | 重构完成后，一批 |
 | D-6 | `store.ts:2215` | 纯结构可赋值性 | 无 | 1 | 重构完成后，一批 |
 | D-7 | `index.ts:21,65` | 合并遗留 | 无 | 2 | 重构完成后，一批 |
@@ -892,7 +1027,8 @@ $ node scripts/families.mjs renderSkill --src store.ts
 | D-3 的 `reasoningEffort` 合法取值集合 | **保持标注，本轮不补测。** 只知 `'off'` 会被某些 provider 拒绝；宿主 adapter 源码未读。**修 D-3 时必须先补这一项**，否则写下的类型范围可能是错的 |
 | `validAt` 会不会将来被读 | **保持标注，本轮不补测。** 只核了当前代码没有读者；只要有读者，就是第 8 条同型缺陷 |
 | D-1 修复后是否影响既有测试 | 未实施，因此未测；但已证明 **v021 对它不敏感**，所以"测试通过"不能当验证 |
-| 第 0 步搬走后时钟是否仍是同一个实例 | 只预演了 `mutable` 变化（`none` / `[lastIssuedMs]`），**没跑全套测试验证 `resetMonotonicClockForTest` 的穿通** |
-| A1 闭包 795 行的类型归属（`SkillMeta` / `VOCAB_TAG` 等） | 未决策；动手前必须先定，否则很容易超 800 |
-| A2 闭包 848 行怎么瘦到 800 以下 | 只知道要先做 A1/A3 把 IO 与 skill helper 分出去，**没实测瘦身后是多少** |
+| 第 0 步搬走后时钟是否仍是同一个实例 | **已实测**：`store.js` 与 `store/clock.js` 导出的 `monotonicTimestamp` / `resetMonotonicClockForTest` `===` 相等；接缝测试 2/2 在搬第 0 步后、搬 B 后各跑一次都是绿的 |
+| **B 搬走后 `causal.ts` 的处理** | **已决定（B-1 改名），且已执行**。`causal.ts` 保留自己的 `readJsonlLocal` 私有实现，**不 import `store/io.ts`**；三份实现的语义一致性**仍未逐行验过**，所以 B-2 不做 |
+| A1 闭包 722 行的类型归属（`SkillMeta` / `VOCAB_TAG` 等） | **仍未决策**（搬 B 让它从"只剩 5 行余量"变成"78 行余量"，但归属问题本身没变）；动手前必须先定 |
+| A2 闭包 768 行怎么排期 | 规模门槛已过（768 ≤ 800），但**依赖 A1/A3 先分**；按裁定继续挂着，**不为降到 800 而提前拆** |
 | 类型环拆分后的对外 import | 验了 `lib/retrieve.js` 导出数 34→34，但**没验 `lib/index.js` 的导出面** |
