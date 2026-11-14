@@ -552,6 +552,18 @@ export function clearSkillShapeCache(skillsDir?: string): void {
   else shapeCache.delete(skillsDir)
 }
 
+/**
+ * v1.x TEST SEAM — see `resetMonotonicClockForTest` for the contract.
+ *
+ * `shapeCache` is module-level mutable state (a `const` object mutated via
+ * `clear` / `set` / `delete`). Any suite that exercises the skill writers or
+ * ISOLATION between tests must be able to reset it deterministically, otherwise
+ * a stale cached shape from test A can answer test B.
+ */
+export function resetShapeCacheForTest(): void {
+  clearSkillShapeCache()
+}
+
 function shapeOf(skillsDir: string, name: string): ExtractedSkill | undefined {
   const path = skillPath(skillsDir, name)
   let stat: { mtimeMs: number; size: number }

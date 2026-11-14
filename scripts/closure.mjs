@@ -159,6 +159,47 @@ function measureWithTypeScript(ts) {
     }
     visitAssignments(sourceFile)
 
+    /**
+     * ── A `const` OBJECT MUTATED THROUGH A METHOD IS MUTABLE STATE TOO ───────────────────────────
+     *
+     * `rootIdentifierOf` catches reassignment (`cache = new Map()`), and
+     * `assignedSomewhere` catches that. But the commonest mutation of a module-level
+     * collection is NOT a reassignment — it is `cache.set(k, v)` / `cache.clear()` /
+     * `cache.delete(k)` / `arr.push(x)` / `set.add(x)`. Those are
+     * `PropertyAccessExpression` CALLS, not assignments; the identifier `cache` on the
+     * expression side NEVER becomes an assignment target, so a module const object that
+     * is freely mutated was reported `mutable: false`.
+     *
+     * Measured (the `shapeCache` case in `store.ts`): a module-level
+     * `const shapeCache = new Map<string, Map<string, CachedShape>>()` is cleared and
+     * re-seeded through `shapeCache.clear()` / `.set()` / `.delete()` on every write.
+     * Under the old rule `closure.mjs --cluster writeSkill store.ts` reported
+     * `mutable: none` — and a move of that closure would have carried the functions
+     * while leaving the one piece of shared state behind. Only a manual read of
+     * `store.ts` flagged it, which is exactly the "const so it must be safe" trap.
+     *
+     * The set of method names is deliberately the mutating built-ins on Map / Set /
+     * Array: set, delete, clear, push, pop, shift, unshift, splice, add, remove, sort,
+     * reverse, fill, copyWithin. Everything else (`.get`, `.has`, `.size`) is read-only.
+     */
+    const MUTATING_METHODS = new Set([
+      'set', 'delete', 'clear', 'push', 'pop', 'shift', 'unshift',
+      'splice', 'add', 'remove', 'sort', 'reverse', 'fill', 'copyWithin',
+    ])
+    const mutatedSomewhere = new Set()
+    const visitMutations = (node) => {
+      if (
+        ts.isCallExpression(node)
+        && ts.isPropertyAccessExpression(node.expression)
+        && ts.isIdentifier(node.expression.expression)
+        && MUTATING_METHODS.has(node.expression.name.text)
+      ) {
+        mutatedSomewhere.add(node.expression.expression.text)
+      }
+      ts.forEachChild(node, visitMutations)
+    }
+    visitMutations(sourceFile)
+
     const map = new Map()
     const span = (node) => ({
       start: sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1,
@@ -172,13 +213,30 @@ function measureWithTypeScript(ts) {
         for (const declaration of statement.declarationList.declarations) {
           if (!ts.isIdentifier(declaration.name)) continue // destructuring: not a module-scope NAME
           const name = declaration.name.text
+          const reassigned = assignedSomewhere.has(name)
+          const constMutated = mutatedSomewhere.has(name)
+          let mutable
+          let mutableKind
+          if (!isConst) {
+            mutable = true
+            mutableKind = 'let/var'
+          } else if (reassigned) {
+            mutable = true
+            mutableKind = 'reassigned'
+          } else if (constMutated) {
+            mutable = true
+            mutableKind = 'const-mutated'
+          } else {
+            mutable = false
+          }
           map.set(name, {
             name,
             file: sourceFile.fileName,
             start,
             end,
             lines: end - start + 1,
-            mutable: !isConst || assignedSomewhere.has(name),
+            mutable,
+            mutableKind,
             kind: isConst ? 'const' : 'let/var',
             node: statement,
           })
@@ -281,7 +339,13 @@ function measureWithTypeScript(ts) {
       lines += end - start + 1
     }
 
-    const mutable = [...included.values()].filter((d) => d.mutable).map((d) => `${d.name} (${d.kind})`).sort()
+    const mutable = [...included.values()]
+      .filter((d) => d.mutable)
+      // 只有 const-mutated（被变异方法调用但没被整体重赋值，shapeCache 情形）
+      // 才把标签从 (const) 改成 (const-mutated)；reassigned / let-var 保持旧行为不改。
+      // 这串字符串同时被 move-gate 按正则提取后原样展示，只增不改不破坏它。
+      .map((d) => (d.mutableKind === 'const-mutated' ? `${d.name} (const-mutated)` : `${d.name} (${d.kind})`))
+      .sort()
     return {
       declarations: included.size,
       lines,
