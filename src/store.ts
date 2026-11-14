@@ -50,7 +50,7 @@ export function defaultSkillsDir(): string {
 }
 
 /** Windows holds a share lock while a reader has the file open; sleep briefly. */
-function sleepSync(ms: number): void {
+function sleepSyncLocal(ms: number): void {
   try {
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
   } catch {
@@ -164,7 +164,7 @@ export function atomicWrite(path: string, text: string): void {
         }
         throw error
       }
-      sleepSync(5 + Math.min(50, attempt * 5))
+      sleepSyncLocal(5 + Math.min(50, attempt * 5))
     }
   }
 }
