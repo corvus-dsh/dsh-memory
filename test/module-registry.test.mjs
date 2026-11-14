@@ -22,18 +22,7 @@ import assert from 'node:assert/strict'
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { annotate } from './_diag-annotate.mjs'
 
-/** 临时诊断包装：失败原因写进 annotation（job 日志需认证，annotation 不需要）。定位后删除。 */
-const t2 = (name, fn) => test(name, async (t) => {
-  try {
-    await fn(t)
-  } catch (error) {
-    const msg = String(error?.message ?? error).replace(/\r?\n/gu, ' ⏎ ').slice(0, 800)
-    console.log('::error::ANNOTATE FAIL ' + name + ': ' + (error?.name ?? 'Error') + ': ' + msg)
-    throw error
-  }
-})
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const REGISTRY = join(ROOT, 'MODULE-REGISTRY.md')
@@ -78,26 +67,26 @@ const modulesOnDisk = () => {
   return out.sort()
 }
 
-t2('every module on disk is REGISTERED (a new file cannot slip in silently)', () => {
+test('every module on disk is REGISTERED (a new file cannot slip in silently)', () => {
   const registered = new Set(readRows().map((r) => r.module))
   const missing = modulesOnDisk().filter((m) => !registered.has(m))
   assert.deepEqual(missing, [], `these module(s) exist under src/ but are NOT in MODULE-REGISTRY.md: ${missing.join(', ')}`)
 })
 
-t2('every row in the registry points at a file that EXISTS (a deleted module cannot linger)', () => {
+test('every row in the registry points at a file that EXISTS (a deleted module cannot linger)', () => {
   const onDisk = new Set(modulesOnDisk())
   const phantom = readRows().map((r) => r.module).filter((m) => !onDisk.has(m))
   assert.deepEqual(phantom, [], `these row(s) name a module that no longer exists: ${phantom.join(', ')}`)
 })
 
-t2('every row declares a one-line duty and its exports', () => {
+test('every row declares a one-line duty and its exports', () => {
   for (const row of readRows()) {
     assert.notEqual(row.duty.length, 0, `${row.module}: the duty column is empty — a registry without "what for" is a file list`)
     assert.notEqual(row.exports.length, 0, `${row.module}: the exports column is empty`)
   }
 })
 
-t2('the dependency column only names modules that EXIST (no dangling dependency)', () => {
+test('the dependency column only names modules that EXIST (no dangling dependency)', () => {
   const onDisk = new Set(modulesOnDisk())
   for (const row of readRows()) {
     if (row.deps === '—' || row.deps.length === 0) continue
@@ -126,7 +115,7 @@ function splitDeps (cell) {
   })
 }
 
-t2('the registry has no VALUE cycle (type-only edges are erased at runtime and do not count)', () => {
+test('the registry has no VALUE cycle (type-only edges are erased at runtime and do not count)', () => {
   const rows = readRows()
   const graph = new Map(rows.map((r) => [
     r.module,
@@ -154,7 +143,7 @@ t2('the registry has no VALUE cycle (type-only edges are erased at runtime and d
   }
 })
 
-t2('every type-only edge is REALLY type-only in the source (the label cannot lie)', () => {
+test('every type-only edge is REALLY type-only in the source (the label cannot lie)', () => {
   /**
    * 这条防的是「把一条值依赖标成 type-only 来骗过成环检查」。
    * 判据：源文件里指向该模块的那条 import 必须以 `import type` 或 `{ type X }` 出现，

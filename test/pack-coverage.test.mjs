@@ -19,21 +19,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { existsSync, readFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { annotate } from './_diag-annotate.mjs'
 
-/** 临时诊断包装：失败原因写进 annotation（job 日志需认证，annotation 不需要）。定位后删除。 */
-const t2 = (name, fn) => test(name, async (t) => {
-  try {
-    await fn(t)
-  } catch (error) {
-    const msg = String(error?.message ?? error).replace(/\r?\n/gu, ' ⏎ ').slice(0, 800)
-    console.log('::error::ANNOTATE FAIL ' + name + ': ' + (error?.name ?? 'Error') + ': ' + msg)
-    throw error
-  }
-})
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
@@ -57,31 +47,106 @@ const npmInvocation = () => {
 
 const packedFiles = (t) => {
   const { cmd, args, shell } = npmInvocation()
+  /**
+   * ── 为什么在**临时副本**里跑 npm pack，而不是在本仓里 ────────────────────────────────────────
+   *
+   * 本仓 `package.json` 有 `"prepare": "node scripts/build.mjs"`，而 `npm pack` 会触发生命周期脚本。
+   *
+   * 实测（npm 10.9.7 / Node 22，即 CI 上 22.x 那一档）：
+   *
+   *     $ npm pack --dry-run --json --ignore-scripts
+   *     > @corvus-dsh/dsh-memory@0.9.2-beta.1 prepare
+   *     > node scripts/build.mjs
+   *     built 27 modul…
+   *
+   * **`--ignore-scripts` 在 npm 10 上拦不住 `prepare`**（`npm_config_ignore_scripts=true` 同样拦不住）；
+   * npm 11（Node 24 那一档）能拦住。于是同一份代码：24.x 绿、22.x 红。
+   *
+   * 红的方式还极具误导性：`prepare` 重建 `lib/`，正在读 `lib/` 的**其它**测试看到半更新产物，
+   * 于是 v031 / v032 / v220 偶发失败，`ℹ tests` 总数在 404 / 414 / 419 之间跳 ——
+   * 看起来像"并发不稳"，实际是一个只读门禁带了写副作用。
+   *
+   * 修法不是加参数（加了没用），而是**让副作用无处可落**：
+   * 把参与打包判定的文件复制到临时目录，并从副本的 `package.json` 里剥掉 `prepare`，
+   * 然后在副本里跑 npm。这样：
+   *   · 没有生命周期脚本可跑（副本里根本没有 prepare）；
+   *   · 即使 npm 想跑，改的也是临时目录；
+   *   · 本仓的 `lib/` 在整个测试过程中只读。
+   *
+   * 忠实度说明：副本按 `files` 声明 + npm 总会包含的那几个文件复制，
+   * 相对路径与真实树一一对应，所以"包里有没有这个指针"的结论等价。
+   */
+  let temp
   try {
-    /**
-     * ── `--ignore-scripts` 不是省事，是**必须** ─────────────────────────────────────────────────
-     *
-     * 本仓 `package.json` 有 `"prepare": "node scripts/build.mjs"`，而 `npm pack` 会触发它。
-     * 实测后果：这个测试与其它测试**并发**跑时，`prepare` 重建 `lib/`，
-     * 正在读 `lib/` 的测试看到半更新的产物 —— 整套测试开始 intermittent fail，
-     * 且 `ℹ tests` 总数在 404 / 414 / 419 之间跳（有测试文件在中途崩掉）。
-     *
-     * 一个「只读产物清单」的门禁**不该有构建副作用**。加上 `--ignore-scripts` 之后
-     * 它只看不写，套件恢复稳定。
-     *
-     * 这是移植时踩到的：observer 没有 prepare 钩子，所以那版不需要这个参数。
-     */
+    temp = makePackSandbox()
     const out = execFileSync(cmd, [...args, 'pack', '--dry-run', '--json', '--ignore-scripts'], {
-      cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, shell,
+      cwd: temp, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, shell,
     })
-    return JSON.parse(out.slice(out.indexOf('['), out.lastIndexOf(']') + 1))[0].files.map((f) => f.path)
+    return extractJsonArray(out)[0].files.map((f) => f.path)
   } catch (error) {
     t.skip(`npm pack --dry-run unavailable (${String(error.message).slice(0, 80)}) — RESOURCE condition, not a pass`)
     return undefined
+  } finally {
+    if (temp !== undefined) rmSync(temp, { recursive: true, force: true })
   }
 }
 
-t2('pack: every pointer in package.json resolves to a file that is actually packed', (t) => {
+/**
+ * 造一个"可以安全跑 npm pack"的副本。
+ *
+ * 复制范围：`package.json`（剥掉 prepare）+ `files` 列出的每个条目 + npm 总会包含的 README/LICENSE。
+ * `files` 里若有 glob，则跳过（本仓没有；有的话应当改成显式目录）。
+ */
+function makePackSandbox () {
+  const temp = mkdtempSync(join(tmpdir(), 'pack-eval-'))
+  const clone = JSON.parse(JSON.stringify(pkg))
+  if (clone.scripts !== undefined) {
+    for (const hook of ['prepare', 'prepack', 'postpack', 'prepare']) delete clone.scripts[hook]
+  }
+  writeFileSync(join(temp, 'package.json'), `${JSON.stringify(clone, null, 2)}\n`, 'utf8')
+
+  const copyInto = (rel) => {
+    const from = join(ROOT, rel)
+    if (!existsSync(from)) return
+    cpSync(from, join(temp, rel), { recursive: true })
+  }
+
+  for (const entry of pkg.files ?? []) {
+    if (typeof entry !== 'string' || entry.includes('*')) continue
+    copyInto(entry.replace(/^\.\//u, '').replace(/\/$/u, ''))
+  }
+  for (const always of ['README.md', 'LICENSE', 'LICENCE']) copyInto(always)
+  return temp
+}
+
+/** 括号配平扫描：从每个 `[` 起尝试，返回第一个能解析成数组的切片（防 stdout 前缀污染）。 */
+function extractJsonArray (text) {
+  for (let start = text.indexOf('['); start >= 0; start = text.indexOf('[', start + 1)) {
+    let depth = 0
+    let inString = false
+    let escaped = false
+    for (let i = start; i < text.length; i += 1) {
+      const ch = text[i]
+      if (inString) {
+        if (escaped) escaped = false
+        else if (ch === '\\') escaped = true
+        else if (ch === '"') inString = false
+        continue
+      }
+      if (ch === '"') { inString = true; continue }
+      if (ch === '[') depth += 1
+      else if (ch === ']') {
+        depth -= 1
+        if (depth === 0) {
+          try { return JSON.parse(text.slice(start, i + 1)) } catch { break }
+        }
+      }
+    }
+  }
+  throw new Error('npm pack --json produced no parseable JSON array')
+}
+
+test('pack: every pointer in package.json resolves to a file that is actually packed', (t) => {
   const packed = packedFiles(t)
   if (packed === undefined) return
   const set = new Set(packed)
@@ -111,7 +176,7 @@ t2('pack: every pointer in package.json resolves to a file that is actually pack
   assert.deepEqual(badExports, [], `exports contains dangling pointers:\n  ${badExports.join('\n  ')}`)
 })
 
-t2('pack: no development files leaked into the tarball', (t) => {
+test('pack: no development files leaked into the tarball', (t) => {
   const packed = packedFiles(t)
   if (packed === undefined) return
   /**
@@ -139,7 +204,7 @@ t2('pack: no development files leaked into the tarball', (t) => {
   }
 })
 
-t2('pack: the files list and the tarball agree on what is shipped', (t) => {
+test('pack: the files list and the tarball agree on what is shipped', (t) => {
   /**
    * 第三条：`files` 里写了却没进包（或反之）是一种静默的不一致 ——
    * 作者以为在发，实际没发。只对**非 glob** 的条目前缀做检查。

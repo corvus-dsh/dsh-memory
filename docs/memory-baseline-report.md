@@ -334,7 +334,11 @@ run: tests 419 / pass 415 / fail 4
 `package.json` 有 `"prepare": "node scripts/build.mjs"`，而 `npm pack` 会触发它。
 在**并发**套件里，`prepare` 重建 `lib/`，正在读 `lib/` 的测试看到半更新的产物。
 
-**一个「只读产物清单」的门禁不该有构建副作用。** 加 `--ignore-scripts` 后：
+**对照实验证明这是我的问题**：`git stash -u` 后跑基线是 423/423/0；恢复后复现 4–6 条失败。
+
+### 第一次修（只在本机成立）：`--ignore-scripts`
+
+我加了 `--ignore-scripts`，本机（Node 24 / npm 11）立刻稳定：
 
 ```
 run 0: tests 432 / pass 432 / fail 0
@@ -342,10 +346,67 @@ run 1: tests 432 / pass 432 / fail 0
 run 2: tests 432 / pass 432 / fail 0
 ```
 
-**对照实验证明这是我的问题**：`git stash -u` 后跑基线是 423/423/0；恢复后复现 4–6 条失败。
+**然后 CI 打了回来：22.x 红、24.x 绿。** 同一份代码，只有 Node/npm 版本不同。
 
-observer 那边不需要这个参数，因为它没有 `prepare` 钩子 —— 这是**移植时才知道的差异**，
-照抄脚本不会暴露，只有真跑整套才会。
+### 真正的根因：npm 10 的 `--ignore-scripts` 拦不住 `prepare`
+
+拉不到 job 日志（403 需认证），所以改用两个可匿名读取的通道取证：
+① `check-run` 上的 annotation；② 本机装 Node 22.22.2（与 CI 的 22.x 同版本）逐个复现。
+
+**Node 22 + Windows 上整套 433/433 全过** ⇒ 与 Node 版本无关 ⇒ 差异在平台或 npm。
+
+用 Node 22 自带的 **npm 10.9.7** 复现，直接看到答案：
+
+```
+$ npm pack --dry-run --json --ignore-scripts
+> @corvus-dsh/dsh-memory@0.9.2-beta.1 prepare
+> node scripts/build.mjs
+built 27 module(s) into lib/
+[ …真正的 JSON… ]
+```
+
+**npm 10 无视 `--ignore-scripts`，`prepare` 照跑**；`npm_config_ignore_scripts=true` 同样拦不住。
+npm 11（Node 24 那一档）能拦住。所以 CI 上：24.x 绿、22.x 红。
+
+而且它的破坏方式极具误导性：`prepare` 的输出（`built 27 module(s) into lib/`）**混进了
+`npm pack --json` 的 stdout**，JSON 前面多了一段前缀；同时 `lib/` 被重建，
+并发测试读到半更新产物。两件事叠在一起，看起来像"并发不稳 + 解析偶发失败"。
+
+### 第二次修（正解）：让副作用无处可落
+
+加参数没用（加了不生效），所以改结构：**在临时副本里跑 npm pack**。
+
+- 把 `files` 声明的条目 + README/LICENSE + `package.json` 复制到临时目录；
+- 副本里的 `package.json` **剥掉 `prepare` / `prepack` / `postpack`**；
+- 在副本里跑 `npm pack --dry-run --json`；
+- 完事删掉副本。
+
+这样：副本里没有生命周期脚本可跑；即使 npm 想跑，改的也是临时目录；本仓 `lib/` 全程只读。
+
+顺带把 JSON 解析从 `indexOf('[')…lastIndexOf(']')` 换成**括号配平扫描** ——
+上面那段前缀一旦含 `[`，朴素切片就会切坏。
+
+### 验证（npm 10 与 npm 11 都跑）
+
+```
+npm 10.9.7（Node 22，忠实复现 CI 那一档）
+  run 0: tests 432 / pass 432 / fail 0   [no build leak]
+  run 1: tests 432 / pass 432 / fail 0   [no build leak]
+
+npm 11.19.0（本机 Node 24）
+  tests 432 / pass 432 / fail 0
+```
+
+**"no build leak" 是逐次检查的**：整套 npm test 输出里不再出现 `built 27 module(s)`。
+
+### 这一段值得记的三件事
+
+1. **本机绿 ≠ CI 绿**：同一份代码，npm 10 与 npm 11 对同一个参数的处理不同。
+   我是靠"22.x 红 / 24.x 绿"这个**双 Node 矩阵**才知道的 —— 单 Node 的 CI 会直接放过。
+2. **一个"只读"门禁带了写副作用**，症状会出现在**不相干的测试**上（v031/v032/v220），
+   而不是出问题的地方。`ℹ tests` 总数跳动是重要线索：有文件崩了。
+3. **拉不到日志不等于无法取证**：annotation 可匿名读；本机装同版本 Node 能直接复现。
+   我用诊断件把结论写进 annotation，一次拿到"npm 10 上 prepare 照跑"的直接证据。
 
 ---
 
