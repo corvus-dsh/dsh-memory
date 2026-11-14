@@ -99,6 +99,40 @@ flushTimer.unref?.()          // ← 2339 在这里
 > 若两者都缺，`Date.parse('')` → `NaN` → `|| 0`，排序退化为"保持原顺序"。
 > 那是**数据缺失**时的既定行为（`Document.updatedAt` 有的记录才有），不是 bug。
 
+#### 交叉核对时又发现一条**同类但还没报错**的：`validAt`
+
+把「`hitOf` 复制的字段」与「`MemoryHit` 声明的字段」做了集合比较（不是抽查）：
+
+```
+MemoryHit 声明字段数: 24
+hitOf 复制的字段数: 18
+复制的: when, detail, conflictsWith, scope, aliases, lastValidated, updatedAt,
+        confidence, counterEvidence, scene, workspace, domain, provenance,
+        validAt, sessionId, seq, generation, commitHash
+
+在 hitOf 里被复制但 MemoryHit 没声明的: updatedAt, validAt
+```
+
+**`updatedAt` 报 2339，`validAt` 不报** —— 差别只在"有没有被读"：
+
+```
+$ grep '\.validAt' src/*.ts
+retrieve.ts:119   validAt: row.validAt        ← 读的是 ledger row
+retrieve.ts:808   document.validAt            ← 读的是 Document
+retrieve.ts:924   validAt: validity.validAt   ← 构造
+retrieve.ts:1368  ...(document.validAt …)     ← hitOf 里**复制**进 hit
+```
+
+**没有任何一处从 hit 上读 `validAt`**，所以 TS 没有机会报错。
+它与 `updatedAt`、`ageDays` 是**同一个形状**（`hitOf` 复制 → 接口没声明），
+只是运气好还没遇到读者。
+
+**这条不单列成第 13 条缺陷**：按当前代码它不产生错误，也看不出行为影响。
+但它说明这 12 条不是"12 个独立的手误"，而是**一类**：
+`hitOf` 这个"从 Document 搬到 MemoryHit"的搬运点，漏声明字段的模式会反复出现。
+真要修，把 `MemoryHit` 里缺的（`updatedAt` / `ageDays` / `validAt`）**一次补齐**，
+比按报错逐条打补丁更稳 —— 否则下一个读者出现时又是一条新 2339。
+
 ### ③ `retrieve.ts:1927` — `ageDays`：**代码欠账（真行为缺陷，不是类型欠账）**
 
 这是本次追查里唯一一条**运行时行为错了**的。
@@ -209,6 +243,20 @@ $ node _scratch/memory-dup2300-probe.mjs
   对象展开**绕过 excess property check**；`retrieve.ts:190` 是字面量直写，于是被查出来。
 
   > 这一条本身值得记：**展开语法是一个类型检查的盲点**，同一个非法字段用展开写就"合法"了。
+
+  **这个推断我验了两次**，第一次是错的：
+
+  | 复现形状 | A（直写） | B（展开） | 结论 |
+  |---|---|---|---|
+  | 只传 `reasoningEffort` 一个字段 | 报 **2353** | 报 **2559**（`no properties in common`） | 推断**不成立** —— 但那不是真实形状 |
+  | **已知字段齐全 + 多一个 `reasoningEffort`**（= 真实形状） | 报 **2353** | **不报** | 推断**成立** |
+
+  第一次之所以翻车：对象里**没有**任何已知字段时，TS 先报 2559（"没有任何公共属性"），
+  根本走不到 excess property check；而真实调用里 `system` / `messages` / `maxTokens` 都在，
+  于是只剩"多出一个未知字段"这一种问题，展开就把检查绕过去了。
+
+  > **教训**：最小复现必须保留**真实形状**。把形状简化到只留下争议字段，
+  > 会把"被什么检查抓到"这个问题变成另一种检查的结果 —— 我差一点据此写下"推断不成立"。
 
 → 类型欠账，`LlmLike.stream` 选项加 `reasoningEffort?: string` 一行。
 
@@ -413,6 +461,11 @@ applyInner: 22 declaration(s), 2062 lines
 | 2345 | `store.ts:2215` | 纯结构可赋值性（无 index signature） | **1** | 无 |
 
 **合计：11 行就能清掉 11 条（除那条环境产物）。其中只有 1 条（`ageDays`）改的是行为。**
+
+**但建议不要按报错逐条打补丁**：交叉核对已证明这 11 条里有 **3 条同源**
+（`updatedAt` / `ageDays` / 潜伏的 `validAt`，都是 `hitOf` 复制了、`MemoryHit` 没声明）。
+一次把 `MemoryHit` 缺的字段补齐（3 行），比等下一个读者出现再报第 13 条更稳。
+
 **本轮一条都没修** —— 只做追查与定性。
 
 ---
@@ -421,9 +474,9 @@ applyInner: 22 declaration(s), 2062 lines
 
 | 项 | 状态 |
 |---|---|
-| `ExtractedExperience.domain` 是否**真的**被下游消费 | 只确认"写得进盘"；**没查有没有读它**。若没人读，它就更接近"多余字段"而非"欠账" |
+| `ExtractedExperience.domain` 是否**真的**被下游消费 | **已核：有消费方。** `retrieve.ts:1157` 的 `layerDocumentOf`（经验/事实层读取器）写 `domain: String(record.domain ?? 'general')…`，它进而进入候选的冲突轴与过滤器输入（`filter.ts:126` 的 `domain=${candidate.domain ?? 'general'}`）。所以是**类型欠账**，不是多余字段。 |
 | `reasoningEffort` 在宿主侧的具体语义 | 只有 `filter.ts` 的实测报错作为证据；**没读宿主 adapter 源码** |
-| `ageDays` 修复后的行为变化 | 未实施，因此未测（预期：老负向会被打上 `[历史偶发错误]` 前缀） |
-| `types.ts` 拆分对 `lib/retrieve.js` 公开面的影响 | 只在副本里验了诊断数不变；**没跑产出构建与对外 import 断言** |
+| `ageDays` 修复后的行为变化 | **已实测（副本里改完重建再跑）。** 同一条 100 天前、hits=1 的 negative：<br>修复前 `ageDays: "undefined"` → hint 无过期前缀（`hasStalePrefix: false`）<br>修复后 `ageDays: 100.000…` → hint 变成 `…（记忆提示：[历史偶发错误，仅供参考] 另有一次「连接超时」翻车，先核对再重跑。）`（`hasStalePrefix: true`）<br>**这就是那 2 行（1 行复制 + 1 行声明）换来的一处真实行为变化。** |
+| `types.ts` 拆分对 `lib/retrieve.js` 公开面的影响 | **已核（补做了构建）。** 副本里真的跑 `scripts/build.mjs`：构建 OK；`lib/retrieve.js` 运行时导出数 **拆分前 34 → 拆分后 34**，名字集合逐个比对一致（`retrieve` / `renderHint` / `retrieveCandidates` 等全在）。类型被擦除，所以 `re-export` 在产物里没有痕迹是正常的。 |
 | #2 的 C1 | 我判定"过不了"，但那是**人工判断**，无机器判据 |
 | graft-slice 的族划分 | 本轮没跑（它没有打包门禁，但 files/closures 工具是否适用未查） |
