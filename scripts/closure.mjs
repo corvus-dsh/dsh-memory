@@ -41,6 +41,25 @@ const SRC = process.env.GRAFT_CLOSURE_SRC !== undefined && process.env.GRAFT_CLO
   ? resolve(process.env.GRAFT_CLOSURE_SRC)
   : join(REPO, 'src')
 
+/**
+ * ── THE ONE FORMATTER FOR A MUTABLE LABEL ─────────────────────────────────────────────────────
+ *
+ * `closureOf`（`--cluster <name>`）与 `subBlockClosureOf`（`--block`）都产出一个
+ * `name (label)` 字符串数组，且都从带 `mutableKind` / `kind` 的 declaration 对象来。
+ * 同一份源码里同一个可变绑定，两条路径必须给出一模一样的标签 —— 否则 `--cluster name`
+ * 与 `--block 覆盖同一段` 会互相矛盾，而那个矛盾只有看输出时才发现。
+ *
+ * 所以标签拼法集中到这一处，两条路径各只调一次 `filter(mutable).map(mutableLabel)`，
+ * "逐字符一致"因此是结构必然（测试 `v201-closure-label-consistency` 证明它存在）。
+ *
+ * 规则：只有 `const-mutated`（被变异方法调用但没整体重赋值，shapeCache 情形）
+ * 才把标签从裸 `(const)` 改成 `(const-mutated)`；reassigned / let-var 保持旧行为。
+ */
+const mutableLabel = (declaration) =>
+  declaration.mutableKind === 'const-mutated'
+    ? `${declaration.name} (const-mutated)`
+    : `${declaration.name} (${declaration.kind})`
+
 async function loadTypeScript() {
   for (const name of ['typescript', 'typescript/lib/typescript.js']) {
     try { return await import(name) } catch { /* next */ }
@@ -341,10 +360,7 @@ function measureWithTypeScript(ts) {
 
     const mutable = [...included.values()]
       .filter((d) => d.mutable)
-      // 只有 const-mutated（被变异方法调用但没被整体重赋值，shapeCache 情形）
-      // 才把标签从 (const) 改成 (const-mutated)；reassigned / let-var 保持旧行为不改。
-      // 这串字符串同时被 move-gate 按正则提取后原样展示，只增不改不破坏它。
-      .map((d) => (d.mutableKind === 'const-mutated' ? `${d.name} (const-mutated)` : `${d.name} (${d.kind})`))
+      .map(mutableLabel)
       .sort()
     return {
       declarations: included.size,
@@ -475,7 +491,7 @@ function measureWithTypeScript(ts) {
 
       const mutable = [...local.values(), ...outside.values()]
         .filter((declaration) => declaration.mutable)
-        .map((declaration) => `${declaration.name} (${declaration.kind})`)
+        .map(mutableLabel)
         .sort()
 
       // Lines: the range itself plus every outside declaration that must travel with it.
