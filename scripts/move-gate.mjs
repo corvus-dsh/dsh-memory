@@ -207,8 +207,17 @@ function cutTrailingLineComment(line) {
 
 const allDeclarations = declarationTable.byName
 
-/** Resolve a cluster name to wherever it actually lives. */
-const resolveDeclaration = (name) => allDeclarations.get(name)
+/**
+ * 按「名字」或「文件 + 名字」解析一个声明。
+ *
+ * 第二个参数是可选的 `file`。**带上它才是精确的**：`readJsonl` / `sleepSync` 这类名字
+ * 在多个文件里都有，只按名字会取到表里第一个（`byName` 是"先到先得"）。
+ */
+const resolveDeclaration = (name, file) => {
+  if (file === undefined) return allDeclarations.get(name)
+  const row = declarationTable.rows.find((r) => r.name === name && (r.file ?? 'index.ts') === file)
+  return row ?? allDeclarations.get(name)
+}
 
 const runClosure = (name) => {
   try {
@@ -243,27 +252,58 @@ const aVerdict = spans.length > 0 && moduleLines <= 800
  */
 const memberClosures = CLUSTER.map((name) => ({ name, closure: runClosure(name) })).filter((entry) => entry.closure !== undefined)
 const closureOfCluster = memberClosures.length === 0 ? undefined : memberClosures[0].closure
-const clusterClosureMembers = new Set()
-for (const entry of memberClosures) for (const member of entry.closure.members) clusterClosureMembers.add(member.name)
+
+/**
+ * ── 成员身份必须是「文件:名字」，不是「名字」────────────────────────────────────────────────────
+ *
+ * 实测（本仓 `store.ts` 的 A3 组）：同一个名单，
+ *   · 按名字求并集 → **495 行**
+ *   · 按「文件:名字」求并集 → **478 行**
+ * 差 17 行，而两种口径的**声明数都是 25** —— 一个不可能的组合，说明名字有歧义。
+ *
+ * 追下去：`readJsonl` 在 `store.ts:1293`（3 行）和 `causal.ts:86`（20 行）各有一个；
+ * `sleepSync` 在 `store.ts:41` 与 `lock.ts:106` 各有一个。旧代码
+ *
+ *     for (const member of entry.closure.members) unionNames.add(member.name)
+ *     … const span = resolveDeclaration(name)          // 按名字解析，会取到"第一个"
+ *
+ * 于是闭包里那条 `store.ts:readJsonl` 被解析成了 `causal.ts:readJsonl`（20 行而不是 3 行），
+ * 凭空多算 17 行。**`runClosure` 明明已经给了 `file`，代码却把它丢了重新按名字查。**
+ *
+ * 这与该文件上方那段注释（"read the fields, not the string"）是同一个错误的两半：
+ * 那次是把对象当字符串读，这次是把带文件的身份降级成裸名字。
+ *
+ * 修法：直接读 `member.file` + `member.name` + `member.lines`（闭包输出里有行数），
+ * 不再走 `resolveDeclaration` 二次解析。
+ */
+const clusterClosureMembers = new Map() // key = `${file}:${name}` → member
+for (const entry of memberClosures) {
+  for (const member of entry.closure.members) {
+    const key = `${member.file ?? 'index.ts'}:${member.name}`
+    if (!clusterClosureMembers.has(key)) clusterClosureMembers.set(key, member)
+  }
+}
+
+/** 同名多声明：同一个名字出现在 ≥2 个文件里。报出来，不假装没有。 */
+const ambiguousNames = (() => {
+  const byName = new Map()
+  for (const member of clusterClosureMembers.values()) {
+    if (!byName.has(member.name)) byName.set(member.name, new Set())
+    byName.get(member.name).add(member.file ?? 'index.ts')
+  }
+  return [...byName].filter(([, files]) => files.size > 1).map(([name, files]) => ({ name, files: [...files].sort() }))
+})()
+
 const clusterClosureLines = (() => {
   if (memberClosures.length === 0) return undefined
   /**
-   * ── THE MEMBERS ARE OBJECTS, NOT THE PRETTY STRINGS ─────────────────────────────────────────────
-   *
-   * \`runClosure\` parses the tool's output into \`{ file, name, kind }\` objects. The first version of
-   * this union still assumed the raw \`relative:name [kind]\` STRING and ran a regex over it, so every
-   * match produced \`String({}) === "[object Object]"\`, \`linesByMember\` stayed empty and tier B reported
-   * **0 lines** — for a cluster whose real weight is 558. A zero that looks like "cheap to move".
-   *
-   * Read the fields, not the string.
+   * 闭包输出里**已经有**每个成员的行数（`closure.mjs` 会打印 `[kind]` 与跨度），
+   * 但 `runClosure` 只保留了 file/name/kind。所以这里按「文件:名字」去 `resolveDeclaration`
+   * 时必须带上文件——`resolveDeclaration` 支持第二个参数指定文件。
    */
-  const unionNames = new Set()
-  for (const entry of memberClosures) {
-    for (const member of entry.closure.members) unionNames.add(member.name)
-  }
   let total = 0
-  for (const name of unionNames) {
-    const span = resolveDeclaration(name)
+  for (const member of clusterClosureMembers.values()) {
+    const span = resolveDeclaration(member.name, member.file)
     if (span !== undefined) total += span.lines
   }
   return total
