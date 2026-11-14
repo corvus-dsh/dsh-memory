@@ -891,7 +891,25 @@ appendLayer  MAX_LAYER_RECORDS  planLayerArchive  appendFacts  appendExperiences
 实测（`check-cycles`）：nodes 29 → 30、value edges 46 → 54、**ACYCLIC / unresolved 0**。
 
 **这对 A1 是有约束力的，等于提前回答了 A1 的归属问题的一半**：
-A1 的 skill 写入链要用这三个名字，应当**从 `store/layer.js` import**，不要再声明一份；
+
+| 名字 | 在 `layer.ts` 的形态 | A1 怎么拿 |
+|---|---|---|
+| `SkillMeta` | `export interface`（类型） | `import type { SkillMeta } from './store/layer.js'` |
+| `asVocab` | `export function`（值） | `import { asVocab } from './store/layer.js'` |
+| `VOCAB_TAG` | `export const`（**方案甲**，2026-11-14 从私有改为导出） | `import { VOCAB_TAG } from './store/layer.js'` |
+
+**关于 `VOCAB_TAG` 的判定（方案甲，已提交 `2e6f6b4`）**：它是 `layer.ts` 的**内部共享常量**
+（`asVocab` 同文件用它做 tag 校验）；`store.ts` **不 re-export 它**。实测：
+
+```
+layer.js 导出  8 →  9（新增   VOCAB_TAG）
+store.js  导出 51 → 51（不变，无 VOCAB_TAG）
+```
+
+> 它是 A1 要用的第 3 个名字，但因为 A1 用 `asVocab` 时就带着它（`asVocab` 内部引用），
+> 所以 A1 实际只需要 `import type { SkillMeta }` + `import { asVocab }` —— `VOCAB_TAG`
+> 会被 `asVocab` 一起带上，不必单独 import。**首次用 `asVocab` 时给它 `export` 即可。**
+
 除非将来建 `store/types.ts` 把它们搬出去（那时是**移走**，不是复制）。
 
 #### `verify-pure-move`：按类别拆开（要求的三段式）
@@ -1260,6 +1278,7 @@ $ node scripts/families.mjs renderSkill --src store.ts
 | 第 0 步搬走后时钟是否仍是同一个实例 | **已实测**：`store.js` 与 `store/clock.js` 导出的 `monotonicTimestamp` / `resetMonotonicClockForTest` `===` 相等；接缝测试 2/2 在搬第 0 步后、搬 B 后、搬 A3 后各跑一次都是绿的 |
 | **B 搬走后 `causal.ts` 的处理** | **已决定（B-1 改名），且已执行**。`causal.ts` 保留自己的 `readJsonlLocal` 私有实现，**不 import `store/io.ts`**；三份实现的语义一致性**仍未逐行验过**，所以 B-2 不做 |
 | **A3 之后 `VOCAB_TAG` 仍有 2 处声明** | `extract.ts:397` 与 `store/layer.ts:73`，**内容逐字相同**（含注释都说明了"duplicated on purpose，因为反向 import 会成环"）。本轮**不动**——合并它们需要先证明 `extract.ts` 不被 `layer.ts` 依赖，属于另一件事 |
-| A1 闭包 722 行的类型归属（`SkillMeta` / `VOCAB_TAG` 等） | **已被 A3 部分回答**：`SkillMeta` / `VOCAB_TAG` / `asVocab` 现在住在 `store/layer.ts`，A1 应从那里 import。只剩 **`SkillConflict`** 未定（实测 7 处引用，全在 `store.ts` 内，不在 A3 闭包里） |
+| **A1 闭包的类型归属（`SkillConflict` 等）** | **已定：`SkillConflict` 随 A1 走**。实测 `writeSkill` 闭包含 `findConflicts`、`commitEdges`、`linkConflictBack`（A1 通过 `writeSkill → findConflicts → SkillConflict` 的传递闭包把它们拉进来）——这三个函数在 A1 的 12 名清单里**都没有**（是闭包成员不是名单成员），但它们全在 store.ts 且用 `SkillConflict`。A1 搬走时需把这些冲突处理函数一并带走，否则要在 store.ts / skill.ts 之间 import `SkillConflict`，形成依赖。`SkillMeta` / `VOCAB_TAG` / `asVocab` 已被 A3 定在 `store/layer.ts`（方案甲，见 §十一 A3 节） |
+| **A1 的额外门禁（比 A3 多一条）** | A3 已证明 `verify-pure-move` 看不见导出面被撑大，所以 A1 必须额外断言 **`store.js` 导出数仍 51**（或按 `SkillConflict` 归属决定增减并说明理由）。搬 A1 时若 `SkillConflict` 此前不是 `store.js` 公开面，则 A1 新增 re-export 会使导出数上升，需明确记录为何允许 |
 | A2 闭包 768 行怎么排期 | 规模门槛已过（768 ≤ 800），但**依赖 A1/A3 先分**；按裁定继续挂着，**不为降到 800 而提前拆** |
 | 类型环拆分后的对外 import | 验了 `lib/retrieve.js` 导出数 34→34，但**没验 `lib/index.js` 的导出面** |
