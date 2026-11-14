@@ -32,8 +32,19 @@ const REPO = fileURLToPath(new URL('..', import.meta.url)).replace(/[\\/]+$/u, '
  * 而 0 看起来像「这个仓没有族」，实际是**量的东西不存在**。
  * observer 的对应根是 `apply`（1,651 行，99% 的体积都在它体内）。
  */
+/**
+ * ── 源文件参数化（`--src`）──────────────────────────────────────────────────────────────────────
+ *
+ * 这个仓有两个"根"要量：`index.ts` 的 `applyInner`（1,362 行）和 `store.ts` 的 `appendLayer` 一带
+ * （`store.ts` 是最大单件，2,479 行 / 17.4%）。把文件名写死成 `index.ts` 的话，
+ * 量 `store.ts` 会得到 **0 个声明 / 所有跨度都算 1 行** —— 而那不是"没有族"，是仪器看不见。
+ */
+const SRC_FILE = (() => {
+  const i = process.argv.indexOf('--src')
+  return i >= 0 && process.argv[i + 1] !== undefined ? process.argv[i + 1] : 'index.ts'
+})()
 const TARGET = process.argv[2] ?? 'applyInner'
-const SRC = REPO + '/src/index.ts'
+const SRC = `${REPO}/src/${SRC_FILE}`
 
 const run = (script, args) => {
   try {
@@ -56,7 +67,16 @@ const report = run('closure.mjs', [TARGET])
  *
  * 修法：kind 允许 `let/var`（`[\w/]+`），`spanOf` 也要能为它找行（见下）。
  */
-const members = [...report.matchAll(/^\s+index\.ts:(\w+) \[([\w/]+)\]/gmu)].map((m) => ({ name: m[1], kind: m[2] }))
+/**
+ * ── 成员正则的文件名也来自 `--src`（见文件头的 SRC_FILE）────────────────────────────────────────
+ *
+ * 原写法把 `index\.ts` 写死在正则里：`families.mjs appendLayer`（在 store.ts 里）返回 **0 个声明**，
+ * 而 closure 明明报了 225 行 —— 自校验于是红成 `0 != 225`。
+ * 那不是"store.ts 没有族"，是**仪器只看得见 index.ts**。
+ */
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
+const memberRe = new RegExp(`^\\s+${escapeRe(SRC_FILE)}:(\\w+) \\[([\\w/]+)\\]`, 'gmu')
+const members = [...report.matchAll(memberRe)].map((m) => ({ name: m[1], kind: m[2] }))
 console.log(`${TARGET}: ${members.length} declaration(s), ${/lines\s*:\s*(\d+)/u.exec(report)?.[1]} lines`)
 
 /**
