@@ -128,6 +128,48 @@ export function contentLines(text) {
     .filter(isContentLine)
 }
 
+/**
+ * ── KNOWN FORMAT CORRECTIONS: EXPLAINED, NEVER SILENT ────────────────────────────────────────
+ *
+ * A pure move can legitimately carry an ALREADY-AGREED format fix. The first such case is
+ * `bf35562`: `parseEvidenceField` had two leading spaces in `store.ts` (a pre-existing blemish)
+ * and A1-3 was explicitly asked to fix it while moving the file. That produces one DISAPPEARED
+ * content line and one APPEARED one — indistinguishable, to a multiset comparison, from "the
+ * code was edited".
+ *
+ * The wrong ways to handle it, both of which this file rejects:
+ *
+ *   1. **Leave it red forever.** Then every future run prints `logic 1`, the operator learns the
+ *      red is noise, and the NEXT real edit slips through under the same "oh, that's the known
+ *      one". A gate that is always red is a gate that is off.
+ *   2. **Loosen the comparison** (normalise leading whitespace, ignore N lines, …). That blinds
+ *      the checker to every real indentation edit as well — the exact class of change this
+ *      multiset exists to catch.
+ *
+ * So the correction is registered **explicitly**: an exact (disappeared → appeared) line pair,
+ * with the commit that made it and the reason. The run reports it by name and exits 0 when it is
+ * the ONLY difference. Anything else still fails.
+ *
+ * ── RULES FOR ADDING AN ENTRY (do not relax these) ───────────────────────────────────────────
+ *
+ *   - `disappeared` / `appeared` must be the **full trimmed-insensitive** content lines, exactly
+ *     as `contentLines()` produces them (leading `export ` already stripped).
+ *   - The pair must be 1:1 — one line out, one line in. A correction that changes N lines needs
+ *     N entries, each justified.
+ *   - `commit` must be the sha of the commit that made the change, not the one being tested.
+ *   - `reason` must say WHY the change is not a behaviour change.
+ *   - An entry that no longer matches anything is reported as **STALE** — delete it. A registry
+ *     that only grows is how a gate rots into a list of things nobody reads.
+ */
+export const KNOWN_FORMAT_CORRECTIONS = [
+  {
+    commit: 'bf35562',
+    reason: 'parseEvidenceField 行首的两个空格被修正为 0 缩进（A1-3 顺手修，用户明确要求）；只有空白差异，无行为变化',
+    disappeared: '  function parseEvidenceField(raw: string, fallbackSession: string): EvidenceRef[] {',
+    appeared: 'function parseEvidenceField(raw: string, fallbackSession: string): EvidenceRef[] {',
+  },
+]
+
 /** Every `.ts`-bearing file under src/, as absolute paths. */
 function sourceFiles() {
   const out = []
@@ -292,8 +334,72 @@ if (isMain) {
       console.log('\nIDENTICAL — the content-line multiset is unchanged (pure move)')
       process.exitCode = 0
     } else {
-      console.log('\n' + describe(difference))
-      process.exitCode = 1
+      /**
+       * ── MATCH AGAINST THE EXPLICIT REGISTRY INSTEAD OF FAILING ON DIFF #1 ───────────────────
+       *
+       * The old behaviour printed only the FIRST difference and exited 1. That is fine for a raw
+       * check but useless once a correction is registered: the registry entry and the first
+       * difference may be different lines. So the whole difference set is computed, then the
+       * registry is subtracted from it — exactly and 1:1 (see the rules above).
+       */
+      const allDifferences = []
+      for (const key of [...new Set([...before.keys(), ...after.keys()])].sort()) {
+        const b = before.get(key) ?? 0
+        const a = after.get(key) ?? 0
+        if (b !== a) allDifferences.push({ line: key, before: b, after: a })
+      }
+
+      // 1:1 subtraction. Each registry entry may absorb exactly one DISAPPEARED **and** one
+      // APPEARED line — so the two sides are tracked separately. (The first version used a single
+      // `used` flag, so absorbing the disappeared half made the appeared half unmatched, and a
+      // pure correction still failed. Measured by the three-scenario probe.)
+      const absorbed = []
+      const remaining = []
+      const registryLeft = KNOWN_FORMAT_CORRECTIONS.map((entry) => ({ ...entry, usedGone: false, usedCame: false }))
+
+      for (const diff of allDifferences) {
+        if (diff.before > 0 && diff.after === 0) {
+          const hit = registryLeft.find((e) => !e.usedGone && e.disappeared === diff.line)
+          if (hit !== undefined) { hit.usedGone = true; absorbed.push({ kind: 'disappeared', entry: hit, diff }); continue }
+        }
+        if (diff.after > 0 && diff.before === 0) {
+          const hit = registryLeft.find((e) => !e.usedCame && e.appeared === diff.line)
+          if (hit !== undefined) { hit.usedCame = true; absorbed.push({ kind: 'appeared', entry: hit, diff }); continue }
+        }
+        remaining.push(diff)
+      }
+
+      // An entry counts as fully used only when BOTH halves matched.
+      const stale = registryLeft.filter((e) => !(e.usedGone && e.usedCame))
+
+      if (absorbed.length > 0) {
+        console.log('')
+        // One line per ENTRY, not per half: a 1:1 correction produces two absorbed diffs.
+        const reported = new Set()
+        for (const { entry } of absorbed) {
+          if (reported.has(entry.commit)) continue
+          reported.add(entry.commit)
+          console.log(`KNOWN FORMAT CORRECTION (see ${entry.commit}): ${entry.reason}`)
+        }
+      }
+      if (stale.length > 0) {
+        console.log('')
+        for (const entry of stale) {
+          console.log(`STALE REGISTRY ENTRY (${entry.commit}): no longer matches anything — delete it.`)
+          console.log(`  disappeared: ${JSON.stringify(entry.disappeared)}`)
+          console.log(`  appeared   : ${JSON.stringify(entry.appeared)}`)
+        }
+      }
+
+      if (remaining.length === 0 && stale.length === 0) {
+        console.log(`\nPURE MOVE + ${absorbed.length / 2} REGISTERED FORMAT CORRECTION(S) — nothing unexplained.`)
+        process.exitCode = 0
+      } else {
+        console.log('\n' + describe(remaining[0] ?? allDifferences[0]))
+        if (remaining.length > 1) console.log(`  …and ${remaining.length - 1} more unexplained difference(s).`)
+        if (stale.length > 0) console.log('  (A stale registry entry is also a failure — see above.)')
+        process.exitCode = 1
+      }
     }
   }
 }
