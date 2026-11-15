@@ -95,11 +95,33 @@ ESM 的 import 绑定对**导入方**是只读的。若只搬 `let` 而不搬写
 | 门禁 | 结果 |
 |---|---|
 | `npm test` | **480 / 480 / 0 / skipped 0** |
-| `verify-pure-move --against HEAD --classify` | **逻辑 0**：消失 **1** 行（已解释）；新增 33 行 = 注释 **33** + 管线 0 + **逻辑 0** |
+| `verify-pure-move`（见下「复现」）| 消失 **1** 行（已解释）；新增 33 行 = 注释 **33** + 管线 0 + **逻辑 0** |
 
-> **订正（2026-11-15）**：上表的命令原来写作 `verify-pure-move --against HEAD`（不带 `--classify`），
-> 那是不准确的记账。主路径对「新增注释」是红的（它比内容行多重集，而本步新增了族注释与头注释），
-> 「逻辑 0」这个结论来自 `--classify`。见 `docs/retrieve-split-step1.md` 同一条订正的详细说明。
+**复现（可执行，逐字）**：
+
+```bash
+# 工作树必须是第二步提交后的状态（该提交：930b435，父提交：a77382e）
+#   git worktree add --detach /tmp/s2 930b435
+#   把**当前** scripts/verify-pure-move.mjs 复制进 /tmp/s2/scripts/
+node scripts/verify-pure-move.mjs --against a77382e --classify
+```
+
+实测输出（2026-11-15）：
+
+```
+DISAPPEARED 1 条 / 1 行
+APPEARED   23 条 / 33 行
+
+                   注释   管线   逻辑
+  APPEARED          33      0      0
+  DISAPPEARED        1      0      0
+  ── 合计 ──        34      0      0
+[exit 0]
+```
+
+> **订正（2026-11-15）**：原先写 `--against HEAD` —— 搬运完成后 HEAD 已含改动 ⇒ VACUOUS（exit 2），
+> 且不带 `--classify` 时主路径对新增注释是红的。必须用**带父提交 + `--classify`**，树退到该步。
+> 详见 `docs/retrieve-split-step1.md` 同一条订正的完整说明。
 | `check-cycles` | nodes 34 / value edges 74 / **ACYCLIC** / unresolved 0 |
 | `type-budget` | OK（2459: 0）|
 | `readme-counts` | 7/7 |

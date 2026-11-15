@@ -36,7 +36,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -71,11 +71,33 @@ const compilerAvailable = () => {
  */
 const mirror = () => {
   const root = mkdtempSync(join(REPO, '.canred-'))
-  for (const dir of ['scripts', 'src', 'test']) {
+  for (const dir of ['scripts', 'src', 'test', 'docs']) {
     cpSync(join(REPO, dir), join(root, dir), { recursive: true })
   }
   cpSync(join(REPO, 'package.json'), join(root, 'package.json'))
-  // v207 会读 docs/ 里的表吗？不会 —— 它读的是内置常量。但 v205 会扫 src/，已复制。
+  /**
+   * ── 副本必须能解析 `git show <历史提交>` ──────────────────────────────────────────────────────
+   *
+   * v207 ①b 会 `git show 0381c6c:src/retrieve.ts` 来重算「搬前」快照。副本若没有可用的
+   * 对象库，那条会失败 ⇒ v207 exit 1 ⇒ 这里的「基线必须绿」直接红。
+   *
+   * 用 `objects/info/alternates` 把副本指向**原仓的对象库**：
+   *   · 不复制 .git（几十 MB，且副本会被反复创建）；
+   *   · 只读共享对象，副本自己的写操作不碰原仓；
+   *   · `git show <sha>` / `git ls-tree` 都能工作。
+   *
+   * 这是 git 官方的「借对象」机制，不是 hack。
+   */
+  const git = (...a) => execFileSync('git', a, { cwd: root, encoding: 'utf8', stdio: 'ignore' })
+  git('init', '-q')
+  git('config', 'user.email', 'v208@test.local')
+  git('config', 'user.name', 'v208')
+  git('config', 'commit.gpgsign', 'false')
+  mkdirSync(join(root, '.git', 'objects', 'info'), { recursive: true })
+  writeFileSync(join(root, '.git', 'objects', 'info', 'alternates'),
+    join(REPO, '.git', 'objects') + '\n', 'utf8')
+  git('add', '-A')
+  git('commit', '-qm', 'mirror base')
   return root
 }
 
@@ -159,7 +181,13 @@ test('v208 can-red：v207 的四组注入都必须变红（在仓内临时副本
     assert.equal(b.skipped, 0,
       'v207 必须真的执行（skipped=0）。skipped>0 时「注入不红」不能说明门禁宽 —— '
       + '只说明测试没跑。副本放在仓内才有编译器可用。')
-    assert.equal(b.pass, 6, `v207 应有 6 条，实测 ${b.pass}`)
+    /**
+     * v207 的条数：从 6 涨到 7（2026-11-15 加了 ①b「真读 docs 并对上搬前快照」）。
+     *
+     * 这里写死 7 而不是「从输出里读实际条数」：如果 v207 少跑了一条，读实际条数会让
+     * 「注入不红」的结论建立在**更少的测试**上，而它看起来仍然通过。少一条要有人看见。
+     */
+    assert.equal(b.pass, 7, `v207 应有 7 条，实测 ${b.pass}`)
 
     for (const c of CASES) {
       const restore = inject(root, c.file, c.pairs)

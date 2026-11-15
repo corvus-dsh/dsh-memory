@@ -66,7 +66,7 @@
 |---|---|
 | `npm test` | **482 / 482 / 0 / skipped 0** |
 | `v102` commit drift | **6 / 6** |
-| `verify-pure-move --against HEAD --classify` | 逻辑 **0**；消失 1 行（已登记）；新增 32 行 = 注释 32 + 管线 0 + 逻辑 0 |
+| `verify-pure-move`（见下「复现」）| 逻辑 **0**；消失 1 行（已登记）；新增 32 行 = 注释 32 + 管线 0 + 逻辑 0 |
 | `check-cycles` | nodes 35 / value edges 75 / **ACYCLIC** / unresolved 0 |
 | `type-budget` | OK（2459: 0）|
 | `readme-counts` | 7/7 |
@@ -75,6 +75,31 @@
 | `v209` 产物同步 | 4/4 |
 | `lib/retrieve.js` 导出面 | **34 条不变** |
 | build 后 `git status` | 空（产物与源码同步）|
+
+**复现（可执行，逐字）**：
+
+```bash
+# 工作树必须是第三步提交后的状态（该提交：6446dea，父提交：f9d1abf）
+#   git worktree add --detach /tmp/s3 6446dea
+#   把**当前** scripts/verify-pure-move.mjs 复制进 /tmp/s3/scripts/
+node scripts/verify-pure-move.mjs --against f9d1abf --classify
+```
+
+实测输出（2026-11-15）：
+
+```
+DISAPPEARED 1 条 / 1 行
+APPEARED   22 条 / 32 行
+
+                   注释   管线   逻辑
+  APPEARED          32      0      0
+  DISAPPEARED        1      0      0
+  ── 合计 ──        33      0      0
+[exit 0]
+```
+
+> **订正（2026-11-15）**：原先写 `--against HEAD` —— 搬运完成后 HEAD 已含改动 ⇒ VACUOUS（exit 2）。
+> 必须用**带父提交 + `--classify`**，且树要退到该步（树用旧的、脚本用新的）。
 
 ### 那 1 行 DISAPPEARED
 
@@ -130,13 +155,23 @@
 
 | 时点 | 行数 | 声明 |
 |---|---|---|
-| 重构前（`e3bed57`） | 2479 | — |
-| 第一步前 | 2009 | 89 |
+| **拆分起点**（第一次搬运前） | **2009** | **89** |
 | 第一步后 | 1763 | 75 |
 | 第二步后 | 1718 | 69 |
 | **第三步后** | **1673** | **64** |
 
-从起点算：**2479 → 1673**（−806，−33%）。
+从起点算：**2009 → 1673**（**−336，−17%**）。
+
+> **订正（2026-11-15，用户裁定⑤）**：这张表原先写「重构前（`e3bed57`）2479 → 1673（−806，−33%）」，
+> 那是**把两份文件混在一起**了。
+>
+> `2479` 是 **`store.ts`** 在 `e3bed57` 的行数 —— 它对应的是 store 那条重构线
+> （第 0 步时钟 → B 的 IO 原语 → A3 的 JSONL 层 → A1 的六段 → A2 的生命周期簇），
+> 记录在 `docs/A2-final-report.md` 与 `docs/A1-final-report.md`。
+>
+> `retrieve.ts` 的拆分起点是 **2009**，接在 A2 之后，与 store 那条线**没有承接关系**。
+> 把 store 的起点借过来算百分比，会让这个文件的进度看起来比实际更显著（−33% 对 −17%）。
+> 一份进度表把两个不同文件的起点串成一条线，比没有进度表更糟。
 
 ---
 

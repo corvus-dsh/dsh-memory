@@ -28,10 +28,28 @@
  */
 import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import ts from 'typescript'
 
-const REPO = fileURLToPath(new URL('..', import.meta.url)).replace(/[\\/]+$/u, '')
+/**
+ * `--root <dir>` re-points the whole measurement at another tree.
+ *
+ * WHY IT EXISTS: `test/v207 ①b` has to re-derive the numbers the doc records for the **pre-split**
+ * snapshot, so it exports that commit's `src/` into a temp dir and runs this script against it.
+ * Without `--root` the script always measured the tree it lives in, and the test silently measured
+ * today's `retrieve.ts` instead of the historical one — it reported 21 components where the doc says
+ * 19, with no hint that the input was the wrong tree.
+ *
+ * A measurement tool that cannot be pointed at a specific input cannot be used to verify a
+ * HISTORICAL claim.
+ */
+const REPO = (() => {
+  const i = process.argv.indexOf('--root')
+  const explicit = i >= 0 ? process.argv[i + 1] : undefined
+  if (explicit !== undefined) return resolve(explicit).replace(/[\\/]+$/u, '')
+  return fileURLToPath(new URL('..', import.meta.url)).replace(/[\\/]+$/u, '')
+})()
 const FILE = process.argv.includes('--file')
   ? process.argv[process.argv.indexOf('--file') + 1]
   : 'retrieve.ts'
@@ -40,8 +58,14 @@ const AS_JSON = process.argv.includes('--json')
 
 /** compiler spans — the ONLY source of line ranges in this program. */
 const spansOf = (() => {
+  /**
+   * 转发 `GRAFT_CLOSURE_SRC`：`--root` 指向别处的树时，closure 也必须量那棵树，
+   * 否则两边量的不是同一份输入（这正是 `test/v207 ①b` 第一次红的形状：
+   * 报 21 个分量而文档说 19，因为脚本量的是今天的树）。
+   */
+  const env = { ...process.env, GRAFT_CLOSURE_SRC: `${REPO}/src` }
   const out = execFileSync(process.execPath, [`${REPO}/scripts/closure.mjs`, '--declarations'],
-    { cwd: REPO, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 })
+    { cwd: REPO, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, env })
   return JSON.parse(out.trim().split('\n').pop()).filter((row) => row.file === FILE)
 })()
 

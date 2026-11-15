@@ -29,7 +29,7 @@ const REGISTRY = join(ROOT, 'MODULE-REGISTRY.md')
 const COVERED_DIRS = ['src']
 
 /**
- * `| \`src/x.ts\` | 职责 | 导出 | 依赖 |`
+ * `| \`src/x.ts\` | 职责 | 导出 | 依赖 |`  —— 以及 `| \`src/store/x.ts\` | … |`
  *
  * ── 字符集必须包含下划线 ────────────────────────────────────────────────────────────────────
  *
@@ -38,8 +38,17 @@ const COVERED_DIRS = ['src']
  * 两个方向都看不见它。**一个读不进表的文件名，等于一个不受监管的文件名。**
  *
  * 改成 `[a-z0-9_-]+`（下划线、连字符、字母、数字）。
+ *
+ * ── 2026-11-15：路径必须允许**一层子目录** ─────────────────────────────────────────────────────
+ *
+ * 前半段是 `(?:src\/)?` —— 它只接受扁平的 `src/x.ts`。`src/store/clock.ts` 与
+ * `src/retrieve/interning.ts` 因此**一行都读不进来**，而 `modulesOnDisk()` 当时也只扫了一层，
+ * 两边"一致地看不见" → 8 个模块长期在守护之外，双向断言全绿。
+ *
+ * 这是本文件开头那句「读不进表的文件名 = 不受监管的文件名」的**第二次**发生：
+ * 第一次是下划线，这次是斜杠。两次的形状一样 —— **解析器的字符集比真实的文件名窄**。
  */
-const ROW = /^\|\s*`((?:src\/)?[a-z0-9_-]+\.ts)`\s*\|([^|]*)\|([^|]*)\|([^|]*)\|\s*$/gmu
+const ROW = /^\|\s*`((?:src\/)?(?:[a-z0-9_-]+\/)?[a-z0-9_-]+\.ts)`\s*\|([^|]*)\|([^|]*)\|([^|]*)\|\s*$/gmu
 
 const readRows = () => {
   assert.ok(existsSync(REGISTRY), 'MODULE-REGISTRY.md must exist (it is the only authority on module coverage)')
@@ -56,14 +65,29 @@ const readRows = () => {
   return rows
 }
 
+/**
+ * ── RECURSIVE: `src/store/*.ts` and `src/retrieve/*.ts` are modules too ────────────────────────
+ *
+ * The first version was `readdirSync(dir)` only — one level. When the store split introduced
+ * `src/store/`, five modules became invisible to both directions of this gate at once; the
+ * retrieve split then added three more. Nine modules ran for months with no registry coverage
+ * while the suite stayed green, because **the scanner and the table were blind in the same way**.
+ *
+ * A directory walk is the fix, and the `endsWith('.ts')` denominator is unchanged (that is what
+ * MODULE-REGISTRY.md documents as the counting rule).
+ */
 const modulesOnDisk = () => {
   const out = []
-  for (const dir of COVERED_DIRS) {
-    for (const name of readdirSync(join(ROOT, dir))) {
-      if (!name.endsWith('.ts')) continue
-      out.push(`${dir}/${name}`)
+  const walk = (abs, rel) => {
+    for (const entry of readdirSync(abs, { withFileTypes: true })) {
+      const childAbs = join(abs, entry.name)
+      const childRel = `${rel}/${entry.name}`
+      if (entry.isDirectory()) { walk(childAbs, childRel); continue }
+      if (!entry.name.endsWith('.ts')) continue
+      out.push(childRel)
     }
   }
+  for (const dir of COVERED_DIRS) walk(join(ROOT, dir), dir)
   return out.sort()
 }
 

@@ -5,20 +5,29 @@
 
 ## 分母算法（先说清，否则数字没有意义）
 
-- 覆盖目录：`src`（**扁平一层**，没有 `src/core` 子目录）
+- 覆盖目录：`src`，**递归**（含 `src/store/` 与 `src/retrieve/` 两个子目录）
 - 计入条件：文件名 `endsWith('.ts')`
-- 实测：**27 个模块 / 14,211 行**
+- 实测：**35 个模块 / 14,680 行**
 - 三个方向都查：① 磁盘 → 表（新文件不能悄悄进）；② 表 → 磁盘（删掉的行不能留着）；
   ③ 依赖列 → 磁盘（不能指向不存在的模块）。第四条额外查：表本身不能有**值**环。
+- 第五个方向：`test/module-registry.test.mjs` 的 `ROW` 正则必须能**读进来**每一个真实文件名 ——
+  一个读不进表的文件名，等于一个不受监管的文件名（下划线、子目录斜杠各踩过一次）。
 
 ## 现状分布（实测，非估计）
 
 | 项 | 值 |
 |---|---|
-| 模块数 | **27** |
-| 总行数 | **14,211** |
-| > 800 行的文件 | **3** 个（`store.ts` 2479、`index.ts` 2361、`retrieve.ts` 2009） |
-| 最大文件 | **`store.ts`** 2479 行（占 **17.4%**） |
+| 模块数 | **35**（扁平 27 + `store/` 5 + `retrieve/` 3） |
+| 总行数 | **14,680** |
+| > 800 行的文件 | **3** 个（`index.ts` 2361、`retrieve.ts` 1673、`store/skill.ts` 985） |
+| 最大文件 | **`index.ts`** 2361 行（占 **16.1%**） |
+
+> **订正（2026-11-15）**：上一版这里写「扁平一层 / 27 个模块 / 14,211 行 / 最大 `store.ts` 2479」。
+> 三处都过时了，而且第一处是个**门禁漏洞**而不只是数字旧：
+> `modulesOnDisk()` 当时只 `readdirSync` 一层，`ROW` 正则也不接受斜杠 ——
+> 于是 `src/store/*`（5 个）与 `src/retrieve/*`（3 个）**两个方向都看不见**，
+> 双向断言全绿而 8 个模块从未被登记。改法与理由写在 `test/module-registry.test.mjs` 的
+> `ROW` 与 `modulesOnDisk` 注释里。
 
 ## 依赖列的两种写法
 
@@ -73,3 +82,11 @@ filter.ts -> retrieve.ts : type-only   （import type { MemoryHit }，运行时�
 | `src/skill-cache.ts` | SKILL DOCUMENT CACHE — shared by the writer (store) and the reader (retrieve). | `CachedDocuments`, `getCachedSkillDocs`, `invalidateSkillDocs`, `setCachedSkillDocs`, `skillDocsCacheStats`, `skillDocsKey` | — |
 | `src/threat.ts` | v0.8.1: memory content is DATA, never an instruction. | `scanThreat`, `threatPatterns` | — |
 | `src/lease-types.ts` | THE LEASE SHAPES, MIRRORED STRUCTURALLY — dsh-memory/src/lease-types.ts. | `LeaseAdapter`, `LeaseRecord` | — |
+| `src/store/skill.ts` | SKILL.md 的读与写：frontmatter 解析/渲染、shapeCache、冲突族。A1 的产物。 | `EnvironmentDivergence`, `SkillBody`, `SkillConflict`, `SkillRecord`, `clearSkillShapeCache`, `clampConfidence` …（共 41） | edges.ts, extract.ts (type-only), ledger-cache.ts, skill-cache.ts, store/clock.ts, store/io.ts, store/layer.ts, threat.ts, workspace.ts |
+| `src/store/lifecycle.ts` | 记忆的生命周期：审计轮转、supersede、隔离、反证、技能反馈、迁移。A2 的产物。 | `AUDIT_KEEP`, `AUDIT_ROTATE_BYTES`, `applySkillFeedback`, `applySupersede`, `memoryAuditPath`, `quarantineWorkspaceMemory` …（共 22） | dedupe.ts, edges.ts, store/io.ts, store/skill.ts, threat.ts, workspace.ts |
+| `src/store/layer.ts` | JSONL 层写入（facts / experiences）：追加、上限、读回。A3 的产物。 | `appendExperiences`, `appendFacts`, `readLayerRecords` …（共 16） | store/io.ts, store/clock.ts |
+| `src/store/io.ts` | IO 原语：原子写、JSONL 读写、目录准备。B 的产物。 | `atomicWrite`, `ensureDir`, `readJsonl`, `readJsonlFresh`, `writeEdge`, `writeEdges` …（共 8） | — |
+| `src/store/clock.ts` | 单调时钟接缝：`monotonicTimestamp` 与它的测试重置钩子。第 0 步的产物。 | `monotonicTimestamp`, `resetMonotonicClockForTest` …（共 3） | — |
+| `src/retrieve/interning.ts` | 检索层的共享原语：分词、标题裁剪、证据提取、陈旧负判定、Document 构造。 | `INCIDENT_MARKERS`, `NEGATIVE_STALE_DAYS`, `NEGATIVE_STALE_WEIGHT`, `ageDaysOf`, `clipTitle`, `documentCache` …（共 14） | extract.ts (type-only), skill-cache.ts, workspace.ts |
+| `src/retrieve/storage-tier.ts` | 存储选路：json 默认、sqlite 可选；三个模块级 let 与它们的唯一写者同处一模块。 | `currentIndex`, `getStorageTier`, `setStorageTier` …（共 3） | sqlite-index.ts |
+| `src/retrieve/commit-cache.ts` | 工作区 commit 归属：按分钟缓存，失败回落到空串；commit 漂移判定的权重常量同处一模块。 | `COMMIT_DRIFT_WEIGHT`, `clearCommitCache`, `currentCommitOf`, `sameCommit` | — |

@@ -132,14 +132,35 @@ layerDocumentOf     → firstEvidence, clipTitle, provenanceOf, tokenize, ageDay
 | 门禁 | 结果 |
 |---|---|
 | `npm test` | **476 / 476 / 0 / skipped 0** |
-| `verify-pure-move --against HEAD --classify` | **逻辑 0**：消失 0 行；新增 27 行 = 注释 **27** + 管线 0 + **逻辑 0** |
+| `verify-pure-move`（见下「复现」）| 消失 **0** 行；新增 27 行 = 注释 **27** + 管线 0 + **逻辑 0** |
 
-> **订正（2026-11-15）**：上表的命令原来写作 `verify-pure-move --against HEAD`（不带 `--classify`），
-> 那是不准确的记账。纯位移检查的主路径对「新增注释」是**红的** —— 它比的是内容行多重集，
-> 而本步在新模块头部写了 27 行说明注释，那是新增内容，不是位移。真正能得出「逻辑 0」这个
-> 结论的是 `--classify` 模式（2026-11-15 从 `_scratch/puremove-classify.mjs` 移进工具）。
-> 两者关系：主路径判「是否纯位移」，`--classify` 判「未解释的差是注释、管线还是逻辑」。
-> 引用结论时必须带 `--classify`，否则数字对不上命令。
+**复现（可执行，逐字）**：
+
+```bash
+# 工作树必须是第一步提交后的状态（该提交：ba9fd15，父提交：0381c6c）
+#   git worktree add --detach /tmp/s1 ba9fd15
+#   把**当前** scripts/verify-pure-move.mjs 复制进 /tmp/s1/scripts/  ← 关键：树用旧的、脚本用新的
+node scripts/verify-pure-move.mjs --against 0381c6c --classify
+```
+
+实测输出（2026-11-15）：
+
+```
+DISAPPEARED 0 条 / 0 行
+APPEARED   20 条 / 27 行
+
+                   注释   管线   逻辑
+  APPEARED          27      0      0
+  DISAPPEARED        0      0      0
+  ── 合计 ──        27      0      0
+[exit 0]
+```
+
+> **订正（2026-11-15）**：这里原先写的是 `--against HEAD`。那有两个问题：
+> ① 比较对象是 HEAD，而搬运完成后 HEAD 已含这次改动 ⇒ **VACUOUS**（exit 2），不是通过；
+> ② 不带 `--classify` 时主路径对「新增注释」是红的（它比内容行多重集，而本步新增 27 行说明注释），
+> 「逻辑 0」这个结论只有 `--classify` 能给出。
+> 所以必须写成**带父提交 + `--classify`** 的形式，并且树要退到那一步（树用旧的、脚本用新的）。
 | `check-cycles` | nodes 33 / value edges 72 / **ACYCLIC** / unresolved 0 |
 | `type-budget` | OK（2459: 0）|
 | `readme-counts` | 7/7 |

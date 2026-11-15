@@ -30,6 +30,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -112,11 +113,11 @@ const DOCUMENTED = {
   spanSum: 1301,
 }
 
-test('v207 ①: 六个数字与 docs/retrieve-families-and-tiers.md 逐项相等', (t) => {
+test('v207 ①: 当前六数与内置基线逐项相等（基线来自实测，不是从文档反读）', (t) => {
   if (!AVAILABLE) { t.skip(RESOURCE_REASON); return }
   const r = six()
 
-  assert.equal(r.components, DOCUMENTED.components, `无向连通分量：文档 ${DOCUMENTED.components}`)
+  assert.equal(r.components, DOCUMENTED.components, `无向连通分量：基线 ${DOCUMENTED.components}`)
   assert.equal(r.trunk.declarations, DOCUMENTED.trunkDeclarations, '主干声明数')
   assert.equal(r.trunk.lines, DOCUMENTED.trunkLines, '主干行数')
   assert.equal(r.sccs, DOCUMENTED.sccs, '有向 SCC 个数')
@@ -130,6 +131,118 @@ test('v207 ①: 六个数字与 docs/retrieve-families-and-tiers.md 逐项相等
 
   assert.equal(r.declarations, DOCUMENTED.declarations, '顶层声明数')
   assert.equal(r.spanSum, DOCUMENTED.spanSum, '声明跨度和')
+})
+
+/**
+ * ── v207 ①b：真的去读文档，并对上它自己声称的那个时点 ──────────────────────────────────────────
+ *
+ * ── 这一条为什么存在 ────────────────────────────────────────────────────────────────────────────
+ *
+ * 用户裁定⑥：`v207 ①` 的名字原本是「六个数字与 `docs/retrieve-families-and-tiers.md` 逐项相等」，
+ * 但它**从来没读过那个文件** —— 它比的是本文件里的常量 `DOCUMENTED`。
+ *
+ * 一个名字里带文档路径、实际不读文档的测试，比没有这条测试更危险：读报告的人会以为
+ * 「文档被守住了」，而文档可以漂移到任何数字都不红。所以要么改名，要么真读。
+ *
+ * ── 为什么不能「直接拿当前六数比文档」──────────────────────────────────────────────────────────
+ *
+ * 那份文档记的是**拆分之前**的快照（19 分量 / 89 SCC / 8 层）。当前是 21 / 64 / 5 ——
+ * 三步搬运之后，直接比会红，而且红得**没有意义**（它只是说「文档是历史的」，这是已知的）。
+ *
+ * 真正的判据是：**文档对上它自己声称的时点**。所以这里用 git 取出拆分前的
+ * `src/retrieve.ts`，用 `retrieve-report.mjs --file` 在临时树上重算，再与文档里的表逐项比。
+ *
+ * 这样这条测试同时守住两件事：
+ *   ① 文档里的数字确实来自那个提交的文件（不是手抄错的、不是别处的数字）；
+ *   ② 文档的表格式没变（解析失败会红，而不是静默跳过）。
+ */
+test('v207 ①b: 真读 docs/retrieve-families-and-tiers.md，并对上它记录的「搬前」快照', (t) => {
+  if (!AVAILABLE) { t.skip(RESOURCE_REASON); return }
+
+  const docPath = join(REPO, 'docs', 'retrieve-families-and-tiers.md')
+  assert.ok(existsSync(docPath), `文档必须存在：${docPath}`)
+  const doc = readFileSync(docPath, 'utf8')
+
+  /**
+   * 文档在第一节写明它是「搬前」快照。解析它声称的数字；解析不出来就红 —— 而不是跳过。
+   */
+  const components = doc.match(/^## 二、值引用无向连通分量：(\d+) 个/mu)
+  assert.ok(components !== null, '文档里应有「## 二、值引用无向连通分量：N 个」这一节')
+  assert.equal(components[1], '19', '文档记录的是搬前快照：19 个分量')
+
+  const scc = doc.match(/有向 SCC：(\d+) 个/u)
+  assert.ok(scc !== null, '文档里应有「有向 SCC：N 个」')
+  assert.equal(scc[1], '89', '搬前 89 个 SCC')
+
+  const trunk = doc.match(/^\|\s*\*\*1\*\*\s*\|\s*\*\*(\d+)\*\*\s*\|\s*\*\*(\d+)\*\*\s*\|/mu)
+  assert.ok(trunk !== null, '文档的分量表里应有 #1 主干那一行')
+  assert.equal(trunk[1], '68', '搬前主干 68 声明')
+  assert.equal(trunk[2], '1251', '搬前主干 1251 行')
+
+  // 四档：D 486 / C 413 / B 373 / A 263
+  const tierD = doc.match(/^\|\s*\*\*D 大块 ≥100\*\*\s*\|\s*\*\*(\d+)\*\*\s*\|\s*\*\*(\d+)\*\*\s*\|/mu)
+  assert.ok(tierD !== null, '文档的四档表里应有 D 档那一行')
+  assert.equal(tierD[1], '4')
+  assert.equal(tierD[2], '486')
+
+  /**
+   * 现在**重算**那个时点：把拆分前的 retrieve.ts 放进临时树，用当前报告脚本算一遍。
+   * 拆分前的最后一次提交 = 第一步的父提交（0381c6c）。
+   */
+  const PRE_SPLIT = '0381c6c'
+  const tmp = mkdtempSync(join(REPO, '.v207-doc-'))
+  try {
+    /**
+     * ⚠ 必须导出**整棵 src/**，不能只放 retrieve.ts。
+     *
+     * 第一版只写了 `retrieve.ts` 一个文件，重算得 21 个分量（当前值）而不是 19 —— 因为
+     * `retrieve-report.mjs` 通过 `closure.mjs --declarations` 取的是**整个 TypeScript program**
+     * 的声明表；临时树里只有那一个文件时，closure 看到的是一棵残缺的树，
+     * 名字解析与 span 都会跟着变。
+     *
+     * 这类「测试自建的环境不完整」的错，与 families.mjs 把文件名写死是同一族：
+     * 判据没错，**输入不是它以为的那份输入**。
+     */
+    execFileSync('git', ['archive', PRE_SPLIT, 'src', 'scripts', 'package.json'], { cwd: REPO, stdio: 'pipe' })
+      .toString()
+    // git archive 输出二进制 tar；改用逐文件导出（本仓 src/ 只有几十个文件，够快）
+    const list = execFileSync('git', ['ls-tree', '-r', '--name-only', PRE_SPLIT, '--', 'src'], { cwd: REPO, encoding: 'utf8' })
+      .split(/\r?\n/u).filter((p) => p.endsWith('.ts'))
+    assert.ok(list.length > 20, `搬前的 src/ 应有 20+ 个 .ts，实测 ${list.length}`)
+    for (const rel of list) {
+      const target = join(tmp, rel)
+      mkdirSync(dirname(target), { recursive: true })
+      writeFileSync(target, execFileSync('git', ['show', `${PRE_SPLIT}:${rel}`], { cwd: REPO, encoding: 'utf8' }), 'utf8')
+    }
+    // 脚本用当前的（解析逻辑与今天一致），但 src/ 是搬前的
+    //   ⇒ 临时树里要有 scripts/（retrieve-report 会去 REPO/scripts 调 closure.mjs）
+    cpSync(join(REPO, 'scripts'), join(tmp, 'scripts'), { recursive: true })
+    const reportScript = join(REPO, 'scripts', 'retrieve-report.mjs')
+    const env = { ...process.env }
+    delete env.NODE_TEST_CONTEXT
+    let out
+    try {
+      out = execFileSync(process.execPath, [reportScript, '--json', '--root', tmp],
+        { cwd: tmp, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, timeout: 180_000, env })
+    } catch (e) {
+      out = String(e.stdout ?? '')
+    }
+    const rows = out.trim().split('\n')
+    const json = rows[rows.length - 1]
+    const parsed = JSON.parse(json)
+
+    assert.equal(parsed.components, 19, `重算搬前的分量数应为 19，实测 ${parsed.components}`)
+    assert.equal(parsed.sccs, 89, `重算搬前的 SCC 应为 89，实测 ${parsed.sccs}`)
+    assert.equal(parsed.trunk.declarations, 68, '重算搬前的主干声明数应为 68')
+    assert.equal(parsed.trunk.lines, 1251, '重算搬前的主干行数应为 1251')
+    assert.equal(parsed.layers, 8, `重算搬前的拓扑层数应为 8，实测 ${parsed.layers}`)
+    assert.equal(parsed.tiers.D.lines, 486, 'D 档 486 行')
+    assert.equal(parsed.tiers.C.lines, 413, 'C 档 413 行')
+    assert.equal(parsed.tiers.B.lines, 373, 'B 档 373 行')
+    assert.equal(parsed.tiers.A.lines, 263, 'A 档 263 行')
+  } finally {
+    rmSync(tmp, { recursive: true, force: true })
+  }
 })
 
 test('v207 ②: 边没有被全丢 —— 主干必须远大于单个声明（抓「62 分量」那类静默结构错误）', (t) => {

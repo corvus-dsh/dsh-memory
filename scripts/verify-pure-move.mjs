@@ -168,9 +168,37 @@ const RE_PIPELINE_NAME = /^ {2}[A-Za-z_$][\w$]*(?: as [A-Za-z_$][\w$]*)?,$/u
 const RE_PIPELINE_CONTINUATION = /^ {2}[A-Za-z_$][\w$]*(?:, ?[A-Za-z_$][\w$]*)*,$/u
 const RE_PIPELINE_CLOSE = /^\} from '[^']*'$/u
 
+/**
+ * ── A COMMENT IS NOT "A LINE THAT STARTS WITH A SLASH" ─────────────────────────────────────────
+ *
+ * The first version was `s.startsWith('/') || s.startsWith('*')`. Measured, that is wrong in a way
+ * that hides real code: `INCIDENT_MARKERS` is an array of **six regex literals** in `retrieve.ts`,
+ * and every one of them starts with `/`:
+ *
+ *     /(报错|抛错|崩溃|异常栈|堆栈|复现|临时修复|热修|踩坑|翻车|故障)/u,
+ *     /(traceback|stack trace|exception|assertionerror|typeerror|referenceerror|…)/iu,
+ *     /\b(panic|crash(ed)?|regression|hotfix|workaround|root cause)\b/iu,
+ *     …
+ *
+ * Six lines of real code, all classified as `comment` — i.e. a move that DELETED them and left
+ * nothing behind would have reported "0 logic". The can-red for this is those exact six lines.
+ *
+ * So the rule now requires an actual comment OPENER:
+ *   two slashes          line comment
+ *   slash-star           block comment open (including the JSDoc opener)
+ *   a leading asterisk   JSDoc / block continuation and close
+ *
+ * and explicitly does NOT match a line that merely begins with a single slash (regex literal or
+ * division). This is a lexical rule, not a parser: a line that begins with `* ` inside a
+ * multiplication continuation would still be read as a comment continuation. Stated here because a
+ * gate that looks stricter than it is, is worse than one that says where it stops.
+ */
 export const isCommentLine = (line) => {
   const s = line.trimStart()
-  return s.startsWith('/') || s.startsWith('*')
+  if (s.startsWith('//')) return true
+  if (s.startsWith('/*')) return true
+  if (/^\*(?:[\s/]|$)/u.test(s)) return true
+  return false
 }
 
 export const isPipelineLine = (line) => {
@@ -187,18 +215,48 @@ export const classifyLine = (line) => {
 }
 
 /**
- * Classify a whole multiset diff. `gone` / `came` are `[{ l, n }]` as the checker computes them.
- * Returns the three buckets with each line expanded `n` times, plus totals.
+ * Classify a whole multiset diff **on BOTH sides**.
+ *
+ * ── WHY ONE-SIDED CLASSIFICATION WAS A HOLE ──────────────────────────────────────────────────────
+ *
+ * The first version bucketed only `came` (the appeared lines) and printed `gone` raw. So a move
+ * that *deleted a line of real code and added nothing* produced:
+ *
+ *     注释 0 / 管线 0 / 逻辑 0        ← all zeros
+ *     DISAPPEARED 明细 …             ← printed, but not counted
+ *
+ * and exited **0**. The gate said "logic 0" about a diff whose entire content was a deleted
+ * function. Deleting code is the one thing a pure-move check exists to catch, and it was the one
+ * thing the bucket could not see.
+ *
+ * A move that loses a line and gains none is exactly what "moved it and dropped it" looks like, so
+ * the disappeared side needs the same three buckets. Both sides are returned separately **and**
+ * summed, because "1 disappeared comment" and "1 appeared comment" are different facts even though
+ * neither is logic.
  */
 export function classifyDifference(gone, came) {
-  const buckets = { comment: [], pipeline: [], logic: [] }
+  const appeared = { comment: [], pipeline: [], logic: [] }
+  const disappeared = { comment: [], pipeline: [], logic: [] }
+
   for (const { l, n } of came) {
-    for (let i = 0; i < n; i += 1) buckets[classifyLine(l)].push(l)
+    for (let i = 0; i < n; i += 1) appeared[classifyLine(l)].push(l)
   }
+  for (const { l, n } of gone) {
+    for (let i = 0; i < n; i += 1) disappeared[classifyLine(l)].push(l)
+  }
+
+  const totals = { comment: 0, pipeline: 0, logic: 0 }
+  for (const k of ['comment', 'pipeline', 'logic']) {
+    totals[k] = appeared[k].length + disappeared[k].length
+  }
+
   return {
-    buckets,
-    disappeared: { entries: gone.length, lines: gone.reduce((s, g) => s + g.n, 0) },
-    appeared: { entries: came.length, lines: came.reduce((s, c) => s + c.n, 0) },
+    appeared,
+    disappeared,
+    totals,
+    /** Line counts per side, for the header the CLI prints. */
+    appearedCounts: { entries: came.length, lines: came.reduce((s, c) => s + c.n, 0) },
+    disappearedCounts: { entries: gone.length, lines: gone.reduce((s, g) => s + g.n, 0) },
   }
 }
 
@@ -484,30 +542,34 @@ if (isMain) {
       }
 
       const { gone, came } = diffContentLines(beforeArr, afterArr)
-      const { buckets, disappeared, appeared } = classifyDifference(gone, came)
+      const result = classifyDifference(gone, came)
+      const { appeared, disappeared, totals, appearedCounts, disappearedCounts } = result
 
       console.log(`ref  ${ref}: ${beforeArr.length} 内容行`)
       console.log(`tree      : ${afterArr.length} 内容行  （差 ${afterArr.length - beforeArr.length}）`)
       console.log('')
-      console.log(`DISAPPEARED ${disappeared.entries} 条 / ${disappeared.lines} 行`)
-      console.log(`APPEARED   ${appeared.entries} 条 / ${appeared.lines} 行`)
+      console.log(`DISAPPEARED ${disappearedCounts.entries} 条 / ${disappearedCounts.lines} 行`)
+      console.log(`APPEARED   ${appearedCounts.entries} 条 / ${appearedCounts.lines} 行`)
       console.log('')
-      console.log(`  注释    ${buckets.comment.length} 行`)
-      console.log(`  管线    ${buckets.pipeline.length} 行`)
-      console.log(`  逻辑    ${buckets.logic.length} 行   ← 必须为 0`)
+      console.log('                   注释   管线   逻辑')
+      console.log(`  APPEARED       ${String(appeared.comment.length).padStart(5)}  ${String(appeared.pipeline.length).padStart(5)}  ${String(appeared.logic.length).padStart(5)}`)
+      console.log(`  DISAPPEARED    ${String(disappeared.comment.length).padStart(5)}  ${String(disappeared.pipeline.length).padStart(5)}  ${String(disappeared.logic.length).padStart(5)}`)
+      console.log(`  ── 合计 ──     ${String(totals.comment).padStart(5)}  ${String(totals.pipeline).padStart(5)}  ${String(totals.logic).padStart(5)}   ← 逻辑必须为 0`)
       console.log('')
-      console.log(`  三类合计 ${buckets.comment.length + buckets.pipeline.length + buckets.logic.length} 行`
-        + `（应等于新增 ${appeared.lines}）`)
+      console.log(`  三类合计 ${totals.comment + totals.pipeline + totals.logic} 行`
+        + `（应等于 新增 ${appearedCounts.lines} + 消失 ${disappearedCounts.lines} = ${appearedCounts.lines + disappearedCounts.lines}）`)
 
-      if (buckets.logic.length > 0) {
+      if (totals.logic > 0) {
         console.log('')
         console.log('非注释、非管线的行（要逐条解释，或把它的形状教给工具）：')
-        for (const line of buckets.logic) console.log(`  ! ${JSON.stringify(line)}`)
+        for (const line of appeared.logic) console.log(`  + ! ${JSON.stringify(line)}`)
+        for (const line of disappeared.logic) console.log(`  - ! ${JSON.stringify(line)}`)
       }
-      if (buckets.pipeline.length > 0) {
+      if (totals.pipeline > 0) {
         console.log('')
         console.log('管线明细：')
-        for (const line of buckets.pipeline) console.log(`  | ${JSON.stringify(line)}`)
+        for (const line of appeared.pipeline) console.log(`  + | ${JSON.stringify(line)}`)
+        for (const line of disappeared.pipeline) console.log(`  - | ${JSON.stringify(line)}`)
       }
       if (gone.length > 0) {
         console.log('')
@@ -515,7 +577,14 @@ if (isMain) {
         for (const { l, n } of gone) console.log(`  - ${n}× ${JSON.stringify(l)}`)
       }
 
-      process.exitCode = buckets.logic.length === 0 ? 0 : 1
+      /**
+       * ── THE EXIT CODE IS ABOUT `logic`, ON EITHER SIDE ──────────────────────────────────────────
+       *
+       * Not about `appeared`, and not about "is the total delta positive". A deleted function is
+       * logic on the disappeared side; a rewritten expression is logic on the appeared side; both
+       * must fail. Anything else (comments, plumbing) is reported and allowed.
+       */
+      process.exitCode = totals.logic === 0 ? 0 : 1
     } else {
 
     const difference = firstDifference(before, after)
