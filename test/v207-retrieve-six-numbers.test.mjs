@@ -73,19 +73,30 @@ const AVAILABLE = compilerAvailable()
 
 /**
  * 文档里的表。**这里是手抄的期望值，不是从脚本反读的** —— 那样会变成「脚本同意自己」。
- * 六个数字抄自 docs/retrieve-families-and-tiers.md 的第 2、3、4、5 节。
+ *
+ * ── 2026-11-15：第一步搬运之后更新 ──────────────────────────────────────────────────────────────
+ *
+ * 搬走 14 个声明（→ `src/retrieve/interning.ts`）之后，`retrieve.ts` 的数字**必然**变化：
+ * 一份「搬完之后数字不变」的表，只能说明表没被重算。所以这些值是搬运后重新测的，
+ * 并逐项与 `docs/retrieve-families-and-tiers.md` 的历史表并列（那份文档记的是**搬前**的
+ * 快照，因而也保留 —— 它不是过期的真理，是那个时点的记录）。
+ *
+ * 旧值 → 新值：
+ *   分量 19 → 21（簇被拆开后，原来连在一起的两块各自成家）
+ *   主干 68/1251 → 51/955（14 个声明连同它们的边一起离开）
+ *   SCC 89 → 75，层 8 → 6，声明 89 → 75，跨度和 1535 → 1362
  */
 const DOCUMENTED = {
-  components: 19,
-  trunkDeclarations: 68,
-  trunkLines: 1251,
-  sccs: 89,
+  components: 21,
+  trunkDeclarations: 51,
+  trunkLines: 955,
+  sccs: 75,
   nontrivialSccs: 0,
-  layers: 8,
-  tiers: { D: 486, C: 413, B: 373, A: 263 },
-  tierCounts: { D: 4, C: 8, B: 17, A: 60 },
-  declarations: 89,
-  spanSum: 1535,
+  layers: 6,
+  tiers: { D: 486, C: 362, B: 295, A: 219 },
+  tierCounts: { D: 4, C: 7, B: 13, A: 51 },
+  declarations: 75,
+  spanSum: 1362,
 }
 
 test('v207 ①: 六个数字与 docs/retrieve-families-and-tiers.md 逐项相等', (t) => {
@@ -156,9 +167,16 @@ test('v207 ④: families.mjs 不再自己配平 —— INCIDENT_MARKERS 必须�
   const r = run(join(REPO, 'scripts', 'closure.mjs'), ['--declarations'])
   assert.equal(r.status, 0, 'closure --declarations must succeed')
   const rows = JSON.parse(r.stdout.trim().split('\n').pop())
-  const marker = rows.find((row) => row.name === 'INCIDENT_MARKERS' && row.file === 'retrieve.ts')
-  assert.ok(marker !== undefined, 'INCIDENT_MARKERS must be in the compiler span table')
-  assert.equal(marker.lines, 8,
+
+  /**
+   * 2026-11-15：第一步搬运把 `INCIDENT_MARKERS` 移到了 `src/retrieve/interning.ts`。
+   * 断言跟随它 —— 这条测试要钉的是「span 来源是编译器」，不是「它住在哪个文件」。
+   * 所以这里按**名字**找、不限文件，并要求全树只有一条。
+   */
+  const hits = rows.filter((row) => row.name === 'INCIDENT_MARKERS')
+  assert.equal(hits.length, 1,
+    `INCIDENT_MARKERS 应恰好有一处模块级声明，实测 ${hits.length} 处：${hits.map((h) => h.file).join(',')}`)
+  assert.equal(hits[0].lines, 8,
     'INCIDENT_MARKERS 是 8 行正则数组。手写括号配平器会把 /(…)/u 里的括号当成语法括号，'
     + '把它算成 1427 行并吞掉 68 个声明 —— 那个缺陷把整张分量表变成了假的。')
 })
