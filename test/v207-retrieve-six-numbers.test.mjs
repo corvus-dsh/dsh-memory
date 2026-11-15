@@ -87,30 +87,33 @@ const AVAILABLE = compilerAvailable()
  * 搬走 6 个声明（→ `src/retrieve/storage-tier.ts`）：3 个 let + setStorageTier + getStorageTier
  * + currentIndex。三个 let 是**模块级状态**，所以它们的 3 个节点整个离开本文件的图。
  *
- * ── 2026-11-15：第三步搬运之后再次更新（commitCache 族）─────────────────────────────────────────
+ * ── 2026-11-15：第四步搬运之后再次更新（L4 → retrieve/documents.ts）──────────────────────────────
  *
- * 搬走 5 个声明（→ `src/retrieve/commit-cache.ts`）：commitCache / COMMIT_DRIFT_WEIGHT /
- * currentCommitOf / clearCommitCache / sameCommit。commitCache 同样是模块级状态。
+ * 搬走 8 个声明（L4 整层）：ERROR_IDENTIFIER / STOPWORDS / contentOf / layerDocuments /
+ * looksLikeIncidentLog / negativeDocuments / skillDocuments / tierDocumentOf。
+ * 这是**一次搬走整层**，所以拓扑层数从 5 掉到 4。
  *
- * 四步的值：
+ * 五步的值：
  *   搬前（第一步前）  19 / 68·1251 / 89 / 8 / 486·413·373·263 / 89·1535
  *   第一步后          21 / 51·955  / 75 / 6 / 486·362·295·219 / 75·1362
  *   第二步后          21 / 45·927  / 69 / 5 / 486·362·282·204 / 69·1334
  *   第三步后          21 / 40·894  / 64 / 5 / 486·362·261·192 / 64·1301
+ *   第四步后          22 / 30·647  / 56 / 4 / 365·317·208·175 / 56·1065
  *
- * 分量数一直 21：主干始终是一个分量，另外 20 个碎片分量不含被搬走的名字。
+ * 分量数 21 → 22：documents.ts 的 8 个声明原来连在主干上，搬走后主干缩小（40→30 声明），
+ * 而 `contentOf` 那个只有 `Document` 类型边的碎片变成了独立分量。
  */
 const DOCUMENTED = {
-  components: 21,
-  trunkDeclarations: 40,
-  trunkLines: 894,
-  sccs: 64,
+  components: 22,
+  trunkDeclarations: 30,
+  trunkLines: 647,
+  sccs: 56,
   nontrivialSccs: 0,
-  layers: 5,
-  tiers: { D: 486, C: 362, B: 261, A: 192 },
-  tierCounts: { D: 4, C: 7, B: 11, A: 42 },
-  declarations: 64,
-  spanSum: 1301,
+  layers: 4,
+  tiers: { D: 365, C: 317, B: 208, A: 175 },
+  tierCounts: { D: 3, C: 6, B: 9, A: 38 },
+  declarations: 56,
+  spanSum: 1065,
 }
 
 test('v207 ①: 当前六数与内置基线逐项相等（基线来自实测，不是从文档反读）', (t) => {

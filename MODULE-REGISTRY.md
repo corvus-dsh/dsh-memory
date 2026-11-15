@@ -7,7 +7,7 @@
 
 - 覆盖目录：`src`，**递归**（含 `src/store/` 与 `src/retrieve/` 两个子目录）
 - 计入条件：文件名 `endsWith('.ts')`
-- 实测：**35 个模块 / 14,680 行**
+- 实测：**36 个模块 / 14,722 行**
 - 三个方向都查：① 磁盘 → 表（新文件不能悄悄进）；② 表 → 磁盘（删掉的行不能留着）；
   ③ 依赖列 → 磁盘（不能指向不存在的模块）。第四条额外查：表本身不能有**值**环。
 - 第五个方向：`test/module-registry.test.mjs` 的 `ROW` 正则必须能**读进来**每一个真实文件名 ——
@@ -34,10 +34,10 @@
 
 | 项 | 值 |
 |---|---|
-| 模块数 | **35**（扁平 27 + `store/` 5 + `retrieve/` 3） |
-| 总行数 | **14,680** |
-| > 800 行的文件 | **3** 个（`index.ts` 2361、`retrieve.ts` 1673、`store/skill.ts` 985） |
-| 最大文件 | **`index.ts`** 2361 行（占 **16.1%**） |
+| 模块数 | **36**（扁平 27 + `store/` 5 + `retrieve/` 4） |
+| 总行数 | **14,722** |
+| > 800 行的文件 | **3** 个（`index.ts` 2361、`retrieve.ts` 1419、`store/skill.ts` 985） |
+| 最大文件 | **`index.ts`** 2361 行（占 **16.0%**） |
 
 > **订正（2026-11-15）**：上一版这里写「扁平一层 / 27 个模块 / 14,211 行 / 最大 `store.ts` 2479」。
 > 三处都过时了，而且第一处是个**门禁漏洞**而不只是数字旧：
@@ -107,3 +107,4 @@ filter.ts -> retrieve.ts : type-only   （import type { MemoryHit }，运行时�
 | `src/retrieve/interning.ts` | 检索层的共享原语：分词、标题裁剪、证据提取、陈旧负判定、Document 构造。 | `INCIDENT_MARKERS`, `NEGATIVE_STALE_DAYS`, `NEGATIVE_STALE_WEIGHT`, `ageDaysOf`, `clipTitle`, `documentCache` …（共 14） | extract.ts (type-only), skill-cache.ts, workspace.ts |
 | `src/retrieve/storage-tier.ts` | 存储选路：json 默认、sqlite 可选；三个模块级 let 与它们的唯一写者同处一模块。 | `currentIndex`, `getStorageTier`, `setStorageTier` …（共 3） | sqlite-index.ts |
 | `src/retrieve/commit-cache.ts` | 工作区 commit 归属：按分钟缓存，失败回落到空串；commit 漂移判定的权重常量同处一模块。 | `COMMIT_DRIFT_WEIGHT`, `clearCommitCache`, `currentCommitOf`, `sameCommit` | — |
+| `src/retrieve/documents.ts` | 取数层：把 SKILL.md / negatives.jsonl / facts-experiences.jsonl / sqlite 索引行都转成检索用的 Document。L4 整层（8 声明）。 | `ERROR_IDENTIFIER`, `STOPWORDS`, `contentOf`, `layerDocuments`, `looksLikeIncidentLog`, `negativeDocuments`, `skillDocuments`, `tierDocumentOf` | edges.ts, ledger-cache.ts, retrieve.ts (type-only), retrieve/interning.ts, skill-cache.ts, sqlite-index.ts (type-only), store/skill.ts, workspace.ts |

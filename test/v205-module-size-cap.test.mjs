@@ -80,6 +80,7 @@ const SCANNED = [
   'lock.ts',
   'retrieve.ts',
   'retrieve/commit-cache.ts',
+  'retrieve/documents.ts',
   'retrieve/interning.ts',
   'retrieve/storage-tier.ts',
   'segment.ts',
@@ -126,12 +127,15 @@ const EXEMPT = new Map([
       + '所以登记为天花板：尺寸可见、不可增长。',
   }],
   ['retrieve.ts', {
-    ceiling: 1673,
+    ceiling: 1419,
     reason:
       '检索层：词法召回、IDF×鲜活度×重要度打分、两阶段 LLM 过滤、提示渲染。它与 store.ts 曾共享大量'
-      + 'helper。2026-11-15 已完成四步搬运：第一步 14 声明 → retrieve/interning.ts，第二步 6 声明 → '
-      + 'retrieve/storage-tier.ts，第三步 5 声明 → retrieve/commit-cache.ts（2009→1763→1718→1673）。'
-      + '剩余主干仍是单一分量，下一个候选是 L4（skillDocuments 121 行一个函数）。'
+      + 'helper。2026-11-15 已完成五步搬运：'
+      + '① 14 声明 → retrieve/interning.ts，② 6 声明 → retrieve/storage-tier.ts，'
+      + '③ 5 声明 → retrieve/commit-cache.ts，④ 8 声明 → retrieve/documents.ts'
+      + '（2009 → 1763 → 1718 → 1673 → 1419）。'
+      + '剩余主干 30 声明 / 647 行。下一步候选：L2 的 scoreDocuments（108 行，占该层 62.8% —— '
+      + '实测比 L4 的 skillDocuments 更集中）。'
       + 'ceiling 随每次搬运收紧到新实测值 —— 这是棘轮，不是自觉'
       + '（由「ceiling 必须等于实测」那条断言强制）。'
       + 'D-1 仍落在这里的 hitOf，按裁定等重构完成后再修。',

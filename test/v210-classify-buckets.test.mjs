@@ -35,7 +35,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { copyFileSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -236,26 +236,68 @@ test('v210 ⑦: 本步（第三步）的实测必须是 32/0/0 与 1/0/0（收�
   const hasRef = (() => {
     try {
       execFileSync('git', ['cat-file', '-e', 'f9d1abf'], { cwd: REPO, stdio: 'ignore' })
+      execFileSync('git', ['cat-file', '-e', '6446dea'], { cwd: REPO, stdio: 'ignore' })
       return true
     } catch { return false }
   })()
   if (!hasRef) {
-    t.skip('RESOURCE：本地仓库没有 f9d1abf（浅克隆 / shallow clone）。'
-      + '这条要与第三步的父提交比较，需要那个对象。完整克隆上运行即可覆盖；'
-      + 'NOT a pass and NOT a failure.')
+    t.skip('RESOURCE：本地仓库没有 f9d1abf / 6446dea（浅克隆 / shallow clone）。'
+      + '这条要重建「第三步那棵树」并与它的父提交比较，需要那两个对象。'
+      + '完整克隆上运行即可覆盖；NOT a pass and NOT a failure.')
     return
   }
 
-  const env = { ...process.env }
-  delete env.NODE_TEST_CONTEXT
+  /**
+   * ⚠ **必须在「第三步那棵树」上跑，不能用当前工作树。**
+   *
+   * 第一版直接 `cwd: REPO` 跑 `--against f9d1abf` —— 当时工作树恰好就是第三步的状态，
+   * 所以数字对。第四步（L4 搬运）一落地，工作树前进了，同一个命令的 diff 就变成
+   * 「第一到第四步」的全部变化，32/0/0 立刻不成立。
+   *
+   * 那红得**没有意义**：被测的判据没变，变的是我拿它去量了另一棵树。
+   * 这条测试的命题是「**第三步**的实测是 32/0/0」，所以它必须把第三步的树取出来量。
+   *
+   * 做法：`git show 6446dea:<file>` 逐文件导出该提交的 `src/` 到临时目录，
+   * 复制**当前**的 `verify-pure-move.mjs`（判据要今天的），在那里跑 `--against f9d1abf`。
+   * 临时目录需要能解析 f9d1abf 那个对象 ⇒ 用 `objects/info/alternates` 借原仓对象库。
+   */
+  const tmp = mkdtempSync(join(REPO, '.v210-step3-'))
   let out
   try {
-    out = execFileSync(process.execPath,
-      ['scripts/verify-pure-move.mjs', '--against', 'f9d1abf', '--classify'],
-      { cwd: REPO, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, timeout: 180_000, env })
-  } catch (error) {
-    out = String(error.stdout ?? '') + String(error.stderr ?? '')
+    const git = (...a) => execFileSync('git', a, { cwd: REPO, encoding: 'utf8', stdio: 'pipe' })
+    git('init', '-q', tmp)
+    git('config', 'user.email', 'v210@test.local', tmp)
+    git('config', 'user.name', 'v210', tmp)
+    mkdirSync(join(tmp, '.git', 'objects', 'info'), { recursive: true })
+    writeFileSync(join(tmp, '.git', 'objects', 'info', 'alternates'),
+      join(REPO, '.git', 'objects') + '\n', 'utf8')
+
+    // 导出第三步的 src/
+    const list = git('ls-tree', '-r', '--name-only', '6446dea', '--', 'src')
+      .split(/\r?\n/u).filter((p) => p.endsWith('.ts'))
+    assert.ok(list.length > 20, `第三步的 src/ 应有 20+ 个 .ts，实测 ${list.length}`)
+    for (const rel of list) {
+      const target = join(tmp, rel)
+      mkdirSync(dirname(target), { recursive: true })
+      writeFileSync(target, git('show', `6446dea:${rel}`), 'utf8')
+    }
+    // 脚本用当前的
+    mkdirSync(join(tmp, 'scripts'), { recursive: true })
+    copyFileSync(join(REPO, 'scripts', 'verify-pure-move.mjs'), join(tmp, 'scripts', 'verify-pure-move.mjs'))
+
+    const env = { ...process.env }
+    delete env.NODE_TEST_CONTEXT
+    try {
+      out = execFileSync(process.execPath,
+        ['scripts/verify-pure-move.mjs', '--against', 'f9d1abf', '--classify'],
+        { cwd: tmp, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, timeout: 180_000, env })
+    } catch (error) {
+      out = String(error.stdout ?? '') + String(error.stderr ?? '')
+    }
+  } finally {
+    rmSync(tmp, { recursive: true, force: true })
   }
+
   const totals = totalsOf(out)
   assert.ok(totals !== undefined, `输出里应有合计行：\n${out.slice(-900)}`)
 
