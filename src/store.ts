@@ -116,7 +116,7 @@ export function defaultSkillsDir(): string {
  */
 export { scanThreat } from './threat.js'
 
-import { skillPath, readSkillWorkspace, readSkillValidity, frontmatter, normalizeSkill, clampConfidence, purposeTokens, methodSimilarity } from './store/skill.js'
+import { clampConfidence, findConflicts, frontmatter, invalidateSkillShape, isConflictingSkill, listSkillFiles, methodSimilarity, normalizeSkill, parseEvidenceField, parseSkillFile, purposeTokens, readSkillValidity, readSkillWorkspace, skillPath } from './store/skill.js'
 import type { SkillInput, SkillConflict } from './store/skill.js'
 
 /**
@@ -130,7 +130,8 @@ import type { SkillInput, SkillConflict } from './store/skill.js'
  * ⚠️ 用 `export { … }`（不带 from）复用上面的 import 绑定：
  * 若写 `export { … } from './store/skill.js'`，同一个名字就有两处来源绑定。
  */
-export { skillPath, readSkillWorkspace, readSkillValidity, normalizeSkill, clampConfidence }
+export { clampConfidence, findConflicts, invalidateSkillShape, isConflictingSkill, normalizeSkill, parseSkillFile, readSkillValidity, readSkillWorkspace, skillPath }
+export { clearSkillShapeCache, conflictStrength, resetShapeCacheForTest } from './store/skill.js'
 
 
 /** v0.15: is this memory inside its validity window at `now`? */
@@ -199,198 +200,6 @@ export function rebuildConflictLinks(skillsDir: string): Array<{ a: string; b: s
   return pairs
 }
 
-export function conflictStrength(a: ExtractedSkill, b: ExtractedSkill): { shared: number; onlyLeft: string[]; onlyRight: string[] } {
-  const left = purposeTokens(a)
-  const right = purposeTokens(b)
-  const shared: string[] = []
-  for (const token of left) if (right.has(token)) shared.push(token)
-  return {
-    shared: shared.length,
-    onlyLeft: [...left].filter((token) => !right.has(token)),
-    onlyRight: [...right].filter((token) => !left.has(token)),
-  }
-}
-
-export function isConflictingSkill(a: ExtractedSkill, b: ExtractedSkill): boolean {
-  if (a.name === b.name) return true
-  /**
-   * v1.0.0 P0: "same name is a conflict" is the ONLY conclusion available when neither
-   * skill has a parsable procedure. Without this guard, `methodSimilarity` returns 0 for
-   * an empty step list — which reads as "completely different method" — and two step-less
-   * records that merely share some purpose words get linked as alternatives. Measured
-   * while fixing this: two skills with `steps: []` returned TRUE. That is the same
-   * "unknown silently becomes a claim" failure the rest of this function is careful about.
-   */
-  const leftSteps = a.steps.map((step) => step.trim()).filter(Boolean)
-  const rightSteps = b.steps.map((step) => step.trim()).filter(Boolean)
-  if (leftSteps.length === 0 || rightSteps.length === 0) return false
-  // Two names for the same steps is a duplicate, not a conflict.
-  if (methodSimilarity(a, b) >= 0.85) return false
-  /**
-   * v0.17: `scene` is the technology, `domain` is the SYSTEM. Two procedures about
-   * different systems are not two ways of doing one thing, however similar their
-   * wording — linking them asked the user to choose between unrelated methods.
-   *
-   * NOTE: this block used to appear TWICE, identically. Deleting the copy is safe (both
-   * returned the same value), and it is worth recording because a duplicated guard is a
-   * guard that will eventually be edited in one place only.
-   */
-  if (
-    a.domain !== undefined &&
-    b.domain !== undefined &&
-    a.domain !== 'general' &&
-    b.domain !== 'general' &&
-    a.domain !== b.domain
-  ) {
-    return false
-  }
-  const { shared, onlyLeft, onlyRight } = conflictStrength(a, b)
-  // v0.3.2: measured on the battle store. 3 shared bigrams linked 25 pairs out of
-  // 16 skills — the DB cluster alone produced a complete graph, which is noise,
-  // not knowledge. 5 keeps the genuine alternative (two SAVEPOINT stacks for two
-  // different drivers) and drops "both mention transactions somewhere".
-  if (shared < 3) return false
-  return onlyLeft.length > 0 && onlyRight.length > 0
-}
-
-/** Read the executable shape back out of one SKILL.md (enough to compare). */
-export function parseSkillFile(text: string, name: string): ExtractedSkill {
-  const when = text.match(/^when_to_use:\s*(.+)$/mu)?.[1] ?? text.match(/^when:\s*(.+)$/mu)?.[1] ?? ''
-  const description = text.match(/^description:\s*(.+)$/mu)?.[1] ?? when
-  const title = text.match(/^#\s+(.+)$/mu)?.[1] ?? name
-  const steps: string[] = []
-  const body = text.replace(/^---[\s\S]*?---/u, '')
-  const stepBlock = body.split(/^## 执行步骤$/mu)[1]?.split(/^## /mu)[0] ?? ''
-  for (const line of stepBlock.split(/\r?\n/u)) {
-    const match = /^\s*\d+\.\s+(.+)$/u.exec(line)
-    if (match !== null) steps.push(match[1].trim())
-  }
-  const evidence = parseEvidenceField(text.match(/^evidence:\s*(.+)$/mu)?.[1] ?? '', '')
-  const scopeText = (text.match(/^scope:\s*(.+)$/mu)?.[1] ?? '').trim().toLowerCase()
-  const sceneText = (text.match(/^scene:\s*(.+)$/mu)?.[1] ?? '').trim().toLowerCase()
-  const domainText = (text.match(/^domain:\s*(.+)$/mu)?.[1] ?? '').trim().toLowerCase()
-  const confidence = clampConfidence(text.match(/^confidence:\s*(.+)$/mu)?.[1])
-  const aliases = (text.match(/^aliases:\s*(.+)$/mu)?.[1] ?? '').split(/,/u).map((item) => item.trim()).filter(Boolean)
-  return {
-    name,
-    title,
-    description,
-    when,
-    steps,
-    verify: [],
-    scope: scopeText === 'workspace' || scopeText === 'global' ? scopeText : 'project',
-    scene: /^[a-z][a-z0-9-]{1,23}$/u.test(sceneText) ? sceneText : 'general',
-    domain: /^[a-z][a-z0-9-]{1,31}$/u.test(domainText) ? domainText : 'general',
-    aliases,
-    ...(() => {
-      const tags = asVocab(text.match(/^tags:\s*(.+)$/mu)?.[1] ?? '')
-      return tags.length === 0 ? {} : { tags }
-    })(),
-    ...(() => {
-      const nodeTypes = asVocab(text.match(/^applicable_node_types:\s*(.+)$/mu)?.[1] ?? '')
-      return nodeTypes.length === 0 ? {} : { applicableNodeTypes: nodeTypes }
-    })(),
-    confidence,
-    evidence,
-  }
-}
-
-function listSkillFiles(skillsDir: string): string[] {
-  try {
-    return readdirSync(skillsDir, { withFileTypes: true })
-      .filter((entry) => entry.isDirectory())
-      .map((entry) => entry.name)
-  } catch {
-    return []
-  }
-}
-
-/**
- * v1.0.0 P0 — CONFLICT DISCOVERY IS A READ; ONLY THE EDGE WRITE HAD TO CHANGE.
- *
- * `findConflicts` must SCAN every existing skill: a conflict is a property of two shapes,
- * and a shape that was never written down cannot be looked up in an index. The first
- * version of this refactor made discovery read the edge index instead — which is a
- * chicken-and-egg bug: the index only contains edges that discovery already found, so the
- * very first conflict could never be recorded. Caught by a 5-skill fixture producing an
- * empty `skills-edges.jsonl`.
- *
- * v1.0.0 P0 C: THE SCAN IS CACHED PER (dir, name, mtime, size).
- *
- * Rewriting a growing file per edge was the O(N²) IO. What was left after that fix is a
- * smaller but still quadratic cost: writing N skills in one process re-reads and re-parses
- * every earlier skill N times. Measured after the join fix: 7.0 ms/skill at N=50 rising to
- * 23.0 ms/skill at N=200 (3.28×). The cache below turns those re-parses into map lookups.
- *
- * INVALIDATION IS BY stat, NOT BY TRUST: a cached shape is reused only when mtime AND size
- * both match. Another process editing a SKILL.md therefore cannot leave a stale shape in
- * play — which matters because harvest writes are one process and reviews are another.
- */
-interface CachedShape {
-  mtimeMs: number
-  size: number
-  skill: ExtractedSkill
-}
-
-const shapeCache = new Map<string, Map<string, CachedShape>>()
-
-/** Drop the cached shape of one skill (after this process writes it). */
-export function invalidateSkillShape(skillsDir: string, name: string): void {
-  shapeCache.get(skillsDir)?.delete(name)
-}
-
-/** Drop every cached shape for a directory. Tests and bulk rebuilds call this. */
-export function clearSkillShapeCache(skillsDir?: string): void {
-  if (skillsDir === undefined) shapeCache.clear()
-  else shapeCache.delete(skillsDir)
-}
-
-/**
- * v1.x TEST SEAM — see `resetMonotonicClockForTest` for the contract.
- *
- * `shapeCache` is module-level mutable state (a `const` object mutated via
- * `clear` / `set` / `delete`). Any suite that exercises the skill writers or
- * ISOLATION between tests must be able to reset it deterministically, otherwise
- * a stale cached shape from test A can answer test B.
- */
-export function resetShapeCacheForTest(): void {
-  clearSkillShapeCache()
-}
-
-function shapeOf(skillsDir: string, name: string): ExtractedSkill | undefined {
-  const path = skillPath(skillsDir, name)
-  let stat: { mtimeMs: number; size: number }
-  try {
-    stat = statSync(path)
-  } catch {
-    shapeCache.get(skillsDir)?.delete(name)
-    return undefined
-  }
-  const bucket = shapeCache.get(skillsDir) ?? new Map<string, CachedShape>()
-  if (!shapeCache.has(skillsDir)) shapeCache.set(skillsDir, bucket)
-  const cached = bucket.get(name)
-  if (cached !== undefined && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) return cached.skill
-  let text: string
-  try {
-    text = readFileSync(path, 'utf8')
-  } catch {
-    return undefined
-  }
-  const skill = parseSkillFile(text, name)
-  bucket.set(name, { mtimeMs: stat.mtimeMs, size: stat.size, skill })
-  return skill
-}
-
-export function findConflicts(skillsDir: string, skill: ExtractedSkill): SkillConflict[] {
-  const out: SkillConflict[] = []
-  for (const name of listSkillFiles(skillsDir)) {
-    if (name === skill.name) continue
-    const other = shapeOf(skillsDir, name)
-    if (other === undefined) continue
-    if (isConflictingSkill(skill, other)) out.push({ name, title: other.title })
-  }
-  return out
-}
 
 function conflictFooter(conflicts: readonly SkillConflict[]): string[] {
   if (conflicts.length === 0) return []
@@ -403,18 +212,6 @@ function conflictFooter(conflicts: readonly SkillConflict[]): string[] {
     ),
     '',
   ]
-}
-  function parseEvidenceField(raw: string, fallbackSession: string): EvidenceRef[] {
-  const refs: EvidenceRef[] = []
-  for (const token of raw.split(/[,\s]+/u).filter(Boolean)) {
-    const at = token.lastIndexOf('@')
-    const sourceSessionId = at > 0 ? token.slice(0, at) : fallbackSession
-    const seq = Number(at > 0 ? token.slice(at + 1) : token)
-    if (!Number.isFinite(seq)) continue
-    if (refs.some((ref) => ref.seq === seq && ref.sourceSessionId === sourceSessionId)) continue
-    refs.push({ sourceSessionId, seq })
-  }
-  return refs
 }
 
 function evidenceBodyLines(evidence: readonly EvidenceRef[], fallbackSession: string): string[] {
