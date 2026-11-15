@@ -148,6 +148,49 @@ const measured = new Map(
 )
 
 /**
+ * ── 判据被抽成纯函数，好让 can-red 用假数据喂它们 ──────────────────────────────────────────────
+ *
+ * 每个函数只吃 `{ measured, exempt, historical }` 三个 Map/Set，不碰磁盘、不读本文件的常量。
+ * 于是真树与假树走**同一条**代码路径：假树上能红，等价于真树上有违规也会红。
+ *
+ * 这一层存在的理由是用户指出的那件事：can-red 之前只在 _scratch 里做过，
+ * 而一次性验证不会在下次改动时重跑。「我验过了」不能当成门禁的一部分。
+ */
+const overCapUnregistered = ({ measured: m, exempt, cap = CAP }) =>
+  [...m.entries()]
+    .filter(([rel, lines]) => lines > cap && !exempt.has(rel))
+    .map(([rel, lines]) => `${rel} (${lines})`)
+    .sort()
+
+const newFilesOverCap = ({ measured: m, historical, cap = CAP }) =>
+  [...m.entries()]
+    .filter(([rel, lines]) => !historical.has(rel) && lines > cap)
+    .map(([rel, lines]) => `${rel} (${lines})`)
+    .sort()
+
+const staleHistorical = ({ measured: m, historical, cap = CAP }) =>
+  [...historical].filter((rel) => (m.get(rel) ?? 0) <= cap).sort()
+
+const ceilingBreaches = ({ measured: m, exempt }) =>
+  [...exempt.entries()]
+    .flatMap(([rel, entry]) => {
+      const lines = m.get(rel)
+      if (lines === undefined) return [`${rel}（不在扫描集里）`]
+      return lines <= entry.ceiling ? [] : [`${rel}（${lines} > ceiling ${entry.ceiling}）`]
+    })
+    .sort()
+
+const expiredExemptions = ({ measured: m, exempt, cap = CAP }) =>
+  [...exempt.keys()]
+    .filter((rel) => (m.get(rel) ?? 0) <= cap)
+    .sort()
+
+const orphanExemptions = ({ exempt, historical }) =>
+  [...exempt.keys()].filter((rel) => !historical.has(rel)).sort()
+
+const REAL = { measured, exempt: EXEMPT, historical: HISTORICAL }
+
+/**
  * ── 完整性：显式名单必须等于磁盘上的真实集合 ────────────────────────────────────────────────────
  *
  * 这是「显式列名」这个选择的代价补偿：新文件不会自动进入门禁，但**漏登记**会被这里抓住。
@@ -174,10 +217,7 @@ test('cap: 显式扫描名单 == 磁盘上真实存在的 .ts 文件（漏登记
 })
 
 test('cap: 每个受扫描模块 ≤ 800 行，或已在 EXEMPT 里登记为天花板', () => {
-  const over = [...measured.entries()]
-    .filter(([rel, lines]) => lines > CAP && !EXEMPT.has(rel))
-    .map(([rel, lines]) => `${rel} (${lines})`)
-    .sort()
+  const over = overCapUnregistered(REAL)
   assert.deepEqual(over, [],
     `这些模块超过 ${CAP} 行上限：拆开它们，或在本文件的 EXEMPT 里登记一条带理由的天花板`)
 })
@@ -191,16 +231,13 @@ test('cap: 每个受扫描模块 ≤ 800 行，或已在 EXEMPT 里登记为天�
  * 与「历史文件登记为天花板」两件事的分界。没有这条，EXEMPT 就是一张万能许可证。
  */
 test('cap: 新文件（不在 HISTORICAL 名单里）必须 ≤ 800，无论是否登记在 EXEMPT', () => {
-  const violators = [...measured.entries()]
-    .filter(([rel, lines]) => !HISTORICAL.has(rel) && lines > CAP)
-    .map(([rel, lines]) => `${rel} (${lines})`)
-    .sort()
+  const violators = newFilesOverCap(REAL)
   assert.deepEqual(violators, [],
     `${CAP} 行上限对新文件成立。${violators.length > 0 ? violators.join(', ') + ' 不在 HISTORICAL 名单里，' : ''}`
     + '往 EXEMPT 里加条目不能绕过这条 —— HISTORICAL 只减不增，新文件永远不该进来。')
 
   // 反向：HISTORICAL 里的每个文件都必须真的超限，否则它就是一条过期的「历史」标签。
-  const noLongerOver = [...HISTORICAL].filter((rel) => (measured.get(rel) ?? 0) <= CAP)
+  const noLongerOver = staleHistorical(REAL)
   assert.deepEqual(noLongerOver, [],
     `这些文件已降到 ${CAP} 行以内，必须同时从 HISTORICAL 与 EXEMPT 里删掉：${noLongerOver.join(', ')}`)
 })
@@ -213,6 +250,8 @@ test('cap: EXEMPT 的每个条目都是天花板 —— 文件不得长過登记
       `${rel} 现在 ${lines} 行，超过登记的 ceiling ${entry.ceiling}。`
       + '天花板是「今天多大就是多大」的快照，不是允许继续增长。')
   }
+  assert.deepEqual(ceilingBreaches(REAL), [],
+    '同上，纯函数版本必须与逐条循环给出一致的结论（两个实现在这里互为对照）')
 })
 
 test('cap: EXEMPT 的每个条目都有可被反驳的理由（≥ 80 字符）', () => {
@@ -229,11 +268,111 @@ test('cap: 降回 800 以内的文件必须删除其 EXEMPT 条目', () => {
       `${rel} 现在 ${lines} 行，已在 ${CAP} 以内 —— 删掉它的 EXEMPT 条目（以及 HISTORICAL 里的那一行）。`
       + '一条过期的豁免就是一个带标签的洞。')
   }
+  assert.deepEqual(expiredExemptions(REAL), [],
+    '同上，纯函数版本必须与逐条循环给出一致的结论')
 })
 
 test('cap: EXEMPT 的键必须都在 HISTORICAL 里（历史遗留才有天花板）', () => {
-  const orphans = [...EXEMPT.keys()].filter((rel) => !HISTORICAL.has(rel))
+  const orphans = orphanExemptions(REAL)
   assert.deepEqual(orphans, [],
     `这些文件在 EXEMPT 里但不在 HISTORICAL 里：${orphans.join(', ')}。`
     + 'HISTORICAL 是「允许有天花板」的白名单，新文件不该进来。')
+})
+
+/**
+ * ── can-red：判据必须真能红（用户要求写进仓内测试的那一条）──────────────────────────────────
+ *
+ * 之前那五次注入只在 `_scratch/` 里跑过，跑完就没了 —— 下一个人改门禁时不会重跑它。
+ * 这里用假数据把同样的注入固化下来，走的是与真树**同一批**纯函数。
+ *
+ * 造基线的手法：从真实 EXEMPT 抄一份 ceiling 作为「假树」的测量值，
+ * 于是基线天然是绿的；再逐项破坏一个条件，确认对应的判据点名。
+ */
+const fakeBaseline = () => {
+  const m = new Map()
+  for (const rel of SCANNED) m.set(rel, EXEMPT.get(rel)?.ceiling ?? 100)
+  return m
+}
+
+test('can-red ①: 天花板被突破 1 行 → ceilingBreaches 必须点名', () => {
+  const m = fakeBaseline()
+  const target = [...HISTORICAL][0]
+  m.set(target, EXEMPT.get(target).ceiling + 1)
+  const hits = ceilingBreaches({ measured: m, exempt: EXEMPT })
+  assert.equal(hits.length, 1, `只该点名 ${target}：${JSON.stringify(hits)}`)
+  assert.match(hits[0], new RegExp(target.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'))
+})
+
+test('can-red ②: HISTORICAL 里的文件从 EXEMPT 移除 → 必须红（它超限却无天花板）', () => {
+  const m = fakeBaseline()
+  const target = [...HISTORICAL][0]
+  const exemptWithout = new Map(EXEMPT)
+  exemptWithout.delete(target)
+  const hits = overCapUnregistered({ measured: m, exempt: exemptWithout })
+  assert.deepEqual(hits, [`${target} (${m.get(target)})`])
+})
+
+test('can-red ③: 新文件 900 行未登记 → 两条判据都点名', () => {
+  const m = fakeBaseline()
+  m.set('brand-new.ts', 900)
+  assert.deepEqual(overCapUnregistered({ measured: m, exempt: EXEMPT }), ['brand-new.ts (900)'])
+  assert.deepEqual(newFilesOverCap({ measured: m, historical: HISTORICAL }), ['brand-new.ts (900)'])
+})
+
+test('can-red ④: 从 HISTORICAL 移除但仍在 EXEMPT → 独立断言必须红（用户特别点名的一条）', () => {
+  /**
+   * 这是「新文件 ≤ 800」那条断言能独立成立的核心场景：
+   * 有人把 store/skill.ts 从 HISTORICAL 删掉，却留着 EXEMPT 里 985 行的天花板，
+   * 企图让一个超大文件表现为「历史遗留」。若只有「超限者必须在 EXEMPT 里」这一条判据，
+   * 它会绿 —— 所以这里必须由 newFilesOverCap 点名。
+   */
+  const target = 'store/skill.ts'
+
+  const m = fakeBaseline()
+  const historicalWithout = new Set([...HISTORICAL].filter((r) => r !== target))
+
+  // 旧判据（只看 EXEMPT）此刻是绿的 —— 这正是漏洞
+  assert.deepEqual(overCapUnregistered({ measured: m, exempt: EXEMPT }), [],
+    '前提确认：只看「超限者是否登记」，这个注入是隐形的')
+
+  // 独立断言必须抓住它
+  assert.deepEqual(newFilesOverCap({ measured: m, historical: historicalWithout }), [`${target} (${m.get(target)})`],
+    '从 HISTORICAL 移除但仍在 EXEMPT → 新文件 ≤ 800 这条必须红')
+
+  // 顺带：EXEMPT 的键不在 HISTORICAL 里，孤儿判据也应点名同一条
+  assert.deepEqual(orphanExemptions({ exempt: EXEMPT, historical: historicalWithout }), [target])
+})
+
+test('can-red ⑤: 往 EXEMPT 塞一个新文件（900）→ 仍被独立断言拦住', () => {
+  const m = fakeBaseline()
+  m.set('sneaky.ts', 900)
+  const exemptPlus = new Map(EXEMPT)
+  exemptPlus.set('sneaky.ts', { ceiling: 900, reason: 'x'.repeat(90) })
+
+  // 有登记 → 旧判据绿
+  assert.deepEqual(overCapUnregistered({ measured: m, exempt: exemptPlus }), [],
+    '前提确认：登记之后，「超限者在表里」这条不再报')
+
+  // 但它在 HISTORICAL 之外 → 独立断言红
+  assert.deepEqual(newFilesOverCap({ measured: m, historical: HISTORICAL }), ['sneaky.ts (900)'])
+  assert.deepEqual(orphanExemptions({ exempt: exemptPlus, historical: HISTORICAL }), ['sneaky.ts'])
+})
+
+test('can-red ⑥: 文件降回 800 以内却留着登记 → 过期豁免判据必须点名', () => {
+  const m = fakeBaseline()
+  const target = [...HISTORICAL][0]
+  m.set(target, 700)
+  assert.deepEqual(expiredExemptions({ measured: m, exempt: EXEMPT }), [target])
+  assert.deepEqual(staleHistorical({ measured: m, historical: HISTORICAL }), [target])
+})
+
+test('can-red ⑦: 全部合规的假树 → 六条判据同时为空（免得把「总能报错」当成 can-red）', () => {
+  const m = fakeBaseline()
+  const world = { measured: m, exempt: EXEMPT, historical: HISTORICAL }
+  assert.deepEqual(overCapUnregistered(world), [])
+  assert.deepEqual(newFilesOverCap(world), [])
+  assert.deepEqual(staleHistorical(world), [])
+  assert.deepEqual(ceilingBreaches(world), [])
+  assert.deepEqual(expiredExemptions(world), [])
+  assert.deepEqual(orphanExemptions(world), [])
 })
