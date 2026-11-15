@@ -125,11 +125,14 @@ const EXEMPT = new Map([
       + '所以登记为天花板：尺寸可见、不可增长。',
   }],
   ['retrieve.ts', {
-    ceiling: 2009,
+    ceiling: 1718,
     reason:
       '检索层：词法召回、IDF×鲜活度×重要度打分、两阶段 LLM 过滤、提示渲染。它与 store.ts 曾共享大量'
-      + 'helper，A1 完成后其闭包已缩小但文件本身尚未拆。拆分需要先确定 Document/MemoryHit 的归属'
-      + '（D-1 就落在这里的 hitOf），而 D-1 按裁定要等重构完成后再修。登记为天花板。',
+      + 'helper。2026-11-15 已完成三步搬运：第一步 14 声明 → retrieve/interning.ts，第二步 6 声明 → '
+      + 'retrieve/storage-tier.ts（2009→1763→1718）。剩余主干仍是单一分量（45 声明 / 927 行），'
+      + '下一个候选是 L4（skillDocuments 121 行一个函数）。ceiling 随每次搬运收紧到新实测值 —— '
+      + '这是棘轮，不是自觉（见「ceiling 必须等于实测」那条断言）。'
+      + 'D-1 仍落在这里的 hitOf，按裁定等重构完成后再修。',
   }],
   ['store/skill.ts', {
     ceiling: 985,
@@ -189,6 +192,31 @@ const expiredExemptions = ({ measured: m, exempt, cap = CAP }) =>
 
 const orphanExemptions = ({ exempt, historical }) =>
   [...exempt.keys()].filter((rel) => !historical.has(rel)).sort()
+
+/**
+ * ── ceiling 必须等于实测，而不是大于等于 ────────────────────────────────────────────────────────
+ *
+ * `ceilingBreaches` 判的是「不许长过天花板」（`lines <= ceiling`）。它允许**天花板虚高**：
+ * 一个文件被拆小了，但 ceiling 还是旧的大数字，于是**下一次增长**仍有空间 ——
+ * 棘轮只在「降 ceiling」这个动作上咬合，而那个动作没有任何断言要求它发生。
+ *
+ * 实测（2026-11-15）：`retrieve.ts` 的 ceiling 写 2009，实际 1718。差 291 行是**白送的配额**。
+ * 换句话说，一步搬运把文件缩小了 291 行，门禁却允许它再长回去 291 行而不报。
+ *
+ * 这条纯函数把「ceiling == 实测」变成判据：收紧是**强制**的，不是自觉的。
+ *
+ * 判据写法：`seen` 是当天实测值，`entry.ceiling` 是登记值。只允许 `ceiling === lines`。
+ *   · `ceiling > lines` → 天花板虚高，必须收紧（这条测试红）
+ *   · `ceiling < lines` → 已经长过天花板，由 `ceilingBreaches` 负责（两处都红也可以）
+ */
+const slackCeilings = ({ measured: m, exempt }) =>
+  [...exempt.entries()]
+    .flatMap(([rel, entry]) => {
+      const lines = m.get(rel)
+      if (lines === undefined) return []
+      return entry.ceiling === lines ? [] : [`${rel}（ceiling ${entry.ceiling}，实测 ${lines}，差 ${entry.ceiling - lines}）`]
+    })
+    .sort()
 
 const REAL = { measured, exempt: EXEMPT, historical: HISTORICAL }
 
@@ -254,6 +282,24 @@ test('cap: EXEMPT 的每个条目都是天花板 —— 文件不得长過登记
   }
   assert.deepEqual(ceilingBreaches(REAL), [],
     '同上，纯函数版本必须与逐条循环给出一致的结论（两个实现在这里互为对照）')
+})
+
+/**
+ * ── 独立断言：ceiling 必须**恰好**等于当天实测 ─────────────────────────────────────────────────
+ *
+ * 与上一条的区别是「≤」还是「==」。上一条允许天花板虚高（文件缩小了但 ceiling 没跟着收紧），
+ * 于是棘轮只在自觉的情况下咬合。这一条把它变成强制的：不收紧就红。
+ *
+ * 为什么它必须独立成一条：`ceilingBreaches` 用的是 `lines <= ceiling`，把判据改成 `==`
+ * 会让它同时承担两件事（「不许超」和「不许虚高」），失败信息也会混。两条各有各的措辞。
+ */
+test('cap: EXEMPT 的 ceiling 必须等于实测（棘轮强制收紧，不许留虚高配额）', () => {
+  const slack = slackCeilings(REAL)
+  assert.deepEqual(slack, [],
+    '这些文件的 ceiling 与实测不一致。**ceiling 是「今天实测多少就是多少」的快照，不是上限许可**：\n  '
+    + slack.join('\n  ')
+    + '\n文件被拆小了 ⇒ 把 ceiling 收紧到新的实测值（这一步是强制动作，不是自觉）；'
+    + '\n文件长大了 ⇒ 由「不得长過 ceiling」那条负责。')
 })
 
 test('cap: EXEMPT 的每个条目都有可被反驳的理由（≥ 80 字符）', () => {
@@ -368,7 +414,7 @@ test('can-red ⑥: 文件降回 800 以内却留着登记 → 过期豁免判据
   assert.deepEqual(staleHistorical({ measured: m, historical: HISTORICAL }), [target])
 })
 
-test('can-red ⑦: 全部合规的假树 → 六条判据同时为空（免得把「总能报错」当成 can-red）', () => {
+test('can-red ⑦: 全部合规的假树 → 七条判据同时为空（免得把「总能报错」当成 can-red）', () => {
   const m = fakeBaseline()
   const world = { measured: m, exempt: EXEMPT, historical: HISTORICAL }
   assert.deepEqual(overCapUnregistered(world), [])
@@ -377,4 +423,43 @@ test('can-red ⑦: 全部合规的假树 → 六条判据同时为空（免得�
   assert.deepEqual(ceilingBreaches(world), [])
   assert.deepEqual(expiredExemptions(world), [])
   assert.deepEqual(orphanExemptions(world), [])
+  assert.deepEqual(slackCeilings(world), [])
+})
+
+/**
+ * ── can-red ⑧：虚高的 ceiling 必须被点名 ───────────────────────────────────────────────────────
+ *
+ * 这条对应用户裁定的第 ③ 项：`retrieve.ts` 曾登记 ceiling 2009 而实测 1718（差 291 行白送配额）。
+ *
+ * **不依赖真实 ceiling**：用合成的 `{ ceiling: 2009, measured: 1900 }` 精确复现那个形状
+ * （实测低于登记）。若用 `fakeBaseline()`（它从真实 EXEMPT 抄 ceiling），一旦真实 ceiling 被
+ * 收紧到 1718，1900 反而变成「突破天花板」，测的就不是这条判据了 —— 这类
+ * 「测试数据跟着被测常量漂移」的坑会让 can-red 静默地测错东西。
+ *
+ * ⚠ 与 `ceilingBreaches` 的关系：后者判 `lines <= ceiling`，对「虚高」是**绿**的。
+ * 所以先断言「旧判据此刻是绿的」，再断言新判据点名 —— 否则这条 can-red 是同义反复。
+ */
+test('can-red ⑧: ceiling 虚高（实测 1900 < 登记 2009）必须点名，而「不得长過」那条对它无感', () => {
+  const target = 'retrieve.ts'
+  const m = new Map([[target, 1900]])
+  const exempt = new Map([[target, { ceiling: 2009, reason: 'x'.repeat(90) }]])
+
+  // 旧判据（≤）对虚高无感 —— 这正是漏洞存在的证明
+  assert.deepEqual(ceilingBreaches({ measured: m, exempt }), [],
+    '前提确认：只看「不超过 ceiling」时，虚高的天花板是隐形的')
+
+  // 新判据必须点名，并给出差额
+  assert.deepEqual(slackCeilings({ measured: m, exempt }),
+    [`${target}（ceiling 2009，实测 1900，差 109）`],
+    '虚高的 ceiling 必须被点名，且差额要写出来（读的人才知道要收紧多少）')
+
+  // 收紧到实测值之后必须转绿（判据不是「总有违规」）
+  const tightened = new Map([[target, { ceiling: 1900, reason: 'x'.repeat(90) }]])
+  assert.deepEqual(slackCeilings({ measured: m, exempt: tightened }), [],
+    '把 ceiling 收紧到 1900 之后必须转绿')
+
+  // 反向：文件长大了（实测 > ceiling）—— 这条判据也点名，措辞给出负差额
+  assert.deepEqual(slackCeilings({ measured: new Map([[target, 2009 + 1]]), exempt }),
+    [`${target}（ceiling 2009，实测 2010，差 -1）`],
+    '长过 ceiling 时也要点名（与 ≤ 那条职责重叠，但措辞不同：这里显示负差额）')
 })
