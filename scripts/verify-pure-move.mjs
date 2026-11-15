@@ -369,8 +369,24 @@ if (isMain) {
         remaining.push(diff)
       }
 
-      // An entry counts as fully used only when BOTH halves matched.
-      const stale = registryLeft.filter((e) => !(e.usedGone && e.usedCame))
+      // An entry that matched nothing is NOT automatically rot. Once the fix is committed, comparing
+      // against a ref that already contains it produces no diff — the normal, healthy state.
+      // So distinguish two cases by asking: is the corrected line present in the tree?
+      //
+      //   appeared line present  → the correction is already in the baseline; the entry simply does
+      //                            not apply to THIS comparison. Informational, never a failure.
+      //   appeared line ABSENT   → the code no longer looks like either side of the registered pair,
+      //                            so the entry describes something that no longer exists. That IS
+      //                            rot (or an unregistered edit nearby) and it must fail, because a
+      //                            registry nobody prunes is a list nobody reads.
+      const alreadyApplied = []
+      const stale = []
+      for (const entry of registryLeft) {
+        if (entry.usedGone && entry.usedCame) continue
+        const appearedInTree = (after.get(entry.appeared) ?? 0) > 0
+        if (appearedInTree) alreadyApplied.push(entry)
+        else stale.push(entry)
+      }
 
       if (absorbed.length > 0) {
         console.log('')
@@ -382,17 +398,26 @@ if (isMain) {
           console.log(`KNOWN FORMAT CORRECTION (see ${entry.commit}): ${entry.reason}`)
         }
       }
+      if (alreadyApplied.length > 0) {
+        console.log('')
+        for (const entry of alreadyApplied) {
+          console.log(`REGISTERED CORRECTION ALREADY IN BASELINE (${entry.commit}): not part of this comparison.`)
+        }
+      }
       if (stale.length > 0) {
         console.log('')
         for (const entry of stale) {
-          console.log(`STALE REGISTRY ENTRY (${entry.commit}): no longer matches anything — delete it.`)
+          console.log(`STALE REGISTRY ENTRY (${entry.commit}): the corrected line is gone from the tree — delete the entry.`)
           console.log(`  disappeared: ${JSON.stringify(entry.disappeared)}`)
           console.log(`  appeared   : ${JSON.stringify(entry.appeared)}`)
         }
       }
 
       if (remaining.length === 0 && stale.length === 0) {
-        console.log(`\nPURE MOVE + ${absorbed.length / 2} REGISTERED FORMAT CORRECTION(S) — nothing unexplained.`)
+        const parts = []
+        if (absorbed.length > 0) parts.push(`${absorbed.length / 2} REGISTERED FORMAT CORRECTION(S)`)
+        if (alreadyApplied.length > 0) parts.push(`${alreadyApplied.length} ALREADY IN BASELINE`)
+        console.log(`\nPURE MOVE${parts.length > 0 ? ` + ${parts.join(' + ')}` : ''} — nothing unexplained.`)
         process.exitCode = 0
       } else {
         console.log('\n' + describe(remaining[0] ?? allDifferences[0]))
