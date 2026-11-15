@@ -132,7 +132,14 @@ layerDocumentOf     → firstEvidence, clipTitle, provenanceOf, tokenize, ageDay
 | 门禁 | 结果 |
 |---|---|
 | `npm test` | **476 / 476 / 0 / skipped 0** |
-| `verify-pure-move --against HEAD` | 消失 **0** 行；新增 27 行 = 注释 **27** + 管线 0 + **逻辑 0** |
+| `verify-pure-move --against HEAD --classify` | **逻辑 0**：消失 0 行；新增 27 行 = 注释 **27** + 管线 0 + **逻辑 0** |
+
+> **订正（2026-11-15）**：上表的命令原来写作 `verify-pure-move --against HEAD`（不带 `--classify`），
+> 那是不准确的记账。纯位移检查的主路径对「新增注释」是**红的** —— 它比的是内容行多重集，
+> 而本步在新模块头部写了 27 行说明注释，那是新增内容，不是位移。真正能得出「逻辑 0」这个
+> 结论的是 `--classify` 模式（2026-11-15 从 `_scratch/puremove-classify.mjs` 移进工具）。
+> 两者关系：主路径判「是否纯位移」，`--classify` 判「未解释的差是注释、管线还是逻辑」。
+> 引用结论时必须带 `--classify`，否则数字对不上命令。
 | `check-cycles` | nodes 33 / value edges 72 / **ACYCLIC** / unresolved 0 |
 | `type-budget` | OK（2459: 0）|
 | `readme-counts` | 7/7 |

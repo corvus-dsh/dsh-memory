@@ -34,6 +34,7 @@ import { SqliteIndex, sqliteAvailable } from './sqlite-index.js'
 import type { IndexDocument } from './sqlite-index.js'
 import { INCIDENT_MARKERS, ageDaysOf, clipTitle, documentCache, isStaleNegative, layerDocumentOf, negativeDocumentOf, provenanceOf, skillDirKey, tokenize, triggerOf } from './retrieve/interning.js'
 import { currentIndex } from './retrieve/storage-tier.js'
+import { COMMIT_DRIFT_WEIGHT, currentCommitOf, sameCommit } from './retrieve/commit-cache.js'
 
 /**
  * Memory documents for a query, from whichever tier is live.
@@ -323,53 +324,6 @@ interface Scored {
   /** v0.32 P1: set when the skill's commit no longer matches the checkout. */
   commitDrift?: boolean
   currentCommit?: string
-}
-
-/**
- * v0.32 P1 — THE COMMIT A WORKSPACE IS AT, cached per minute.
- *
- * Retrieval runs on every pre-step, so this must stay cheap: one `git rev-parse` per
- * workspace per minute, never per turn, and an empty string on any failure. An unknown
- * commit means NO demotion — an unanswerable question must not silently mark every
- * memory as stale.
- */
-const commitCache = new Map<string, { at: number; hash: string }>()
-export const COMMIT_DRIFT_WEIGHT = 0.45
-
-export function currentCommitOf(workspace: string): string {
-  if (workspace.length === 0) return ''
-  const cached = commitCache.get(workspace)
-  const now = Date.now()
-  if (cached !== undefined && now - cached.at < 60_000) return cached.hash
-  let hash = ''
-  try {
-    const output = execFileSync('git', ['-C', workspace, 'rev-parse', 'HEAD'], {
-      encoding: 'utf8',
-      timeout: 1_500,
-      stdio: ['ignore', 'pipe', 'ignore'],
-      windowsHide: true,
-    })
-    const trimmed = String(output).trim().toLowerCase()
-    hash = /^[0-9a-f]{7,40}$/u.test(trimmed) ? trimmed : ''
-  } catch {
-    hash = ''
-  }
-  commitCache.set(workspace, { at: now, hash })
-  return hash
-}
-
-/** Test seam: forget cached commits. */
-export function clearCommitCache(): void {
-  commitCache.clear()
-}
-
-/** Same commit? Compare on the short prefix, because a file may record either form. */
-function sameCommit(left: string, right: string): boolean {
-  const a = left.toLowerCase()
-  const b = right.toLowerCase()
-  const width = Math.min(a.length, b.length)
-  if (width < 7) return false
-  return a.slice(0, width) === b.slice(0, width)
 }
 
 const CJK = /[\u4e00-\u9fff]/u
@@ -1716,3 +1670,4 @@ export function renderHint(result: RetrieveResult): string | undefined {
 export type { Document, DocumentCacheEntry }
 export { NEGATIVE_STALE_DAYS, NEGATIVE_STALE_WEIGHT, isStaleNegative, tokenize } from './retrieve/interning.js'
 export { setStorageTier, getStorageTier } from './retrieve/storage-tier.js'
+export { COMMIT_DRIFT_WEIGHT, currentCommitOf, clearCommitCache } from './retrieve/commit-cache.js'

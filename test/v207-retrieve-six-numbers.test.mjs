@@ -86,26 +86,30 @@ const AVAILABLE = compilerAvailable()
  * 搬走 6 个声明（→ `src/retrieve/storage-tier.ts`）：3 个 let + setStorageTier + getStorageTier
  * + currentIndex。三个 let 是**模块级状态**，所以它们的 3 个节点整个离开本文件的图。
  *
- * 三步的值：
+ * ── 2026-11-15：第三步搬运之后再次更新（commitCache 族）─────────────────────────────────────────
+ *
+ * 搬走 5 个声明（→ `src/retrieve/commit-cache.ts`）：commitCache / COMMIT_DRIFT_WEIGHT /
+ * currentCommitOf / clearCommitCache / sameCommit。commitCache 同样是模块级状态。
+ *
+ * 四步的值：
  *   搬前（第一步前）  19 / 68·1251 / 89 / 8 / 486·413·373·263 / 89·1535
  *   第一步后          21 / 51·955  / 75 / 6 / 486·362·295·219 / 75·1362
  *   第二步后          21 / 45·927  / 69 / 5 / 486·362·282·204 / 69·1334
+ *   第三步后          21 / 40·894  / 64 / 5 / 486·362·261·192 / 64·1301
  *
- * 注意「无向连通分量 21 → 21」不变：被搬走的 6 个声明在原图里构成一个**独立分量**？
- * 不是 —— 它们原本就与主干相连（currentIndex 被 memoryDocumentsFor 调用）。
- * 分量数不变是因为主干仍是一个分量，而 6 个碎片分量本来就不含这几个名字。
+ * 分量数一直 21：主干始终是一个分量，另外 20 个碎片分量不含被搬走的名字。
  */
 const DOCUMENTED = {
   components: 21,
-  trunkDeclarations: 45,
-  trunkLines: 927,
-  sccs: 69,
+  trunkDeclarations: 40,
+  trunkLines: 894,
+  sccs: 64,
   nontrivialSccs: 0,
   layers: 5,
-  tiers: { D: 486, C: 362, B: 282, A: 204 },
-  tierCounts: { D: 4, C: 7, B: 12, A: 46 },
-  declarations: 69,
-  spanSum: 1334,
+  tiers: { D: 486, C: 362, B: 261, A: 192 },
+  tierCounts: { D: 4, C: 7, B: 11, A: 42 },
+  declarations: 64,
+  spanSum: 1301,
 }
 
 test('v207 ①: 六个数字与 docs/retrieve-families-and-tiers.md 逐项相等', (t) => {

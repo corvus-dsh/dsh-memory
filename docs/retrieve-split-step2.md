@@ -95,7 +95,11 @@ ESM 的 import 绑定对**导入方**是只读的。若只搬 `let` 而不搬写
 | 门禁 | 结果 |
 |---|---|
 | `npm test` | **480 / 480 / 0 / skipped 0** |
-| `verify-pure-move --against HEAD` | 消失 **1** 行（已解释）；新增 33 行 = 注释 **33** + 管线 0 + **逻辑 0** |
+| `verify-pure-move --against HEAD --classify` | **逻辑 0**：消失 **1** 行（已解释）；新增 33 行 = 注释 **33** + 管线 0 + **逻辑 0** |
+
+> **订正（2026-11-15）**：上表的命令原来写作 `verify-pure-move --against HEAD`（不带 `--classify`），
+> 那是不准确的记账。主路径对「新增注释」是红的（它比内容行多重集，而本步新增了族注释与头注释），
+> 「逻辑 0」这个结论来自 `--classify`。见 `docs/retrieve-split-step1.md` 同一条订正的详细说明。
 | `check-cycles` | nodes 34 / value edges 74 / **ACYCLIC** / unresolved 0 |
 | `type-budget` | OK（2459: 0）|
 | `readme-counts` | 7/7 |
@@ -162,7 +166,11 @@ ESM 的 import 绑定对**导入方**是只读的。若只搬 `let` 而不搬写
 
 ## 八、没做的事
 
-- 没删 `memoryDocumentsFor`：**它不是死代码**（第 1 条结论，见 `docs/commit-cache-ownership.md` 同期记录）
-- 没动 `commitCache` 族（等裁定）
+- **没删 `memoryDocumentsFor`** —— 第 1 条要求的删除**没有执行**，因为前提不成立：
+  它不是死代码，`retrieveWithFilter` 在 `...memoryDocumentsFor(query, memoryDir, now)` 处调用它。
+  我上一轮判「全仓零引用」是**误判**，判据缺陷与订正见
+  `docs/commit-cache-ownership.md` 第〇之一节：`/(?<![\w.])NAME\s*\(/` 把展开运算符
+  `...` 的末尾点号当成了属性访问，于是漏判。删前跑全量测试时，76 条红拦住了它。
+- 没动 `commitCache` 族（当时等裁定；现已按裁定 A 执行，见 `docs/retrieve-split-step3.md`）
 - 没动 `index.ts`（2361 行仍在 `EXEMPT`）
 - 不 publish、不碰 paradise、desktop profile 不动

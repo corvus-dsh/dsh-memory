@@ -4,6 +4,80 @@
 > 全部数据由 `closure.mjs --declarations`（编译器行区间）与 `closure.mjs <symbol>`（闭包）程序算出。
 >
 > **本文件只给数据，不裁定。** 裁定由用户做。
+>
+> **裁定结果（2026-11-15，用户）**：方案 **A**（全搬 5 声明），落点 `src/retrieve/commit-cache.ts`。
+> 已执行，见 `docs/retrieve-split-step3.md`。
+
+---
+
+## 〇之一、必须先订正的一条错误结论：`memoryDocumentsFor` **不是**死代码
+
+> 本节记录的是**我犯过的错**，不是本仓的现状。留在文件里是因为下一个读这份分析的人
+> 很可能看见「死代码」这个词就照做删除 —— 而这个判断当时是错的。
+
+### 错误结论
+
+2026-11-15，我给出过这样的判断：
+
+> 「它的唯一调用者 `memoryDocumentsFor`（L93–106）**是死代码**：全仓 `src/` 与 `lib/` 里
+> 除定义处外**零引用**（已实测）。」
+
+### 实测：它有调用者
+
+删除 L83–107 后，**76 条测试红**：
+
+```
+ReferenceError: memoryDocumentsFor is not defined
+```
+
+调用点在 `retrieveWithFilter` 体内（当时的 L991）：
+
+```ts
+const inSceneDocuments = [
+  ...skillDocuments(skillsDir, now),
+  ...memoryDocumentsFor(query, memoryDir, now),   // ← 展开运算符
+].filter(inScene)
+```
+
+### 判据的缺陷
+
+我用的正则：
+
+```js
+/(?<![\w.])memoryDocumentsFor\s*\(/u
+```
+
+对 `...memoryDocumentsFor(query, ...)` 做 lookbehind 时，**前一个字符是 `.`**（展开运算符的第三个点），
+被 `[\w.]` 排除 ⇒ **漏判**。
+
+`...` 是展开运算符，**不是属性访问**。这个 lookbehind 把两者混为一谈。
+
+### 正确的判据
+
+必须容许 `...` 前缀；或者更准确地说，只排除「名字是某个**属性访问的尾**」这一种情况：
+
+```js
+// 正确：容许 0–3 个点前缀
+/(?:^|[^\w$])\.{0,3}\s*NAME\s*\(/u
+
+// 错误：把展开运算符的末尾点号当成属性访问
+/(?<![\w.])NAME\s*\(/u
+```
+
+复核后：**声明 2 处 / 调用 2 处**（`src/retrieve.ts` 与 `lib/retrieve.js` 各一）。
+
+### 这一类错误的形状
+
+它与本仓早前 `families.mjs` 把**属性名**（`record.workspace`、`x.length`）当成自由标识符
+是**同一类错误的镜像**：
+
+| 缺陷 | 方向 | 后果 |
+|---|---|---|
+| `families.mjs` 把属性名算成自由标识符 | **多算** | 14 个声明里 10 个被误判成「有外部依赖」 |
+| `(?<![\w.])NAME\(` 漏掉 `...NAME(` | **少算** | 一个被真实调用的函数被判成死代码 |
+
+两者都是「用词法近似代替语法」的代价。教训：**一个「零引用」的结论，删除前必须被测试否决一次**
+—— 这次正是「删前跑全量测试」这一条要求拦住了它。
 
 ---
 

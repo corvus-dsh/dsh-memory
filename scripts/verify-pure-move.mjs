@@ -129,6 +129,102 @@ export function contentLines(text) {
 }
 
 /**
+ * ── THREE-WAY CLASSIFICATION OF THE UNEXPLAINED LINES (was `_scratch/puremove-classify.mjs`) ────
+ *
+ * The checker reports a COUNT of unexplained differences. That count is not a verdict a human can
+ * act on: `+33 lines` is a pass if they are all comments and a real problem if one is a changed
+ * expression. Every move in this refactor was therefore classified by a THROWAWAY script in
+ * `_scratch/`, and a throwaway script has two failure modes that both happened:
+ *
+ *   1. it is not re-run, so the next person either trusts the number or redoes the work;
+ *   2. it drifts from the tool it is supposed to explain (its output format changed twice while the
+ *      checker's did not).
+ *
+ * So the classification moves IN HERE, as a mode of the tool that produces the diff in the first
+ * place. It reads the same `contentLines` the comparison uses — one implementation, one truth.
+ *
+ * ── THE THREE BUCKETS (and why they are defensible) ─────────────────────────────────────────────
+ *
+ *   comment   the line, with leading whitespace stripped, starts with `/` or `*`.
+ *             A moved-and-documented cluster necessarily gains section comments, and a comment
+ *             cannot change behaviour. Lowest risk, largest bucket in practice.
+ *
+ *   pipeline  a member line of a multi-line import/export list (`  name,` / `  name as x,`),
+ *             the closing `} from '…'`, the bare `{`, or a `  name, name,` continuation.
+ *             These are the move's own plumbing. The SECOND rule here was found the hard way:
+ *             A2 reported "logic 2 lines" and both were import continuations — a plumbing line
+ *             classified as logic is a false alarm that teaches people to ignore the gate.
+ *
+ *   logic     everything else. **This is the bucket that must be 0** for a pure move.
+ *             Anything here is either a real edit or a classification gap that must be closed by
+ *             teaching the tool a new SHAPE, not by editing the report.
+ *
+ * ⚠ THE TOOL CANNOT DECIDE WHETHER A `logic` LINE IS FINE. It can only say "this is not a comment
+ *   and not plumbing". A user may still approve a logic line (the `bf35562` indent fix was one) —
+ *   but it has to be approved explicitly, which is exactly the difference between a register entry
+ *   (`KNOWN_FORMAT_CORRECTIONS`) and a silent pass.
+ */
+const RE_PIPELINE_NAME = /^ {2}[A-Za-z_$][\w$]*(?: as [A-Za-z_$][\w$]*)?,$/u
+const RE_PIPELINE_CONTINUATION = /^ {2}[A-Za-z_$][\w$]*(?:, ?[A-Za-z_$][\w$]*)*,$/u
+const RE_PIPELINE_CLOSE = /^\} from '[^']*'$/u
+
+export const isCommentLine = (line) => {
+  const s = line.trimStart()
+  return s.startsWith('/') || s.startsWith('*')
+}
+
+export const isPipelineLine = (line) => {
+  if (RE_PIPELINE_NAME.test(line) || RE_PIPELINE_CONTINUATION.test(line)) return true
+  if (RE_PIPELINE_CLOSE.test(line) || line === '{') return true
+  return false
+}
+
+/** Classify one unexplained line. `comment` | `pipeline` | `logic` */
+export const classifyLine = (line) => {
+  if (isCommentLine(line)) return 'comment'
+  if (isPipelineLine(line)) return 'pipeline'
+  return 'logic'
+}
+
+/**
+ * Classify a whole multiset diff. `gone` / `came` are `[{ l, n }]` as the checker computes them.
+ * Returns the three buckets with each line expanded `n` times, plus totals.
+ */
+export function classifyDifference(gone, came) {
+  const buckets = { comment: [], pipeline: [], logic: [] }
+  for (const { l, n } of came) {
+    for (let i = 0; i < n; i += 1) buckets[classifyLine(l)].push(l)
+  }
+  return {
+    buckets,
+    disappeared: { entries: gone.length, lines: gone.reduce((s, g) => s + g.n, 0) },
+    appeared: { entries: came.length, lines: came.reduce((s, c) => s + c.n, 0) },
+  }
+}
+
+/** Multiset difference of two content-line arrays: `{ gone, came }` with counts. */
+export function diffContentLines(refLines, treeLines) {
+  const count = (arr) => {
+    const m = new Map()
+    for (const l of arr) m.set(l, (m.get(l) ?? 0) + 1)
+    return m
+  }
+  const t = count(treeLines)
+  const r = count(refLines)
+  const gone = []
+  const came = []
+  for (const [l, n] of r) {
+    const k = t.get(l) ?? 0
+    if (k < n) gone.push({ l, n: n - k })
+  }
+  for (const [l, n] of t) {
+    const k = r.get(l) ?? 0
+    if (k < n) came.push({ l, n: n - k })
+  }
+  return { gone, came }
+}
+
+/**
  * ── KNOWN FORMAT CORRECTIONS: EXPLAINED, NEVER SILENT ────────────────────────────────────────
  *
  * A pure move can legitimately carry an ALREADY-AGREED format fix. The first such case is
@@ -167,6 +263,40 @@ export const KNOWN_FORMAT_CORRECTIONS = [
     reason: 'parseEvidenceField 行首的两个空格被修正为 0 缩进（A1-3 顺手修，用户明确要求）；只有空白差异，无行为变化',
     disappeared: '  function parseEvidenceField(raw: string, fallbackSession: string): EvidenceRef[] {',
     appeared: 'function parseEvidenceField(raw: string, fallbackSession: string): EvidenceRef[] {',
+  },
+  /**
+   * ── 2026-11-15 `930b435`（第二步）与本次（第三步）──
+   *
+   * 两个声明上方的**单行**注释被展开成多行注释块，因为我给它们加了 `export` 并写明了
+   * 「为什么导出」。这不是缩进修正，是**注释形状变化**：内容等于原注释 + 新增一句。
+   *
+   * 为什么必须登记而不能放过：`contentLines` 把整行当单位比较，所以「一行变四行」
+   * 在多重集里就是 1 消失 + 4 出现 —— 与「删掉注释、重写注释」无法区分。
+   * 登记成精确的 1:1 对，让读者能看见它是什么；不登记则每次跑都会以 `logic` 出现。
+   *
+   * ⚠ 这两个条目的 `appeared` 是**多行块的第一行**，配对的是被吃掉的那一行单行注释。
+   *   多出来的其余行属于 `comment` 桶（`--classify` 里可见），不需要逐条登记 ——
+   *   登记表的作用是「解释那一条消失的」，不是「替所有新注释开口子」。
+   */
+  {
+    commit: '930b435',
+    reason: 'currentIndex 的单行注释展开成多行注释块（加 export 并说明为什么导出）；文本等于原注释 + 新增一句，无行为变化',
+    disappeared: '/** The memoised index handle, or undefined when the tier is json or sqlite is unavailable. */',
+    appeared: ' * The memoised index handle, or undefined when the tier is json or sqlite is unavailable.',
+  },
+  {
+    /**
+     * 本次提交（retrieve 第三步）。commit 字段写的是**引入该修正的提交**，
+     * 而那个 sha 在写这一行时还不存在（自指不可能）。所以用 `this-commit` 作为标记，
+     * 并在 `docs/retrieve-split-step3.md` 里写明它对应哪一步。
+     *
+     * 这不是逃避：`commit` 字段的唯一用途是让读输出的人**找到那条修正**。
+     * `this-commit` + 文档里的一节，比一个写错的 sha 更有用。
+     */
+    commit: 'this-commit (retrieve 第三步)',
+    reason: 'sameCommit 的单行注释展开成多行注释块（加 export 并说明为什么导出）；文本等于原注释 + 新增一句，无行为变化',
+    disappeared: '/** Same commit? Compare on the short prefix, because a file may record either form. */',
+    appeared: ' * Same commit? Compare on the short prefix, because a file may record either form.',
   },
 ]
 
@@ -315,8 +445,79 @@ if (isMain) {
     const ref = againstIndex >= 0 ? process.argv[againstIndex + 1] : 'HEAD'
     if (ref === undefined) throw new Error('--against needs a git ref')
 
+    /**
+     * ── `--classify` : the same diff, bucketed into comment / pipeline / logic ──────────────────
+     *
+     * Print-only mode. It does NOT decide pass/fail — that stays with the main path and the
+     * registry. It exists so the "33 lines appeared" answer becomes actionable: the reader sees
+     * immediately whether the 33 are comments (fine) or whether one is a changed expression.
+     *
+     * Exit code: 0 when `logic` is 0, 1 when it is not, 2 when the comparison is VACUOUS.
+     * That mirrors the main path's severity without pretending to replace it — an approved
+     * `logic` line still needs a registry entry to make the real gate pass.
+     */
+    const classifyMode = process.argv.includes('--classify')
+
     const before = multisetOfRef(ref)
     const after = multisetOfTree()
+
+    if (classifyMode) {
+      const beforeArr = []
+      for (const [line, n] of before) for (let i = 0; i < n; i += 1) beforeArr.push(line)
+      const afterArr = []
+      for (const [line, n] of after) for (let i = 0; i < n; i += 1) afterArr.push(line)
+
+      const srcDiffClassify = (() => {
+        try {
+          execFileSync('git', ['diff', '--quiet', ref, '--', 'src'], { cwd: REPO, stdio: 'ignore' })
+          return ''
+        } catch { return 'changed' }
+      })()
+      const srcStatusClassify = execFileSync('git', ['status', '--porcelain', '--', 'src'], { cwd: REPO, encoding: 'utf8' }).trim()
+      if (srcDiffClassify === '' && srcStatusClassify === '') {
+        console.log(`ref     : ${ref}`)
+        console.log('tree    : working')
+        console.log('')
+        console.log('VACUOUS — src/ has NO differences from the ref, so there is nothing to classify.')
+        console.log('This is NOT a pass. Run it against the commit BEFORE the move.')
+        process.exit(2)
+      }
+
+      const { gone, came } = diffContentLines(beforeArr, afterArr)
+      const { buckets, disappeared, appeared } = classifyDifference(gone, came)
+
+      console.log(`ref  ${ref}: ${beforeArr.length} 内容行`)
+      console.log(`tree      : ${afterArr.length} 内容行  （差 ${afterArr.length - beforeArr.length}）`)
+      console.log('')
+      console.log(`DISAPPEARED ${disappeared.entries} 条 / ${disappeared.lines} 行`)
+      console.log(`APPEARED   ${appeared.entries} 条 / ${appeared.lines} 行`)
+      console.log('')
+      console.log(`  注释    ${buckets.comment.length} 行`)
+      console.log(`  管线    ${buckets.pipeline.length} 行`)
+      console.log(`  逻辑    ${buckets.logic.length} 行   ← 必须为 0`)
+      console.log('')
+      console.log(`  三类合计 ${buckets.comment.length + buckets.pipeline.length + buckets.logic.length} 行`
+        + `（应等于新增 ${appeared.lines}）`)
+
+      if (buckets.logic.length > 0) {
+        console.log('')
+        console.log('非注释、非管线的行（要逐条解释，或把它的形状教给工具）：')
+        for (const line of buckets.logic) console.log(`  ! ${JSON.stringify(line)}`)
+      }
+      if (buckets.pipeline.length > 0) {
+        console.log('')
+        console.log('管线明细：')
+        for (const line of buckets.pipeline) console.log(`  | ${JSON.stringify(line)}`)
+      }
+      if (gone.length > 0) {
+        console.log('')
+        console.log('DISAPPEARED 明细（每一行都要说得清）：')
+        for (const { l, n } of gone) console.log(`  - ${n}× ${JSON.stringify(l)}`)
+      }
+
+      process.exitCode = buckets.logic.length === 0 ? 0 : 1
+    } else {
+
     const difference = firstDifference(before, after)
 
     /**
@@ -453,6 +654,7 @@ if (isMain) {
         if (stale.length > 0) console.log('  (A stale registry entry is also a failure — see above.)')
         process.exitCode = 1
       }
+    }
     }
   }
 }
