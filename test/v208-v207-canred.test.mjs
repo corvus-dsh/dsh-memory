@@ -182,18 +182,32 @@ test('v208 can-red：v207 的四组注入都必须变红（在仓内临时副本
       'v207 必须真的执行（skipped=0）。skipped>0 时「注入不红」不能说明门禁宽 —— '
       + '只说明测试没跑。副本放在仓内才有编译器可用。')
     /**
-     * v207 的条数与 skip 数：完整克隆 7 条全跑；浅克隆（CI 的 fetch-depth: 1）下 ①b 会
-     * RESOURCE skip，剩 6 条。
+     * ── 只保留一条断言：`pass + skipped === 7` ──────────────────────────────────────────────────
      *
-     * 这里读实际条数而**不是只写死 7**：浅克隆下 assert pass===7 会让这条门禁在 CI 上红，
-     * 而红的原因是环境而不是被测代码。但也不能直接 `>= 6` 放过一切 —— 所以**同时**断言
-     * skip 数恰好等于「①b 一条」，这样「少跑两条」仍然会被看见。
+     * 用户裁定④：两条断言择一。原先这里同时有
+     *   (a) `pass + skipped === 7`
+     *   (b) `skipped <= 1`
+     * 两条都在试图表达「v207 真的跑了 7 条」，但**职责重复且各漏一半**：
+     *   · (a) 单独存在时，`pass=2 / skipped=5` 也满足 —— 测了，但只测了两条；
+     *   · (b) 单独存在时，`pass=3 / skipped=1`（共 4 条）也满足 —— 跑的都跑了，但少了三条。
+     *
+     * 保留 (a) 的理由：**「v207 是否真的执行」这件事，下面的 can-red 循环已经在管了。**
+     * 每次注入都要求 v207 的某条**具体**测试变红（④→⑤ 那条 `expect`）；若 v207 大面积 skip，
+     * 注入就不会让任何测试变红，那个 `assert.ok(ids.has(c.expect))` 立刻失败。
+     * 所以再在基线上加一条 `skipped <= 1` 是冗余的 —— 它想保证的事已被更强的断言覆盖。
+     *
+     * 而 (a) 保护的是另一件事：**v207 的测试清单本身不能缩水**。少一条（被删、被 merge 掉、
+     * 被改成 `test.skip` 以外的形态）时 (a) 会红，上面那套 can-red 不会 —— 因为注入仍然
+     * 能让剩下的某条红。两条断言的盲区不重叠，所以留「清单完整性」这条，而不是重复的「执行性」。
+     *
+     * ⚠ `compilerAvailable() === false` 时的行为**保持不变**：整条测试在函数开头
+     *    `if (!compilerAvailable()) { t.skip(RESOURCE_REASON); return }` 就退出了，
+     *    根本走不到这里。换句话说：CI 没有 typescript 时，v208 是**一条明确的 skip**，
+     *    不是「跑过了」也不是「失败」。这一点与裁定③的处置配套（见 README 与
+     *    ARCHITECTURE.md 的「CI 不覆盖」说明）。
      */
     const totalRun = b.pass + b.skipped
     assert.equal(totalRun, 7, `v207 应有 7 条（含 skip），实测 pass=${b.pass} skipped=${b.skipped}`)
-    assert.ok(b.skipped <= 1,
-      `v207 最多允许 1 条 skip（①b 缺历史提交时），实测 skipped=${b.skipped} —— `
-      + '多于 1 条说明还有别的测试在跳过，那些结论就不可信了')
 
     for (const c of CASES) {
       const restore = inject(root, c.file, c.pairs)

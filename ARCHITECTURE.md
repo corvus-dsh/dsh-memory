@@ -106,6 +106,18 @@
 | can-red | `v209 ④` 用假数据覆盖：语句级缺行 / 位置错开 / 产物过短 / 无 import type / 内联全类型 / 内联混合（type 在前后两种）/ 内联 `type` 未擦 / 内联骨架被擦 / 内联值成员被错擦。**共 6 类 12 个用例**，确保两条判据都真能红。 |
 | 复查方式 | `node --test test/v209-lib-sync-typeimports.test.mjs`（4 条，含 can-red）。 |
 
+### TD-M15 **CI 不覆盖** v201 / v207 / v208（2026-11-15 登记，用户裁定③）
+
+| 项 | 内容 |
+|---|---|
+| 事实 | 这三个测试文件全部依赖 `scripts/closure.mjs`（TypeScript 编译器 API）。本包 `package.json` 的 `dependencies` 与 `devDependencies` **都是空的**，CI 只跑 `npm install`（无依赖可装），所以 CI 上 `import('typescript')` 必然失败 ⇒ 这三个文件**整片 skip**。 |
+| 谁受影响 | `v201-closure-label-consistency`（2 条）、`v207-retrieve-six-numbers`（7 条）、`v208-v207-canred`（1 条）。合计 **10 条在 CI 上永远是 skip**，本地完整克隆上是真跑。 |
+| **CI 到底覆盖了什么** | 490 条里约 480 条在 CI 真跑；**`v201/v207/v208` 的 10 条不在其中**。 |
+| **CI 不覆盖的是什么** | ① 「`retrieve.ts` 的六个数字（分量 / 主干 / SCC / 层 / 四档 / 声明和）」；② 「`--classify` 的 can-red 是否仍能抓住注入」；③ 「closure 两条路径的 mutable 标签一致」。这三件事都**只在本地完整克隆上被验证**。 |
+| 为什么不预生成声明表快照 | 快照能把 CI 变绿，但它验证的是「今天的结果等于昨天的快照」——文件一改，快照就过时，而**过时的快照比没有覆盖更危险**：它会让 CI 显示绿色，同时六个数字早已漂移。测量工具必须量**当前**的树，不能量一份冻结的表。 |
+| 这条边界的正确读法 | 看到 CI 绿，**不能**推断「门禁全部通过」。必须知道：涉及 TypeScript 编译器的 10 条只在本地跑。这也是为什么每次搬运的门禁报告里，v207/v208 的数字要**同时**给出「本地实测」与「CI 是否覆盖」。 |
+| 复查方式 | 本地（完整克隆，工作区根有 `node_modules/typescript`）：`node --test test/v20{1,7,8}*.test.mjs`。CI 日志里搜 `ℹ skipped` 应能看到这 10 条。 |
+
 ---
 
 ## 本次发版（v0.22）**不做**的事

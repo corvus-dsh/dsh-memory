@@ -629,7 +629,7 @@ const report = {
     measured: {
       efficiency: 'same-process A/B alternation, relative delta vs the pre-move bundle; > 10% worse = regression. A pure move has no mechanism to change this, so 0% is the expectation — an absolute µs threshold is NOT a criterion (it drifts with the machine)',
       safety: { exportSurfaceCount: exportSurface.count, clusterInExportSurface, forbidden: forbiddenPatterns.map((entry) => entry.label) },
-      stability: '761 green + 3 identical full runs + identical build SHA256 ×2',
+      stability: '当前全套全绿 + 连续 3 次一致 + build 两次 SHA256 相同',
       concurrency: 'v77-state-locks + v096-lock-trace green; lock boundary unchanged if the cluster writes files',
     },
   },
@@ -680,7 +680,7 @@ line(`   效率     同进程 A/B 交替采样，与搬前产物比相对量；>
 line(`            纯位移没有改变它的机制，预期 0%。绝对 µs 阈值不是判据（会随机器漂移）`)
 line(`   安全性   导出面 ${exportSurface.count} 条不变；本簇是否在导出面: ${clusterInExportSurface.length === 0 ? '否（类型不进产物）' : clusterInExportSurface.join(', ')}`)
 line(`            禁 eval / 动态 import / 明文路径`)
-line(`   稳定性   761 全绿 + 连续 3 次一致 + build 两次 SHA256 相同`)
+line(`   稳定性   当前全套全绿 + 连续 3 次一致 + build 两次 SHA256 相同`)
 line(`   并发     v77-state-locks + v096-lock-trace 全绿；簇若写文件须证明锁边界未变`)
 
 line('')

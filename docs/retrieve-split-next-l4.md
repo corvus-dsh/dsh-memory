@@ -11,15 +11,32 @@
 
 ## 一、五层现状
 
-| 层 | 行数 | 声明数 |
-|---|---|---|
-| L0 | 596 | 25 |
-| L1 | 186 | 11 |
-| L2 | 172 | 9 |
-| L3 | 111 | 11 |
-| **L4** | **236** | **8** |
+| 层 | 行数 | 声明数 | 该层最大单函数 | 占比 |
+|---|---|---|---|---|
+| L0 | 596 | 25 | `retrieveWithFilter`(139) | 23.3% |
+| L1 | 186 | 11 | `classifyScene`(63) | 33.9% |
+| L2 | 172 | 9 | **`scoreDocuments`(108)** | **62.8%** ← 单函数过半 |
+| L3 | 111 | 11 | `allowsTask`(32) | 28.8% |
+| **L4** | **236** | **8** | **`skillDocuments`(121)** | **51.3%** ← 单函数过半 |
 
-L4 是当前**最小的一层**（236 行 / 8 声明），也是唯一一个「单个函数占掉一半」的层。
+**按行数（小→大）**：L3(111) < L2(172) < L1(186) < **L4(236)** < L0(596)
+**按声明数（小→大）**：**L4(8)** < L2(9) < L1(11) = L3(11) < L0(25)
+
+> **订正（2026-11-15，用户裁定①②）**：本节原先写「L4 是当前**最小的一层**（236 行 / 8 声明），
+> 也是**唯一**一个『单个函数占掉一半』的层」。两处都错，实测否证：
+>
+> **① 「最小」只在声明数上成立，行数上是第二大。** 行数最小的是 **L3（111 行）**，
+> L4 的 236 行排在 L0(596) 之后、L1(186) 之前。「最小」这个词不加限定就写出来，
+> 会让下一步的选型理由（「因为它小所以先动它」）建立在错的数字上。
+>
+> **② 「唯一」不成立：L2 也过半，而且更极端。** `scoreDocuments` 是 **108/172 = 62.8%**，
+> 比 `skillDocuments` 的 121/236 = 51.3% 更集中。所以「单函数占掉一半」不是 L4 的特征，
+> 是**这一层的通病**（L2 和 L4 都有）。
+>
+> 选 L4 仍然合理，但理由要换成**可验证的那条**：L4 是**声明数最少**的一层（8 个），
+> 且 8 个里有 7 个是纯取数/构造函数（`skillDocuments` / `negativeDocuments` / `layerDocuments` /
+> `tierDocumentOf` / `contentOf` / `looksLikeIncidentLog` + 2 个常量），职责同族、适合整块搬。
+> 不是「因为它最小」。
 
 ---
 
@@ -37,6 +54,38 @@ L4 是当前**最小的一层**（236 行 / 8 声明），也是唯一一个「�
 | **`skillDocuments`** | **L605–L725** | **121** | SKILL.md → Document[] |
 
 合计 **236 行**。
+
+### 段外引用：**8/8 全部有**（不是 0）
+
+整块搬走之前必须知道：这 8 个声明里**没有任何一个是纯内部**。每一个都被 L4 之外的代码调用，
+所以搬走后 `retrieve.ts` 必须逐个 import 回来。
+
+| 声明 | L4 之外的使用者 |
+|---|---|
+| `ERROR_IDENTIFIER` | `allowsTask` |
+| `STOPWORDS` | `extractTaskTerms`、`allowsTask`、`scoreDocuments` |
+| `contentOf` | `isPoisoned`、`Document`（类型层）|
+| `layerDocuments` | `memoryDocumentsFor`、`collectAllDocuments` |
+| `looksLikeIncidentLog` | `allowsTask` |
+| `negativeDocuments` | `memoryDocumentsFor`、`collectAllDocuments` |
+| `skillDocuments` | `collectAllDocuments`、`scoreDocuments` |
+| `tierDocumentOf` | `memoryDocumentsFor` |
+
+### re-export 只需 **1 个**
+
+运行时导出面对这 8 个的态度不一样，实测：
+
+| 名字 | 源码里带 `export`？ | 需要 re-export？ |
+|---|---|---|
+| `looksLikeIncidentLog` | **是** | **是**（唯一一个）|
+| 其余 7 个 | 否（模块私有）| 否，只需 import |
+
+`looksLikeIncidentLog` 在 `lib/retrieve.js` 的运行时导出面上（34 条之一），搬走后必须
+re-export 回去，否则公开面缩小。其余 7 个原本就是私有的，搬走只需要 `retrieve.ts` 侧 import。
+
+> 这一栏之前漏了。第一步（14 声明）是「1 个 re-export + 11 个 import」，第二步是
+> 「2 个 re-export + 1 个 import」，第三步是「3 个 re-export + 3 个 import」——
+> 每一步的组合都不同，不预先算清就会在搬完那一刻才发现公开面缩小。
 
 ---
 
