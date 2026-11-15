@@ -50,13 +50,17 @@ const EXPECTED_BUSINESS_COUNT = 50
  * 已登记接缝：名字 → 为什么必须从 `store.js` 导出。
  * 集合必须精确：多一个、少一个都红。新增时必须能写出理由 ——
  * 写不出，那多半它不该在这里（命名规则见 `src/index.ts` 的 `THE TEST-SEAM SURFACE`）。
+ *
+ * ── A1-6：接缝从 N=2 回到 N=1 ────────────────────────────────────────────────────────────────
+ *
+ * `resetShapeCacheForTest` 已随 `shapeCache` 进 `store/skill.ts`，**不再从 store.js 导出**。
+ * 理由：一个测试接缝应该跟着它重置的那份状态走，而不是留在业务面上。
+ * 实测：store.js 52 → 51 条 = 业务面 50（不变）+ 接缝 1。
+ * 这条变化由本文件的第二个断言捕获 —— 若忘了同步登记表，它会红。
  */
 const REGISTERED_SEAMS = new Map([
   ['resetMonotonicClockForTest',
     '第 0 步把时钟三件套搬进 store/clock.ts 后沿用既有 import 路径；src/index.ts 也 re-export 它'],
-  ['resetShapeCacheForTest',
-    'shapeCache 是 module-level mutable state，需要一个确定性重置口；'
-    + 'A1 落地后它随 shapeCache 进 store/skill.ts，届时本项要移到 skill.js 并同步这条登记'],
 ])
 
 const surfaceOf = async () => {

@@ -117,7 +117,7 @@ export function defaultSkillsDir(): string {
 export { scanThreat } from './threat.js'
 
 import { clampConfidence, environmentTokensOf, findConflicts, frontmatter, invalidateSkillShape, isConflictingSkill, listSkillFiles, methodSimilarity, normalizeSkill, parseEvidenceField, parseSkillFile, purposeTokens, readSkillValidity, readSkillWorkspace, renderSkill, skillPath, triggerSimilarity } from './store/skill.js'
-import type { EnvironmentDivergence, SkillConflict, SkillInput } from './store/skill.js'
+import type { EnvironmentDivergence, SkillBody, SkillConflict, SkillInput } from './store/skill.js'
 
 /**
  * A1-1：段1+2+3（13 声明）已搬进 `store/skill.ts`。
@@ -131,7 +131,29 @@ import type { EnvironmentDivergence, SkillConflict, SkillInput } from './store/s
  * 若写 `export { … } from './store/skill.js'`，同一个名字就有两处来源绑定。
  */
 export { clampConfidence, environmentTokensOf, findConflicts, invalidateSkillShape, isConflictingSkill, normalizeSkill, parseSkillFile, readSkillValidity, readSkillWorkspace, skillPath }
-export { clearSkillShapeCache, conflictStrength, environmentDivergence, linkConflictBack, resetShapeCacheForTest, writeSkill } from './store/skill.js'
+/**
+ * A1-5：`SkillBody` 随 `readSkillBody` 进了 `store/skill.ts`。
+ *
+ * 但 `causal.ts:36` 仍写 `import type { SkillBody, SkillRecord } from './store.js'` ——
+ * 类型层也是公开面的一部分（构建时被剥掉，`tsc` 才看得见）。所以这里要 re-export。
+ *
+ * ⚠️ 这条只有 `type-budget` 能抓到：`npm test` 全绿（运行时不需要类型），
+ * 而 `tsc` 报 "Module './store.js' has no exported member 'SkillBody'"。
+ */
+export type { SkillBody } from './store/skill.js'
+/**
+ * ── A1-6: THE SEAM LEFT THE PUBLIC SURFACE ON PURPOSE ─────────────────────────────────────────
+ *
+ * `resetShapeCacheForTest` is NOT re-exported. It moved to `store/skill.ts` together with
+ * `shapeCache` (A1-2), and a test seam belongs with the state it resets, not on the store's
+ * business surface.
+ *
+ * Measured before this step: `store.js` carried 52 exports = 50 business + 2 seams
+ * (`resetMonotonicClockForTest`, `resetShapeCacheForTest`). After: **51 = 50 business + 1 seam**.
+ * The business surface did not move — only the seam went back to being internal, which is what
+ * `test/v202-store-surface-split.test.mjs` now asserts.
+ */
+export { clearSkillShapeCache, conflictStrength, environmentDivergence, linkConflictBack, readSkillBody, writeSkill } from './store/skill.js'
 
 
 /** v0.15: is this memory inside its validity window at `now`? */
@@ -1031,111 +1053,4 @@ function readdirNames(dir: string): string[] {
   return readdirSync(dir, { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
     .map((entry) => entry.name)
-}
-
-/**
- * v0.22 P1 — PROGRESSIVE DISCLOSURE: the body is a SECOND read, not part of the hint.
- *
- * THE BUDGET PROBLEM
- *
- * A SKILL.md is a procedure: frontmatter, 执行步骤, 验证标准, pitfalls. The hint that
- * rides a pre-step is a single line, and it deliberately carries only the trigger —
- * `when_to_use` — because that is what decides "is this skill about my task".
- *
- * Injecting the body as well would spend the context budget of EVERY turn on every
- * recalled skill, whether or not the model acts on it: measured on this store, the
- * four largest skills are ~2.4 KB each, so three recalls per turn would cost ~7 KB of
- * a 32k window — paid before anyone decides the skill applies.
- *
- * So the body is read ON DEMAND: the hint names the skill, and `skill_read(name)`
- * returns the procedure when the model has decided it wants it.
- *
- * Read-only, and it applies the same injection scan as retrieval: a body that was
- * poisoned on disk must not reach a prompt through this path either.
- */
-export interface SkillBody {
-  name: string
-  title: string
-  when: string
-  /** The markdown body, frontmatter stripped. */
-  body: string
-  /** Character count of `body`, so a caller can decide before reading. */
-  chars: number
-  /**
-   * v0.32 — THE MACRO'S PRECONDITIONS, parsed from frontmatter.
-   *
-   * `dependencies` are the evidence pointers the procedure requires to already hold. They are read back
-   * HERE, not fetched from a database, because a SKILL.md is the durable record: whatever the causal chain
-   * reports must be something written in the file, or it is a story this layer told itself.
-   *
-   * ABSENT means "the procedure declares no preconditions", which is different from "its preconditions were
-   * not recorded" — the file is the source of truth either way.
-   */
-  dependencies?: Array<{ sourceSessionId: string; seq: number }>
-  /** v0.32: the state the procedure is expected to produce, from frontmatter `target_effect`. */
-  targetEffect?: string
-}
-
-/**
- * Parse a frontmatter list of evidence pointers.
- *
- * WHY A TOLERANT PARSER: frontmatter is hand-edited (that is a feature — a human can correct a skill), so a
- * malformed entry must be SKIPPED rather than made to throw. A skill whose dependency line is typo'd should
- * still be readable; only that one precondition is lost, and the loss is silent by construction because the
- * alternative is making a whole skill unreadable over one bad line.
- */
-function parseEvidenceList(raw: string, field: string): Array<{ sourceSessionId: string; seq: number }> {
-  const items = raw
-    .split(/[,\s]+/u)
-    .map((item) => item.trim())
-    .filter((item) => item.length > 0)
-  const out: Array<{ sourceSessionId: string; seq: number }> = []
-  for (const item of items) {
-    // Accept `sessionId@seq` and bare `seq`.
-    const at = item.lastIndexOf('@')
-    if (at > 0) {
-      const seq = Number(item.slice(at + 1))
-      if (Number.isFinite(seq)) out.push({ sourceSessionId: item.slice(0, at), seq })
-      continue
-    }
-    const seq = Number(item)
-    if (Number.isFinite(seq)) out.push({ sourceSessionId: '', seq })
-  }
-  if (out.length === 0 && raw.trim().length > 0) {
-    void field
-  }
-  return out
-}
-
-export function readSkillBody(skillsDir: string, name: string): SkillBody | undefined {
-  // The name is a directory under skillsDir; refuse anything that could escape it.
-  if (typeof name !== 'string' || name.length === 0) return undefined
-  if (name.includes('/') || name.includes('\\') || name.includes('..')) return undefined
-  const path = skillPath(skillsDir, name)
-  let text = ''
-  try {
-    text = readFileSync(path, 'utf8')
-  } catch {
-    return undefined
-  }
-  // The same rule the write gate and the retrieval gate apply: stored memory is DATA,
-  // and text that tries to rewrite the reader's rules is refused at THIS boundary too.
-  if (scanThreat(text) !== undefined) return undefined
-  const field = (key: string): string => (text.match(new RegExp(`^${key}:\\s*(.+)$`, 'mu'))?.[1] ?? '').trim()
-  const body = text.replace(/^---[\s\S]*?---\u0000?/u, '').replace(/^---[\s\S]*?---\r?\n/u, '').trim()
-  return {
-    name,
-    title: (text.match(/^#\s+(.+)$/mu)?.[1] ?? name).trim(),
-    when: field('when_to_use') || field('when'),
-    body,
-    chars: body.length,
-    /**
-     * v0.32: the causal fields, read back from the SAME file. Only included when actually present, so a
-     * legacy SKILL.md returns exactly the shape it always did — no invented keys, no fake defaults.
-     */
-    ...(field('dependencies').length === 0
-      ? {}
-      : { dependencies: parseEvidenceList(field('dependencies'), 'dependencies') }),
-    ...(field('target_effect').length === 0 ? {} : { targetEffect: field('target_effect') }),
-  }
 }
