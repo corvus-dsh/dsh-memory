@@ -264,22 +264,36 @@ test('v210 ⑦: 本步（第三步）的实测必须是 32/0/0 与 1/0/0（收�
   const tmp = mkdtempSync(join(REPO, '.v210-step3-'))
   let out
   try {
-    const git = (...a) => execFileSync('git', a, { cwd: REPO, encoding: 'utf8', stdio: 'pipe' })
-    git('init', '-q', tmp)
-    git('config', 'user.email', 'v210@test.local', tmp)
-    git('config', 'user.name', 'v210', tmp)
+    /**
+     * ⚠ `cwd` 必须是 **tmp**，不是 REPO。
+     *
+     * 第一版这里写的是 `cwd: REPO` 的 helper，然后用它跑
+     * `git config user.name v210 tmp` —— 那条命令在 REPO 里执行，于是把
+     * **真仓的 git 身份**改成了 `v210 <v210@test.local>`，而且 `git config` 把多余的
+     * 路径参数当成第二个值追加，导致 `user.name` 变成**多值**（`--replace-all` 才能修）。
+     *
+     * 后果非常具体：下一个提交的作者变成 `v210`，而 `git config --local user.name` 直接报
+     * `has multiple values`。**一个测试没有任何理由改真仓的 git 身份。**
+     *
+     * 修法：helper 收 `cwd` 参数，初始化与 config 全部在 tmp 里做。
+     */
+    const run = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: 'pipe' })
+    run(tmp, 'init', '-q')
+    run(tmp, 'config', 'user.email', 'v210@test.local')
+    run(tmp, 'config', 'user.name', 'v210')
     mkdirSync(join(tmp, '.git', 'objects', 'info'), { recursive: true })
     writeFileSync(join(tmp, '.git', 'objects', 'info', 'alternates'),
       join(REPO, '.git', 'objects') + '\n', 'utf8')
 
-    // 导出第三步的 src/
-    const list = git('ls-tree', '-r', '--name-only', '6446dea', '--', 'src')
+    // 导出第三步的 src/（读操作，用 REPO 的 cwd 没问题 —— 它只读）
+    const readRepo = (...args) => execFileSync('git', args, { cwd: REPO, encoding: 'utf8', stdio: 'pipe' })
+    const list = readRepo('ls-tree', '-r', '--name-only', '6446dea', '--', 'src')
       .split(/\r?\n/u).filter((p) => p.endsWith('.ts'))
     assert.ok(list.length > 20, `第三步的 src/ 应有 20+ 个 .ts，实测 ${list.length}`)
     for (const rel of list) {
       const target = join(tmp, rel)
       mkdirSync(dirname(target), { recursive: true })
-      writeFileSync(target, git('show', `6446dea:${rel}`), 'utf8')
+      writeFileSync(target, readRepo('show', `6446dea:${rel}`), 'utf8')
     }
     // 脚本用当前的
     mkdirSync(join(tmp, 'scripts'), { recursive: true })
