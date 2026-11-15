@@ -124,23 +124,53 @@ resetShapeCacheForTest → clearSkillShapeCache()
 | **(b) 全部进 skill.ts** | re-export `invalidateSkillShape` / `clearSkillShapeCache`；**`resetShapeCacheForTest` 不 re-export** | **51**（回到 A3 基线） |
 
 **判据是「谁在用它们」**：
-- `invalidateSkillShape` / `clearSkillShapeCache` **本来就在 51 条导出面里**（A3 完成时已核实），必须 re-export 保住公开面；
-- `resetShapeCacheForTest` **零消费者、且不在 A3 基线的 51 条里** → **不进 store.ts 的 re-export**，它只留在 `skill.ts` 内部导出，供测试直接 `import`。
+- `invalidateSkillShape` / `clearSkillShapeCache` **本来就在业务面里**（`1065ca1` 已核实），必须 re-export 保住公开面；
+- `resetShapeCacheForTest` **零消费者、且不在业务面里**（它是接缝，不是业务导出）→ **不进 store.ts 的 re-export**，只留在 `skill.ts` 导出给测试直接 `import`。
 
-这样 **A1 落地后 `store.js` 导出数 = 51**，回到 A3 基线，门禁①可以照原样写「仍 51」。
+这样 A1 落地后 `store.js` = **业务面 50 + 接缝 1 = 总数 51**，接缝退回 N=1（见门禁①）。
 
 ---
 
 ## 三、门禁（订正后）
 
-### 门禁① `store.js` 导出数 = 51
+### 门禁① `store.js` 导出面 = **业务面 50 + 已登记接缝 N**（不是「总数 51」）
 
-**判据**：A1 落地后 `lib/store.js` 的导出名数量必须是 **51**（等于 `1065ca1` 的 A3 基线）。
-`resetShapeCacheForTest` **不得**出现在 `store.js` 导出面（它只从 `skill.js` 导出）。
+**为什么改口径**：原先写「导出数 = 51」是**错的基线**。实测拆分：
+
+| 时点 | 总数 | **业务面** | 接缝 N |
+|---|---|---|---|
+| `1065ca1` A3 完成 | 51 | **50** | **1**（`resetMonotonicClockForTest`） |
+| `f975e33` | 52 | **50** | **2**（+`resetShapeCacheForTest`） |
+| `3a5933e` HEAD | 52 | **50** | **2** |
+
+**业务面从头到尾都是 50，一个都没变。** 那个「51」是「50 业务 + 1 接缝」的和 ——
+把接缝混进业务面一起数，于是加一个测试接缝就被读成「公开契约被撑大」，而它其实没动。
+
+**判据（两条分别断言，已落地为 `test/v202-store-surface-split.test.mjs`）**：
+
+1. **业务面恰好 50 个**，且**逐个名字**与实测基准一致（计数抓「加一个删一个」，名单抓「换一个但数量不变」）；
+2. **接缝恰好是已登记的那 N 个**（当前 N=2），集合精确、不多不少。
 
 > 为什么必须单独数：A3 已经证明 `verify-pure-move` **看不见**导出面被撑大
 > （`normaliseContentLine` 把 `export ` 剥掉、导出列表整行判为管线），
 > 所以纯位移判据必须配这一条独立断言。
+
+**全部 `*ForTest` 导出清单（5 个）**：
+
+| # | 名字 | src 定义 | 落在哪个导出面 | test 消费者 |
+|---|---|---|---|---|
+| 1 | `resolveMemoryConfigForTest` | `src/index.ts:950` | `lib/index.js` | `v020-task-alignment-wiring`、`v102-seam-inventory` |
+| 2 | `resetLeaseBridgeForTest` | `src/lease-bridge.ts:123` | `lib/lease-bridge.js` | 无 |
+| 3 | `forceReleaseLockForTest` | `src/lock.ts:244` | `lib/lock.js` | 无 |
+| 4 | `resetMonotonicClockForTest` | `src/store/clock.ts:37` | `lib/store.js`、`lib/index.js`、`lib/store/clock.js` | `clock-seam`、`v032-causal-schema`、`v102-seam-inventory` |
+| 5 | `resetShapeCacheForTest` | `src/store.ts:563` | `lib/store.js` | 无 |
+
+落到 `store.js` 的只有 #4、#5 —— 这就是「接缝 N = 2」。
+
+**A1 落地后该变成什么**：`resetShapeCacheForTest` 随 `shapeCache` 进 `skill.ts`、**不 re-export**
+→ `store.js` 的接缝回到 **N=1**（只剩 `resetMonotonicClockForTest`），总数 51 = 业务面 50 + 接缝 1。
+届时 `v202` 的 `REGISTERED_SEAMS` 必须同步删掉那一项（登记表里已写明这一点）。
+
 
 ### 门禁②（已按你的意见改写）
 
@@ -251,7 +281,7 @@ import { atomicWrite } from './io.js'                      // writeSkill 用
    ⚠️ resetShapeCacheForTest 不 re-export
 ⑤ 删除 store.ts 里已搬走的 39 个声明（按 span 自下而上删，避免行号漂移）
 ⑥ npm run build && npm test
-⑦ 门禁①：node -e 数 store.js 导出 === 51
+⑦ 门禁①：node --test test/v202-store-surface-split.test.mjs（业务面 50 + 接缝 N）
 ⑧ 门禁②：补 shapeCache 行为测试（第三节）
 ⑨ verify-pure-move：消失侧必须 0 行
 ⑩ 全套门禁 + 提交
@@ -269,10 +299,12 @@ import { atomicWrite } from './io.js'                      // writeSkill 用
 | B | IO 原语 → `store/io.ts` | `b269fbd` | 80/8/`none`；导出面 51→51；A1/A3/A2 闭包 −73/−76/−80；434/434 |
 | B-1 | 两处私有 `readJsonl` → `readJsonlLocal` | `b1e5d83` | 5 行改名；434/434 |
 | — | `sleepSync` → `sleepSyncLocal`（store.ts 那份） | `662a9c7` | 2 处；434/434 |
-| A3 | JSONL 层写入 → `store/layer.ts` | `1065ca1` | 396/16/`none`；导出面 51→51；消失侧 0 行；pure-move +56 = 46 注释 + 10 管线 + **0 逻辑**；434/434 |
+| A3 | JSONL 层写入 → `store/layer.ts` | `1065ca1` | 396/16/`none`；导出面 51→51（**当时口径 = 总数**，含 1 个接缝）；消失侧 0 行；pure-move +56 = 46 注释 + 10 管线 + **0 逻辑**；434/434 |
 | — | `VOCAB_TAG` 方案甲（layer 内部共享） | `2e6f6b4` | layer.js 8→9、store.js 51→51 |
-| — | const-mutate 检测 + `resetShapeCacheForTest` | `f975e33` | can-red `["cache (const-mutated)"]`；**store.js 51→52**（偏差，见 2.1） |
+| — | const-mutate 检测 + `resetShapeCacheForTest` | `f975e33` | can-red `["cache (const-mutated)"]`；store.js 总数 51→52（**+1 是接缝，业务面 50 不变**，见 2.1） |
 | — | `mutableLabel` 抽取 + 两路径一致性测试 | `51536d5` | 436/436（新增 2）；can-red 已验证 |
+| — | `v201` 在无 typescript 环境 skip | `3a5933e` | CI 曾因它红；修复后 CI 双 job 绿 |
+| — | 门禁①拆成「业务面 50 + 接缝 N」+ `v202` 测试 | 本轮 | **439/439**；5 场景 can-red（基线绿，4 类篡改全红） |
 
 > **额外记录**：`GRAFT_MOVE_GATE_SRC` vs `GRAFT_CLOSURE_SRC` 陷阱已写入
 > `docs/memory-known-defects.md` §〇·一「常驻警戒」（`c9b6e0e`）。
@@ -305,7 +337,7 @@ D-7  index.ts:21,65                  —— 合并遗留
 
 | 仓 | sha | dirty | 同步 | 测试 |
 |---|---|---|---|---|
-| `dsh-memory` | `51536d5` | 0 | 与 origin/main 同步 | **436 / 436 / 0** |
+| `dsh-memory` | `3a5933e` + 本轮（见下） | 0 | 与 origin/main 同步 | **439 / 439 / 0** |
 | `dsh-observer` | `2c80e2c` | 0 | 与 origin/main 同步 | — |
 | `dsh-graft-slice` | `fae3ee5` | 0 | 与 origin/main 同步 | — |
 
@@ -314,6 +346,12 @@ D-7  index.ts:21,65                  —— 合并遗留
 - `VOCAB_TAG` 在 `extract.ts:397` 与 `store/layer.ts:83` 仍是两份逐字相同副本，未合并；
 - `verify-bundle-purity` 的递归修复只在 memory 做过；**observer 无 `lib/` 子目录（产物是扁平 `index.js`），该修复不适用**；
 - A1 的 `skill.ts` import 清单（4.4）尚未逐行核实。
+
+**⚠️ 新增仪器测试前，先确认它的依赖在 CI 集合内。**
+本仓 `package.json` 故意无依赖，CI 只装 Node；仪器依赖（如 `typescript`）在本地靠**向上解析**
+到工作区根才存在，CI 上没有。V201 就是这么红的（closure 需编译器 → CI 缺席 → exit 2 →
+测试把 exit 2 当失败）。规则：新增测试若调用需要外部依赖的脚本，必须**先探测可用性、缺席则 skip
+并写明 RESOURCE condition**，不能用裸 `execFileSync` 把非零退出当失败。
 
 ### 7.5 禁令（逐条）
 
