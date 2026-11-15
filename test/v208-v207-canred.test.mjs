@@ -1,33 +1,42 @@
 /**
  * ── v208：v207 的断言必须真能红（can-red 固化成测试）────────────────────────────────────────────
  *
- * 用户上一轮的原话：「我做的三次注入说明这个门禁能被绕过的方式比想象的少，但那三次验证只在
- * 我的 _scratch 里 —— 要求把它写成仓内测试」。同一件事现在适用于 v207。
+ * 用户要求：「v208 改成不碰真仓（照 v205 的『纯函数 + 假树』或 v144 的临时副本 + 依赖可用）」。
  *
- * ── 为什么不能复制到 tmpdir 跑 ──────────────────────────────────────────────────────────────────
+ * ── 为什么必须“临时副本 + 依赖可用” ────────────────────────────────────────────────────────────
  *
- * 第一次写这个文件时，我把仓拷到 tmpdir 里注入再跑。**五组注入全部 exit 0**，
- * 看起来像「门禁太宽」。真相是：`closure.mjs` 按 `import.meta.url` 向上找 `node_modules`，
- * 而副本在 tmpdir、上层没有 typescript ⇒ v207 的每条都走 RESOURCE skip ⇒ **skipped 6**。
- * 注入没红，是因为测试根本没跑。
+ * v207 与 v209 都通过 `scripts/closure.mjs` 取编译器行区间。而 `closure.mjs` 靠
+ * `import.meta.url` **向上**找 `node_modules`：
  *
- * 这正是本仓反复踩的同一个坑（「绿的实验其实什么都没测」），所以这里：
- *   1. 注入发生在**真仓**，每条都在 `finally` 里立刻恢复；
- *   2. 每组开始/结束都断言 `skipped === 0` —— 把 skip 当 pass 是这里最容易犯的错；
- *   3. 恢复后必须重跑全绿，否则这个测试本身就把仓留在了坏状态。
+ *     D:/持久层能力架构/node_modules/typescript      ← 工作区根，本包没有依赖
  *
- * ── 代价 ────────────────────────────────────────────────────────────────────────────────────────
+ * 所以副本如果放在 `os.tmpdir()`，上面没有任何 `node_modules`，closure 拿不到编译器，
+ * v207 的每条都走 RESOURCE **skip**。第一版 v208 就是这么写的：把仓拷到 tmpdir 里注入，
+ * **五组注入全部 exit 0**，看起来像「门禁太宽」，实际上是**测试根本没跑**（skipped=6）。
  *
- * 它会临时改写 `scripts/*.mjs`，因此在**并行**的测试进程里不安全。
- * 本仓的 `npm test` 用 `node --test test/*.test.mjs`，文件级串行；这一条依赖于那个前提，
- * 所以测试名里写明了「串行」，并在开头断言 `scripts/` 没有未提交改动 ——
- * 若有人正在改脚本，这条会直接失败而不是去覆盖他的工作。
+ * 这正是本仓反复踩的那个形状：一个什么都没测的进程报告了成功。
+ *
+ * 修法两条同时满足：
+ *   1. 副本放在**真实仓内部**的临时目录（`<repo>/.canred-*`），于是向上仍能找到工作区的
+ *      `node_modules` —— 依赖可用。
+ *   2. 注入只改副本，真仓的 `scripts/` **一个字节都不动** —— 并可并行跑。
+ *
+ * ── 与 v207 的关系 ──────────────────────────────────────────────────────────────────────────────
+ *
+ * v207 用 `new URL('../scripts/…')` 定位脚本，而副本是「仓 + test/ + scripts/ + src/」的完整镜像，
+ * 所以只要 `cwd` 指到副本，v207 就会读副本里的 `scripts/`。这就是注入生效的机制。
+ *
+ * ── 第二层坑：NODE_TEST_CONTEXT ─────────────────────────────────────────────────────────────────
+ *
+ * 在 `node --test` 里再起 `node --test`，子进程会继承 `NODE_TEST_CONTEXT=child-v8`，
+ * 于是它**不打印** pass/skipped 汇总（execFileSync 只拿到 exit 0 和空计数）。
+ * 第一版因此读到 `skipped=undefined`。所以子进程环境必须删掉这个变量。
  */
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { readFileSync, writeFileSync } from 'node:fs'
+import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -37,6 +46,13 @@ const REPO = join(HERE, '..')
 const RESOURCE_REASON =
   'can-red needs the TypeScript compiler API (via closure.mjs) to run v207; this environment does '
   + 'not provide it. RESOURCE condition — NOT a pass and NOT a failure.'
+
+/** 子进程环境：删掉 NODE_TEST_CONTEXT，否则它按 test-child 跑、不打印汇总。 */
+const childEnv = () => {
+  const env = { ...process.env }
+  delete env.NODE_TEST_CONTEXT
+  return env
+}
 
 const compilerAvailable = () => {
   try {
@@ -48,28 +64,25 @@ const compilerAvailable = () => {
 }
 
 /**
- * ── 子进程必须拿到一个**干净**的环境 ────────────────────────────────────────────────────────────
+ * 建一个「仓的镜像」：`scripts/` + `src/` + `test/` + `package.json`。
  *
- * 实测（这台机器）：在 `node --test` 里面再起一个 `node --test`，子进程会继承
- * `NODE_TEST_CONTEXT=child-v8`。那个变量让子进程按「我是别人的 test child」运行，
- * 于是它**不打印** pass/skipped 汇总 —— `execFileSync` 拿到 exit 0、输出里没有任何计数。
- *
- * 对这段代码的后果极其具体：第一版 v208 报「v207 skipped>0」，而真相是**输出里根本没有
- * skipped 那一行**（`Number(undefined)` → NaN，再被 `?? -1` 之类的兜底吞成可疑值）。
- * 换句话说，我的探针本身踩了它要防的那个坑：**一个什么都没测的进程报告了成功**。
- *
- * 修法：删掉 `NODE_TEST_CONTEXT`，让子进程作为一个普通的 `node --test` 运行。
+ * 放在**真实仓内部**（`<repo>/.canred-XXXX`）而不是 `os.tmpdir()`：
+ * 这样 `closure.mjs` 向上找 `node_modules` 时仍能命中工作区根的那份编译器。
  */
-const childEnv = () => {
-  const env = { ...process.env }
-  delete env.NODE_TEST_CONTEXT
-  return env
+const mirror = () => {
+  const root = mkdtempSync(join(REPO, '.canred-'))
+  for (const dir of ['scripts', 'src', 'test']) {
+    cpSync(join(REPO, dir), join(root, dir), { recursive: true })
+  }
+  cpSync(join(REPO, 'package.json'), join(root, 'package.json'))
+  // v207 会读 docs/ 里的表吗？不会 —— 它读的是内置常量。但 v205 会扫 src/，已复制。
+  return root
 }
 
-const runV207 = () => {
+const runV207In = (root) => {
   try {
     const out = execFileSync(process.execPath, ['--test', 'test/v207-retrieve-six-numbers.test.mjs'],
-      { cwd: REPO, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, timeout: 300000, env: childEnv() })
+      { cwd: root, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, timeout: 300000, env: childEnv() })
     return { code: 0, out }
   } catch (error) {
     return { code: error.status ?? -1, out: String(error.stdout ?? '') + String(error.stderr ?? '') }
@@ -79,8 +92,6 @@ const runV207 = () => {
 const counts = (out) => {
   const num = (re) => {
     const m = re.exec(out)
-    // 找不到计数行时返回 -1（而不是 NaN）：`NaN !== 0` 与 `NaN !== 6` 都成立，
-    // 断言会以「看起来像真实值」的方式失败，掩盖「输出格式变了」这个真因。
     return m === null ? -1 : Number(m[1])
   }
   return {
@@ -91,9 +102,9 @@ const counts = (out) => {
 }
 const failedIds = (out) => new Set([...out.matchAll(/✖ (v207 [①②③④⑤⑥])/gu)].map((m) => m[1]))
 
-/** 在真仓注入一组替换，返回恢复函数。目标片段必须存在，否则抛错（不静默跳过）。 */
-const inject = (file, pairs) => {
-  const path = join(REPO, file)
+/** 在**副本**里替换，返回恢复函数（供同一副本内多组注入复用）。 */
+const inject = (root, file, pairs) => {
+  const path = join(root, file)
   const original = readFileSync(path, 'utf8')
   let text = original
   for (const [from, to] of pairs) {
@@ -136,46 +147,41 @@ const CASES = [
   },
 ]
 
-test('v208 can-red（串行）：v207 的四组注入都必须变红，且恢复后全绿', (t) => {
+test('v208 can-red：v207 的四组注入都必须变红（在仓内临时副本里，不动真仓）', (t) => {
   if (!compilerAvailable()) { t.skip(RESOURCE_REASON); return }
 
-  // 前提一：基线绿且 skipped=0。skipped>0 时注不红是假象（tmpdir 那次就是这么骗过我的）。
-  const baseline = runV207()
-  const b = counts(baseline.out)
-  assert.equal(baseline.code, 0, `基线必须是绿的，实测 exit ${baseline.code}`)
-  assert.equal(b.skipped, 0,
-    'v207 必须真的执行（skipped=0）。skipped>0 时「注入不红」不能说明门禁宽 —— '
-    + '只说明测试没跑。')
-  assert.equal(b.pass, 6, `v207 应有 6 条，实测 ${b.pass}`)
-
-  const results = []
+  const root = mirror()
   try {
+    // 前提一：副本里基线绿且 skipped=0。skipped>0 时注不红是假象（tmpdir 那次就是这么骗过我的）。
+    const baseline = runV207In(root)
+    const b = counts(baseline.out)
+    assert.equal(baseline.code, 0, `副本里基线必须绿，实测 exit ${baseline.code}\n${baseline.out.slice(-800)}`)
+    assert.equal(b.skipped, 0,
+      'v207 必须真的执行（skipped=0）。skipped>0 时「注入不红」不能说明门禁宽 —— '
+      + '只说明测试没跑。副本放在仓内才有编译器可用。')
+    assert.equal(b.pass, 6, `v207 应有 6 条，实测 ${b.pass}`)
+
     for (const c of CASES) {
-      const restore = inject(c.file, c.pairs)
+      const restore = inject(root, c.file, c.pairs)
       try {
-        const r = runV207()
+        const r = runV207In(root)
         const n = counts(r.out)
         const ids = failedIds(r.out)
-        results.push({ label: c.label, expect: c.expect, code: r.code, ids: [...ids], skipped: n.skipped })
+        assert.equal(r.code, 1, `「${c.label}」应当让 v207 失败（exit 1），实测 exit ${r.code}`)
+        assert.equal(n.skipped, 0, `「${c.label}」跑的时候不应 skip`)
+        assert.ok(ids.has(c.expect),
+          `「${c.label}」应当让 ${c.expect} 变红，实际红的是：${[...ids].join(', ') || '(无)'}`)
       } finally {
         restore()
       }
     }
-  } finally {
-    /**
-     * 无论中途发生什么，都必须确认仓已恢复 —— 这个测试改写的是 `scripts/` 里的真实文件，
-     * 一个没恢复的失败会把后续所有测试都带进坏状态。
-     */
-    const after = runV207()
-    const a = counts(after.out)
-    assert.equal(after.code, 0, `恢复后 v207 必须全绿，实测 exit ${after.code}`)
-    assert.equal(a.skipped, 0, '恢复后 v207 不应 skip')
-  }
 
-  for (const r of results) {
-    assert.equal(r.code, 1, `「${r.label}」应当让 v207 失败（exit 1），实测 exit ${r.code}`)
-    assert.equal(r.skipped, 0, `「${r.label}」跑的时候不应 skip`)
-    assert.ok(r.ids.includes(r.expect),
-      `「${r.label}」应当让 ${r.expect} 变红，实际红的是：${r.ids.join(', ') || '(无)'}`)
+    // 恢复后副本必须重新全绿 —— 证明「变红是注入造成的」，不是副本本身坏了。
+    const after = runV207In(root)
+    const a = counts(after.out)
+    assert.equal(after.code, 0, `恢复后副本应全绿，实测 exit ${after.code}`)
+    assert.equal(a.skipped, 0, '恢复后不应 skip')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
   }
 })
