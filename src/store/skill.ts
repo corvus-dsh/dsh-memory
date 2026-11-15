@@ -23,6 +23,7 @@ import { join } from 'node:path'
 import type { EvidenceRef, ExtractedSkill, MemoryProvenance } from '../extract.js'
 import { jaccard, trigrams } from '../dedupe.js'
 import { asVocab } from './layer.js'
+import type { SkillMeta } from './layer.js'
 import { normalizeWorkspace } from '../workspace.js'
 
 export function skillPath(skillsDir: string, name: string): string {
@@ -465,7 +466,7 @@ export function findConflicts(skillsDir: string, skill: ExtractedSkill): SkillCo
   return out
 }
 
-  export function parseEvidenceField(raw: string, fallbackSession: string): EvidenceRef[] {
+export function parseEvidenceField(raw: string, fallbackSession: string): EvidenceRef[] {
   const refs: EvidenceRef[] = []
   for (const token of raw.split(/[,\s]+/u).filter(Boolean)) {
     const at = token.lastIndexOf('@')
@@ -476,4 +477,234 @@ export function findConflicts(skillsDir: string, skill: ExtractedSkill): SkillCo
     refs.push({ sourceSessionId, seq })
   }
   return refs
+}
+
+/**
+ * ── A1-3: THE SKILL RENDERER + ENVIRONMENT/TRIGGER TOKENS ─────────────────────────────────────
+ *
+ * `renderSkill` is the write direction of the SKILL.md contract: it turns an extraction into the
+ * exact text `parseSkillFile` (A1-2, same file) reads back. `evidenceBodyLines` is its evidence
+ * block writer. Keeping the writer and the reader in one file is the point of this split — two
+ * halves of one format living apart is how they drift.
+ *
+ * `VERSION_TOKEN` / `ENVIRONMENT_TOKEN` / `environmentTokensOf` / `triggerTokens` /
+ * `triggerSimilarity` / `EnvironmentDivergence` are the environment-divergence family: a merge
+ * must not silently fold two skills written against different versions or machines into one.
+ * They are pure functions over the text already on disk.
+ *
+ * NOTE: this slice carries NO module-level mutable state (verified: the cluster's own closure is
+ * the 8 declarations below, and none of them rebinds or mutates a module const).
+ */
+
+function evidenceBodyLines(evidence: readonly EvidenceRef[], fallbackSession: string): string[] {
+  const bySession = new Map<string, number[]>()
+  for (const ref of evidence) {
+    const session = ref.sourceSessionId.length > 0 ? ref.sourceSessionId : fallbackSession
+    const list = bySession.get(session) ?? []
+    list.push(ref.seq)
+    bySession.set(session, list)
+  }
+  return [...bySession.entries()].map(([session, seqs]) => `- 源会话：${session}（seq ${seqs.join(', ')}）`)
+}
+
+export function renderSkill(
+  skill: ExtractedSkill,
+  meta: SkillMeta,
+  previous?: {
+    evidence: number
+    sources: number
+    created: string
+    lastUsed?: string
+    lastValidated?: string
+    validAt?: string
+    invalidAt?: string
+    supersededBy?: string
+    supersedes?: string[]
+    provenance?: string
+  },
+  conflicts: readonly SkillConflict[] = [],
+): string {
+  const now = meta.at ?? new Date().toISOString().slice(0, 10)
+  const workspace = normalizeWorkspace(meta.workspace)
+  const fields: Record<string, string | number> = {
+    name: skill.name,
+    description: skill.description.slice(0, 160),
+    when_to_use: skill.when.slice(0, 200),
+    scope: skill.scope,
+    /**
+     * NOTE the single `domain` key. This literal previously declared it TWICE in a row — the second silently
+     * won. It happened to be identical, so nothing ever failed, which is exactly why it survived: the bug was
+     * invisible until the day someone edited only one of them.
+     */
+    domain: skill.domain ?? 'general',
+    /**
+     * v0.32 — THE CAUSAL FIELDS, WRITTEN ONLY WHEN THE CALLER ACTUALLY KNOWS THEM.
+     *
+     * `dependencies` and `target_effect` are what turn a skill from a procedure into a MACRO: preconditions
+     * in, expected state out. They are omitted rather than defaulted, because an invented precondition would
+     * be read back by `causalChain` as evidence and would make a chain look complete when it is not.
+     */
+    ...(Array.isArray((skill as ExtractedSkill).dependencies) && (skill as ExtractedSkill).dependencies!.length > 0
+      ? {
+          dependencies: (skill as ExtractedSkill)
+            .dependencies!.map((ref) => (ref.sourceSessionId.length > 0 ? `${ref.sourceSessionId}@${ref.seq}` : String(ref.seq)))
+            .join(','),
+        }
+      : {}),
+    ...(typeof (skill as ExtractedSkill).target_effect === 'string' &&
+    ((skill as ExtractedSkill).target_effect as string).length > 0
+      ? { target_effect: (skill as ExtractedSkill).target_effect as string }
+      : {}),
+    // v0.8: provenance for the isolation gate (see workspace.ts). Written even for
+    // a `global` skill: `global` decides ELIGIBILITY, the path stays on record for
+    // audit. Omitted only when the caller genuinely had no workspace.
+    ...(workspace.length === 0 ? {} : { workspace }),
+    scene: skill.scene,
+    ...(skill.aliases.length === 0 ? {} : { aliases: skill.aliases.join(', ') }),
+    /**
+     * GLOBAL KNOWLEDGE BASE — WRITTEN ONLY WHEN THE CALLER NAMED THEM.
+     *
+     * Same rule as `dependencies`: an invented tag would make a local memory look shareable, and
+     * a reader in another workspace would then trust it as a general rule. An omitted field reads
+     * back as "no cross-workspace reach", which is exactly the pre-existing behaviour.
+     */
+    ...(() => {
+      const tags = asVocab((skill as ExtractedSkill).tags)
+      return tags.length === 0 ? {} : { tags: tags.join(', ') }
+    })(),
+    ...(() => {
+      const nodeTypes = asVocab((skill as ExtractedSkill).applicableNodeTypes)
+      return nodeTypes.length === 0 ? {} : { applicable_node_types: nodeTypes.join(', ') }
+    })(),
+    confidence: clampConfidence(skill.confidence).toFixed(2),
+    evidence: skill.evidence
+      .map((ref) => (ref.sourceSessionId.length > 0 ? `${ref.sourceSessionId}@${ref.seq}` : String(ref.seq)))
+      .join(','),
+    sources: previous === undefined ? 1 : previous.sources,
+    /**
+     * v1.0.0 P0 — NO INLINE CONFLICT EDGES.
+     *
+     * This used to emit `conflicts_with: a,b,c,…` here, and `reorder` below emitted the
+     * same neighbors again as prose under `## ⚠️ 冲突提示`. Both are gone. Every edge now
+     * lives in `skills-edges.jsonl` (see edges.ts), joined at retrieval time.
+     *
+     * WHY REMOVE IT RATHER THAN CAP IT: the field was a single line that grew with every
+     * neighbor, so one file reached 12,959 characters of names plus 91 KB of repeated
+     * prose. Retrieval had to read and tokenize all of it to answer a question about the
+     * skill's trigger. Capping the line would have kept both costs and added a truncation
+     * bug. The edge is a GRAPH FACT, not a property of one file.
+     *
+     * A legacy store still has the field on disk; `migrateLegacyEdges` folds those into the
+     * index and nothing rewrites the files (a stale hint is harmless; a mass rewrite is not).
+     */
+  }
+  if (previous !== undefined && previous.created.length > 0) {
+    fields.created = previous.created
+    fields.updated = now
+  } else {
+    fields.created = now
+  }
+  // v0.15 bi-temporal + trust fields.
+  //
+  // `valid_at` defaults to the write time; `invalid_at` is written ONLY when the
+  // record has actually been superseded (an empty field on every skill would make
+  // "active" and "never validated" indistinguishable in a grep). A merge keeps the
+  // ORIGINAL valid_at and an existing invalidation: refreshing the wording of a
+  // superseded rule must not quietly resurrect it.
+  fields.valid_at = previous?.validAt !== undefined && previous.validAt.length > 0 ? previous.validAt : now
+  if (previous?.invalidAt !== undefined && previous.invalidAt.length > 0) fields.invalid_at = previous.invalidAt
+  if (previous?.supersededBy !== undefined && previous.supersededBy.length > 0) fields.superseded_by = previous.supersededBy
+  if (previous?.supersedes !== undefined && previous.supersedes.length > 0) fields.supersedes = previous.supersedes.join(',')
+  fields.provenance = previous?.provenance !== undefined && previous.provenance.length > 0 ? previous.provenance : meta.provenance ?? 'inferred'
+  /**
+   * v0.32 P1: the generation and the commit the experience belongs to. Written only when
+   * the caller actually knows them — an invented commit would be worse than no commit,
+   * because retrieval treats a mismatch as "this is old" and a missing value as "unknown".
+   */
+  if (typeof meta.generation === 'number' && Number.isFinite(meta.generation) && meta.generation > 0) {
+    fields.generation = Math.trunc(meta.generation)
+  }
+  if (typeof meta.commitHash === 'string' && /^[0-9a-f]{7,40}$/u.test(meta.commitHash)) {
+    fields.commitHash = meta.commitHash
+  }
+  // v0.5 decay bookkeeping: a fresh write is also a fresh validation.
+  fields.last_validated = previous?.lastValidated !== undefined && previous.lastValidated.length > 0 ? previous.lastValidated : now
+  fields.last_used = previous?.lastUsed !== undefined && previous.lastUsed.length > 0 ? previous.lastUsed : now
+  return [
+    frontmatter(fields),
+    '',
+    `# ${skill.title}`,
+    '',
+    '## 何时使用',
+    '',
+    skill.when,
+    '',
+    '## 执行步骤',
+    '',
+    ...skill.steps.map((step, index) => `${index + 1}. ${step}`),
+    '',
+    '## 验证标准',
+    '',
+    ...skill.verify.map((line) => `- ${line}`),
+    '',
+    '## 证据',
+    '',
+    ...evidenceBodyLines(skill.evidence, meta.sessionId),
+    /**
+     * v1.0.0 P0 — the `## ⚠️ 冲突提示` footer is GONE.
+     *
+     * It repeated up to 720 neighbor names as prose inside the skill file, which is what
+     * made a 798 B skill grow to 104 KB and forced retrieval to read 91 KB of warnings to
+     * answer a query about the trigger. Conflicts are now joined from `skills-edges.jsonl`
+     * where they are actually needed — see retrieve.ts. `conflictFooter` is kept exported
+     * below for the render of a HUMAN-facing listing, never for the stored file.
+     */
+  ].join('\n')
+}
+
+/**
+ * v0.7.1: environment/version tokens that make two procedures NOT interchangeable.
+ *
+ * The failure this guards: "install pymysql on Python 3.8" and "use the stdlib
+ * driver on Python 3.12" share a trigger and both connect to MySQL, so the
+ * similarity gate merged them into one file — and the merged procedure ran on
+ * neither version. A version difference is evidence of an alternative, not of a
+ * synonym.
+ */
+const VERSION_TOKEN = /\b(python|py|node|nodejs|go|golang|java|rust|ruby|php|deno|bun|typescript|ts|dotnet|net)[\s_-]?v?(\d+(?:\.\d+)+)/giu
+const ENVIRONMENT_TOKEN = /\b(windows|win32|linux|ubuntu|debian|centos|macos|darwin|wsl|docker|alpine|arm64|x86[_-]?64|amd64)\b/giu
+
+export function environmentTokensOf(text: string): Set<string> {
+  const out = new Set<string>()
+  for (const match of text.toLowerCase().matchAll(VERSION_TOKEN)) {
+    const runtime = match[1] === 'py' ? 'python' : match[1] === 'nodejs' ? 'node' : match[1]
+    out.add(`${runtime}${match[2]}`)
+  }
+  for (const match of text.toLowerCase().matchAll(ENVIRONMENT_TOKEN)) out.add(match[1].replace(/[_-]/gu, ''))
+  return out
+}
+
+function triggerTokens(text: string): Set<string> {
+  const out = new Set<string>()
+  const lower = text.toLowerCase()
+  for (const match of lower.matchAll(/[a-z0-9][a-z0-9_-]{1,}/gu)) out.add(match[0])
+  for (const run of lower.match(/\p{Script=Han}+/gu) ?? []) {
+    if (run.length === 1) out.add(run)
+    for (let index = 0; index + 2 <= run.length; index += 1) out.add(run.slice(index, index + 2))
+  }
+  return out
+}
+
+export function triggerSimilarity(left: string, right: string): number {
+  const a = triggerTokens(left)
+  const b = triggerTokens(right)
+  if (a.size === 0 || b.size === 0) return 0
+  let shared = 0
+  for (const token of a) if (b.has(token)) shared += 1
+  return shared / Math.min(a.size, b.size)
+}
+
+export interface EnvironmentDivergence {
+  previous: string[]
+  next: string[]
 }
