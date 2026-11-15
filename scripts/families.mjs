@@ -125,119 +125,89 @@ if (ambiguousMembers.length > 0) {
 
 const liveMembers = members.filter((m) => !ambiguousMembers.includes(m.name))
 
-/** 每个声明的行区间 [start, end]（1-based）。 */
-const lines = readFileSync(SRC, 'utf8').split('\n')
-const spanOf = (name, kind) => {
-  // 声明行：interface/type/const/function 后面跟名字；允许 export 前缀
-  /**
-   * ── `let/var` 必须也在这里有一支 ────────────────────────────────────────────────────────────────
-   *
-   * `closure.mjs` 把模块级 `let` 报成 kind `let/var`（它标 MUTABLE）。旧版 `spanOf` 只认
-   * interface / type / function / const，落进 `else` 支后按 `const` 去找 `let x` —— 找不到，返回 `undefined`。
-   * 于是调用方 `sizeOf()` 退回默认值 **1 行**，两个 `let` 各被算 1 行 …
-   *
-   * 但真正的缺陷在上游：成员正则也把它们丢了（见 `members` 那段的说明）。两处都修，
-   * 否则「找到名字但跨度错」和「名字根本没进表」会看起来像同一种病。
-   */
-  const kw = kind === 'InterfaceDeclaration' ? 'interface'
-    : kind === 'TypeAliasDeclaration' ? 'type'
-      : kind === 'FunctionDeclaration' ? 'function'
-        : kind === 'let/var' ? '(?:let|var)'
-          : 'const'
-  /**
-   * ── `async` 必须被允许，否则 async 函数会被算成 **1 行** ──────────────────────────────────────
-   *
-   * 实测（本仓）：`spanOf('harvest')` 返回 1 行，而编译器说 **278** 行；
-   * `spanOf('writeMemoryConsoleSetting')` 也是 1 行，真值 **33** 行。
-   * 两者相加正好 **309** —— 就是自校验报的那个差额。
-   *
-   * 原因：正则写的是 `^(?:export\s+)?function\s+NAME`，而这两处源码是
-   * `export async function NAME(` —— `async` 卡在中间，匹配失败 ⇒ `findIndex` 返回 -1
-   * ⇒ 调用方的 `sizeOf()` 退回默认值 1 行。
-   *
-   * 教训与上一轮同族：**仪器的"找不到"会被静默降级成一个看起来合法的数字（1 行）**，
-   * 所以自校验必须能把它变成差额，而不是靠人去看表。
-   */
-  const re = new RegExp(`^(?:export\\s+)?(?:async\\s+)?${kw}\\s+${name}\\b`, 'u')
-  const start = lines.findIndex((l) => re.test(l))
-  if (start < 0) return undefined
-  /**
-   * 花括号配平必须容忍「签名跨行」：`export function buildTape(` 之后若干行才是 `{`。
-   * 第一版在第一行没看到 `{` 就判定为单行声明，于是 buildTape 被算成 1 行 ——
-   * 分量表因此把最大的那个声明当成最小的，整张表失去意义。
-   * 判据改成：在遇到 `;`（语句结束）之前出现的第一个 `{` 开始配平。
-   *
-   * ── 反向的同类缺陷：**没有**任何括号的单行声明 ─────────────────────────────────────────────
-   *
-   * 实测：`export const name = 'dsh-graft-slice'` 既没有 `{` 也没有 `;`，于是旧逻辑一路向下扫，
-   * 直到撞上下一条带 `{` 的声明才收尾，把一个 1 行常量报成 **20 行**。
-   *
-   * 修法用同一套括号（`(` `[` `{` 三种都参与配平）：
-   *   · 首行没有任何开括号 ⇒ 这一行就是整条声明；
-   *   · 有开括号 ⇒ 配平到深度归零那一行（自动覆盖 `new Set([...])` 这类一行写完的字面量）。
-   */
-  const pairs = { '(': ')', '[': ']', '{': '}' }
-  const closers = new Set([')', ']', '}'])
-  let depth = 0
-  let opened = false
-  for (let i = start; i < lines.length; i++) {
-    /**
-     * ── `type X =` 后面换行写联合成员时，首行没有任何括号 ────────────────────────────────────────
-     *
-     * 实测（observer 的 `FollowTransferResult`）：`type X =` 独占一行、三个联合成员各自换行，
-     * 旧规则「首行没有开括号 ⇒ 这一行就是整条声明」把它算成 1 行，而编译器说 4 行。
-     * 于是跨度总和比 closure 少 5 行，脚本自己打了 WARNING。
-     *
-     * 修法：行尾是 `=` 或 `|` 时，声明**明显没写完**，必须继续读。
-     */
-    /**
-     * ── 什么时候"这一行就写完了" ────────────────────────────────────────────────────────────────
-     *
-     * 实测两种多行声明（都在 observer 上）：
-     *   · `type X =` 独占一行，后接 `| { … }` 若干行 —— 行尾是 `=` / `|`；
-     *   · 中间那几行 `| { followed: false; reason: 'no-pair' }` 行尾是 `}`，**既不是 `=` 也不是 `|`**，
-     *     但下一行仍以 `|` 开头 —— 说明联合还没结束。
-     *
-     * 所以判据不能只看"本行结尾"，还要看**下一行开头**是否以 `|` 续接。
-     */
-    const next = lines[i + 1] ?? ''
-    const continues = /[=|]\s*$/u.test(lines[i]) || /^\s*\|/u.test(next)
-    /**
-     * ── 联合类型的花括号是**成员内部**的，不该结束声明 ──────────────────────────────────────────
-     *
-     * 实测（`FollowTransferResult` 第 2 行）：`| { followed: false; reason: 'no-pair' }` ——
-     * 这一行自己把 `{` `}` 配平了，于是 `opened && depth === 0` 成立、声明在第 2 行就结束，
-     * 而实际还有第 3、4 行。少 2 行。
-     *
-     * 判据：这一行以 `|` 开头（联合成员）时，本行的括号**不参与**"整条声明是否结束"的判定；
-     * 只有等到某一行**不再**以 `|` 开头（且不以 `|` 或 `=` 结尾）才收尾。
-     */
-    const unionMemberLine = /^\s*\|/u.test(lines[i])
-    for (const ch of lines[i]) {
-      if (pairs[ch] !== undefined) { depth += 1; opened = true }
-      else if (closers.has(ch)) depth -= 1
-      else if (ch === ';' && !opened) return [start + 1, i + 1]
-    }
-    /**
-     * ── 联合的最后一行：行尾是 `}`，但声明到这一行就结束了 ──────────────────────────────────────
-     *
-     * 实测（`FollowTransferResult`，编译器 `L458..L461` = 4 行）：
-     *   L458  type FollowTransferResult =
-     *   L459    | { … }
-     *   L460    | { … }
-     *   L461    | { … }          ← 行尾 `}`，`depth` 归零，本行就该收尾
-     *   L462  (空行)
-     *
-     * 旧判据 `!unionMemberLine` 在 L461 上不成立（它本身以 `|` 开头），于是**跳过**，
-     * 一直读到 L462 才因空行收尾 —— 多算 1 行。这就是 1876 vs 1877 那 1 行差。
-     *
-     * 正确判据：**联合成员行只要 depth 归零且下一行不是联合成员，就到此为止**（不再要求本行不是联合成员）。
-     */
-    if (opened && depth === 0 && !/^\s*\|/u.test(next)) return [start + 1, i + 1]
-    if (!opened && !continues) return [start + 1, i + 1]
+/**
+ * ── SPANS COME FROM THE COMPILER, NOT FROM A PARSER WRITTEN HERE ─────────────────────────────────
+ *
+ * The previous implementation was a hand-rolled bracket balancer (`spanOf`). It produced SIX wrong
+ * answers in one afternoon on observer, and on `retrieve.ts` it is still wrong in a way that voids the
+ * ENTIRE table: `INCIDENT_MARKERS` is an **8-line** array of regex literals, but the balancer counted
+ * the `\(` inside `/(报错|抛错|…)/u` as a syntactic paren and kept balancing until some later `}`
+ * closed the depth — **1427 lines**. That one phantom component swallowed 68 declarations, and the
+ * self-check reported `spans 2717 != closure 1298 (difference 1419)` where **1419 == 1427 − 8**.
+ *
+ * I tried patching the balancer with a masker (blank strings / regexes / comments before balancing).
+ * It fixed `retrieve.ts` and **broke the `index.ts` baseline**: `applyInner` went from 1362 to 704.
+ * Reverted.
+ *
+ * The lesson `move-gate.mjs` already wrote down applies here: **a second parser is a second truth.**
+ * `closure.mjs --declarations` emits the compiler's own `getStart()/getEnd()` span table for exactly
+ * this reason, so this file now CONSUMES it instead of guessing.
+ *
+ * When the compiler is absent, this script has no spans and says so: it prints a RESOURCE line and
+ * exits 2 (the same convention `closure.mjs` and `test/v201` use). A table built on a missing
+ * measurement is worse than no table — that is precisely the failure this rewrite removes.
+ */
+const RESOURCE_EXIT = 2
+
+const declarationSpans = (() => {
+  let stdout
+  try {
+    stdout = execFileSync(process.execPath, [REPO + '/scripts/closure.mjs', '--declarations'], {
+      cwd: REPO, encoding: 'utf8', maxBuffer: 128 * 1024 * 1024,
+    })
+  } catch (error) {
+    // closure.mjs exits 2 when it cannot load the TypeScript compiler API.
+    const status = error.status ?? -1
+    console.error(`families: closure --declarations failed (exit ${status}).`)
+    console.error('          RESOURCE condition: this package declares no dependencies and CI installs no')
+    console.error('          typescript. Without the compiler there are NO spans, and a family table built')
+    console.error('          on missing spans is worse than no table (that is how INCIDENT_MARKERS became 1427).')
+    console.error('          NOT a pass and NOT a failure — re-run where the compiler is available.')
+    process.exit(RESOURCE_EXIT)
   }
-  return [start + 1, lines.length]
+  // the banner (compiler version + resolved path) precedes the JSON; the table is the last line
+  const json = stdout.trim().split('\n').pop()
+  let rows
+  try {
+    rows = JSON.parse(json)
+  } catch {
+    console.error('families: closure --declarations did not end with a JSON array.')
+    console.error(`          last line began: ${String(json).slice(0, 160)}`)
+    process.exit(RESOURCE_EXIT)
+  }
+  const out = new Map()
+  /**
+   * ── 只收**本文件**的声明 ────────────────────────────────────────────────────────────────────
+   *
+   * `--declarations` 给的是整个程序的表（所有 .ts），按文件排序。第一版直接 `byName.set`，
+   * 于是 `retrieve.ts` 的 `provenanceOf` 被 `archive.ts` 的同名声明覆盖 —— 跨度变成另一个文件的
+   * 4 行，差额报 −33。
+   *
+   * 这类「静默取到别处的同名项」正是本仓反复踩的坑（`move-gate` 记过 `sleepSync` 的同名歧义、
+   * `families` 记过 `name` 的 17 个声明点）。所以这里**按文件过滤**，同名多声明只在**本文件内**
+   * 才可能出现，并且那种情况会在下面的 AMBIGUOUS 行里单独列出。
+   */
+  const wanted = SRC_FILE.replace(/\\/gu, '/')
+  for (const row of rows) {
+    if (row.file !== wanted) continue
+    if (out.has(row.name)) {
+      // 同一文件内的同名多声明：不静默取第一个，而是标记出来交给上层
+      const prev = out.get(row.name)
+      out.set(row.name, { ...prev, duplicate: true })
+      continue
+    }
+    out.set(row.name, row)
+  }
+  return { rows: rows.filter((row) => row.file === wanted), byName: out }
+})()
+
+/** 每个声明的行区间 [start, end]（1-based），**来自编译器**。 */
+const spanOf = (name) => {
+  const row = declarationSpans.byName.get(name)
+  if (row === undefined) return undefined
+  return [row.start, row.end]
 }
+
 
 const spans = new Map()
 // 跨度对**全部**声明计算（含歧义成员）：自校验需要它，展示只用 liveMembers
@@ -275,7 +245,21 @@ const unresolvedRefs = []
 for (const name of memberSet) {
   const findings = findingsByMember.get(name) ?? []
   for (const f of findings) {
-    if (f.file !== 'index.ts') continue
+    /**
+     * ── 文件名必须来自 `--src`，不能写死 ────────────────────────────────────────────────────────
+     *
+     * 这个文件的开头（第 81–84 行）已经记过同一个缺陷：第一版把 `index\.ts` 写死在**成员正则**里，
+     * `families.mjs appendLayer`（在 store.ts 里）返回 0 个声明，而 closure 明明报了 225 行。
+     *
+     * 修了成员正则，**这一行却留了下来**。于是在 `retrieve.ts` 上，所有跨声明的引用行都被丢弃
+     * （`f.file` 是 `retrieve.ts`，不等于 `'index.ts'`），图里只剩孤立节点 ——
+     * 输出变成 **62 个分量**，而真实值是 19。分量数偏大是「边全丢了」的典型签名：
+     * 差额为 0（跨度对），但结构完全错误。
+     *
+     * 教训：自校验只查了「跨度之和 == 闭包行数」，它抓不到「边丢了」。
+     * 一个只验证数字、不验证结构的自校验，会在结构错光的时候照样打绿色。
+     */
+    if (f.file !== SRC_FILE) continue
     if (f.kind !== 'CODE' && f.kind !== 'TYPE') continue
     const from = ownerOf(f.line)
     if (from === undefined || from === name) continue
