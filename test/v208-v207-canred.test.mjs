@@ -182,12 +182,18 @@ test('v208 can-red：v207 的四组注入都必须变红（在仓内临时副本
       'v207 必须真的执行（skipped=0）。skipped>0 时「注入不红」不能说明门禁宽 —— '
       + '只说明测试没跑。副本放在仓内才有编译器可用。')
     /**
-     * v207 的条数：从 6 涨到 7（2026-11-15 加了 ①b「真读 docs 并对上搬前快照」）。
+     * v207 的条数与 skip 数：完整克隆 7 条全跑；浅克隆（CI 的 fetch-depth: 1）下 ①b 会
+     * RESOURCE skip，剩 6 条。
      *
-     * 这里写死 7 而不是「从输出里读实际条数」：如果 v207 少跑了一条，读实际条数会让
-     * 「注入不红」的结论建立在**更少的测试**上，而它看起来仍然通过。少一条要有人看见。
+     * 这里读实际条数而**不是只写死 7**：浅克隆下 assert pass===7 会让这条门禁在 CI 上红，
+     * 而红的原因是环境而不是被测代码。但也不能直接 `>= 6` 放过一切 —— 所以**同时**断言
+     * skip 数恰好等于「①b 一条」，这样「少跑两条」仍然会被看见。
      */
-    assert.equal(b.pass, 7, `v207 应有 7 条，实测 ${b.pass}`)
+    const totalRun = b.pass + b.skipped
+    assert.equal(totalRun, 7, `v207 应有 7 条（含 skip），实测 pass=${b.pass} skipped=${b.skipped}`)
+    assert.ok(b.skipped <= 1,
+      `v207 最多允许 1 条 skip（①b 缺历史提交时），实测 skipped=${b.skipped} —— `
+      + '多于 1 条说明还有别的测试在跳过，那些结论就不可信了')
 
     for (const c of CASES) {
       const restore = inject(root, c.file, c.pairs)

@@ -217,14 +217,35 @@ test('v210 ⑥: 只删注释 → exit 0（门禁不误报正常写注释）', ()
   }
 })
 
-test('v210 ⑦: 本步（第三步）的实测必须是 32/0/0 与 1/0/0（收紧之后仍如此）', () => {
+test('v210 ⑦: 本步（第三步）的实测必须是 32/0/0 与 1/0/0（收紧之后仍如此）', (t) => {
   /**
    * 用户要求「确认收紧后本步仍 32/0/0」。用**真实仓**跑一次 `--against f9d1abf`
    * （第三步的父提交），锁定那个数字，防止收紧判据时悄悄改变了既有结论。
    *
    * 若这条将来红了，先问：是判据变严导致某行从 comment 变成 logic（那是真发现），
-   * 还是这一步又发生了新的编辑（那要重测并更新期望值）。不要直接改数字。
+   * 还是这一步又发生了新的编辑（那要重测并更新期望值）。不要直接数字。
+   *
+   * ── 需要历史提交 ⇒ 浅克隆下 skip ────────────────────────────────────────────────────────────
+   *
+   * `--against f9d1abf` 要读那个父提交。CI 的 `actions/checkout@v4` 默认 `fetch-depth: 1`，
+   * 只取当前提交 ⇒ 这条在 CI 上必然红（2026-11-15 实测：本地 490 绿、CI 双 Node 红在 Test）。
+   *
+   * 处置同 v207 ①b：缺历史时 skip 并写 RESOURCE reason（照 v201/v203 惯例），
+   * 不伪装成通过、也不把环境问题报成被测代码的问题。
    */
+  const hasRef = (() => {
+    try {
+      execFileSync('git', ['cat-file', '-e', 'f9d1abf'], { cwd: REPO, stdio: 'ignore' })
+      return true
+    } catch { return false }
+  })()
+  if (!hasRef) {
+    t.skip('RESOURCE：本地仓库没有 f9d1abf（浅克隆 / shallow clone）。'
+      + '这条要与第三步的父提交比较，需要那个对象。完整克隆上运行即可覆盖；'
+      + 'NOT a pass and NOT a failure.')
+    return
+  }
+
   const env = { ...process.env }
   delete env.NODE_TEST_CONTEXT
   let out
@@ -235,8 +256,8 @@ test('v210 ⑦: 本步（第三步）的实测必须是 32/0/0 与 1/0/0（收�
   } catch (error) {
     out = String(error.stdout ?? '') + String(error.stderr ?? '')
   }
-  const t = totalsOf(out)
-  assert.ok(t !== undefined, `输出里应有合计行：\n${out.slice(-900)}`)
+  const totals = totalsOf(out)
+  assert.ok(totals !== undefined, `输出里应有合计行：\n${out.slice(-900)}`)
 
   /**
    * ⚠ 必须锚定行首。`DISAPPEARED 1 条 / 1 行` 里的 "APPEARED" 是 "DISAPPEARED" 的子串，
@@ -250,7 +271,7 @@ test('v210 ⑦: 本步（第三步）的实测必须是 32/0/0 与 1/0/0（收�
 
   assert.equal(appeared[2], '32', `出现侧应为 32 行，实测 ${appeared[2]}`)
   assert.equal(disappeared[2], '1', `消失侧应为 1 行，实测 ${disappeared[2]}`)
-  assert.equal(t.comment, 33, `合计注释应为 32+1=33，实测 ${t.comment}`)
-  assert.equal(t.pipeline, 0)
-  assert.equal(t.logic, 0, '本步的逻辑行必须为 0')
+  assert.equal(totals.comment, 33, `合计注释应为 32+1=33，实测 ${totals.comment}`)
+  assert.equal(totals.pipeline, 0)
+  assert.equal(totals.logic, 0, '本步的逻辑行必须为 0')
 })
