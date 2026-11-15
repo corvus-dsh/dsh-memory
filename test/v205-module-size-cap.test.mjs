@@ -91,6 +91,7 @@ const SCANNED = [
   'store/clock.ts',
   'store/io.ts',
   'store/layer.ts',
+  'store/lifecycle.ts',
   'store/skill.ts',
 ]
 
@@ -103,7 +104,6 @@ const SCANNED = [
 const HISTORICAL = new Set([
   'index.ts',
   'retrieve.ts',
-  'store.ts',
   'store/skill.ts',
 ])
 
@@ -128,13 +128,6 @@ const EXEMPT = new Map([
       '检索层：词法召回、IDF×鲜活度×重要度打分、两阶段 LLM 过滤、提示渲染。它与 store.ts 曾共享大量'
       + 'helper，A1 完成后其闭包已缩小但文件本身尚未拆。拆分需要先确定 Document/MemoryHit 的归属'
       + '（D-1 就落在这里的 hitOf），而 D-1 按裁定要等重构完成后再修。登记为天花板。',
-  }],
-  ['store.ts', {
-    ceiling: 1056,
-    reason:
-      'A1 拆分后的剩余部分：生命周期（A2）、审计、processed 标记、stats。A1 已把 SKILL 读写整块'
-      + '（41 声明）搬进 store/skill.ts。剩余 37 个声明里 A2 生命周期是最大的一簇（实测闭包 755 行），'
-      + '拆完 A2 后本文件应低于 800，届时本条目应当删除。',
   }],
   ['store/skill.ts', {
     ceiling: 985,
