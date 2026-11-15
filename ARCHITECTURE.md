@@ -94,6 +94,20 @@
 
 ---
 
+### TD-M14 产物同步门禁 v209 的覆盖边界（2026-11-15 登记，**刻意的部分覆盖**）
+
+| 项 | 内容 |
+|---|---|
+| 现状 | `test/v209-lib-sync-typeimports.test.mjs` 用 `import type` 作为「产物是否落后于源码」的探针：`strip` 擦掉类型语法但**保留行**，所以每条 `import type` 在产物同一行号上应是一行纯空白。 |
+| 覆盖的两种形态 | **A 语句级** `import type { A } from '…'` → 产物整行擦成纯空白。判据：产物同一行号是纯空白。<br>**B 内联** `import { type A }`、`import { type A, b }`、`import { b, type A }` → 产物**保留 import 骨架**，只把 `type A` 擦成空格（实测：`import {         b } from "./x.js"`）。判据：产物仍是 `import { … } from '…'`、不含 `type` 关键字、且值成员与「源码去掉所有 `type X` 后」一致。 |
+| **不覆盖** | ① 源码改了**非类型**内容而产物没重建（例：改一个字符串常量）—— 本判据看不见，那需要 `git diff --exit-code -- lib`，是 CI 的步骤；<br>② 产物被手工编辑成「仍然合法但语义不同」；<br>③ 从 `node:*` / 外部包导入的类型（没有本地行区间可对照）。 |
+| 为什么接受部分覆盖 | 一条**看起来**覆盖一切的门禁比一条**说清**自己范围的门禁更危险。这条门禁的价值是**便宜且常驻**（不需要跑完整 build 就能发现「加了一行 import type 却没 rebuild」这一类），而不是替代 CI 的产物比对。两者分工写在 `test/v209` 的文件头与本节。 |
+| 这条边界的来历 | 2026-11-15 `ba9fd15`：给 `src/retrieve/interning.ts` 后补了 `import type { MemoryProvenance }` 但没重跑 build，产物少一行空白。**当时 476 条测试、`verify-pure-move`、`type-budget`、`check-cycles` 全绿**，一条都没抓到 —— 因为运行时不需要那个类型。抓到它的是 CI 的 `git diff --exit-code -- lib`。 |
+| can-red | `v209 ④` 用假数据覆盖：语句级缺行 / 位置错开 / 产物过短 / 无 import type / 内联全类型 / 内联混合（type 在前后两种）/ 内联 `type` 未擦 / 内联骨架被擦 / 内联值成员被错擦。**共 6 类 12 个用例**，确保两条判据都真能红。 |
+| 复查方式 | `node --test test/v209-lib-sync-typeimports.test.mjs`（4 条，含 can-red）。 |
+
+---
+
 ## 本次发版（v0.22）**不做**的事
 
 - 不实现技能合并的落盘（TD-M1）。

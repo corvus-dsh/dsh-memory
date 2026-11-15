@@ -1,0 +1,81 @@
+/**
+ * ── 检索层的存储选路：json 默认，sqlite 作为可选升级 ──────────────────────────────────────────
+ *
+ * 从 `retrieve.ts` 搬出的 6 个声明（28 行 + 族说明注释）。它们是**一个不可分的单元**：
+ * 三个模块级 `let` 存放当前档位与索引句柄，而它们的唯一写者就是同文件的
+ * `setStorageTier` 与 `currentIndex`。
+ *
+ * ── 为什么三个 let 不能单独搬（与第一步同一个约束）────────────────────────────────────────────
+ *
+ * ESM 的 import 绑定对**导入方**是只读的。把 `activeStorageTier` / `tierIndexPath` / `tierIndex`
+ * 搬进独立模块后，`retrieve.ts` 里若还留着 `setStorageTier`，它给这三个名字赋值会在编译期
+ * 失败（`Cannot assign to import`）。所以**状态与它的写者必须同处一个模块**。
+ *
+ * 判据不是「是不是 mutable」，而是「**谁**在写它」：
+ *   · A1-2 的 `shapeCache` 是 `const Map`，由**同模块**代码变异 → 整体搬走自洽；
+ *   · 第一步排除的三个 `let` 由**留在原地的**代码赋值 → 搬走就断；
+ *   · 本模块的三个 `let` 与它们的写者一起搬 → 再次自洽。
+ *
+ * ── 为什么是模块级状态而不是参数 ────────────────────────────────────────────────────────────────
+ *
+ * 原文注释已随代码一起搬来（见下方「v1.4.0 — THE RETRIEVAL TIER, AS MODULE STATE」）：
+ * `scoreDocuments` 是同步热路径，把档位穿进参数会把同步调用改成异步，进而改变每个调用者的契约。
+ *
+ * ── 依赖方向 ────────────────────────────────────────────────────────────────────────────────────
+ *
+ * 对 `retrieve.ts` **零值依赖**：只需 `SqliteIndex` / `sqliteAvailable`（同目录 sqlite-index.js）
+ * 与 `join`（node:path）。因此不参与任何运行期循环。
+ */
+
+import { SqliteIndex, sqliteAvailable } from '../sqlite-index.js'
+import { join } from 'node:path'
+
+/**
+ * v1.4.0 — THE RETRIEVAL TIER, AS MODULE STATE.
+ *
+ * WHY MODULE STATE AND NOT A PARAMETER: `scoreDocuments` is synchronous and is called from
+ * several places (retrieve, retrieveCandidates). Threading a tier through all of them would
+ * convert a synchronous hot path into an async one, which changes the contract for every caller
+ * including the existing tests. The tier is configuration, not per-call data.
+ *
+ * DEFAULT IS `'json'`. A caller opts in explicitly; nothing changes if they do not.
+ *
+ * The index handle is memoised so repeated retrievals reuse one connection. Re-opening per call
+ * would be correct but would pay SQLite startup on every query and leak a handle per retrieval.
+ */
+let activeStorageTier: 'json' | 'sqlite' = 'json'
+let tierIndexPath: string | undefined
+let tierIndex: SqliteIndex | undefined
+
+export function setStorageTier(tier: 'json' | 'sqlite', options: { indexDbPath?: string } = {}): void {
+  activeStorageTier = tier
+  tierIndexPath = options.indexDbPath
+  /** Switching config invalidates the handle: a different tier must not read the old database. */
+  if (tierIndex !== undefined) {
+    tierIndex.close()
+    tierIndex = undefined
+  }
+}
+
+export function getStorageTier(): 'json' | 'sqlite' {
+  return activeStorageTier
+}
+
+/**
+ * The memoised index handle, or undefined when the tier is json or sqlite is unavailable.
+ *
+ * 导出：`retrieve.ts` 的 `memoryDocumentsFor` 是它的唯一调用者，搬走后必须能 import。
+ */
+export function currentIndex(memoryDir: string): SqliteIndex | undefined {
+  if (activeStorageTier !== 'sqlite') return undefined
+  if (tierIndex !== undefined) return tierIndex
+  if (!sqliteAvailable()) return undefined
+  const file = tierIndexPath ?? join(memoryDir, '.index.db')
+  try {
+    tierIndex = new SqliteIndex({ file })
+    return tierIndex
+  } catch {
+    /** An unopenable database degrades to json rather than failing the retrieval. */
+    return undefined
+  }
+}

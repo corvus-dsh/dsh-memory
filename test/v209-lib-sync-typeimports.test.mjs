@@ -32,11 +32,25 @@
  *
  * ── 边界（写清，否则这条门禁看起来覆盖得比实际多）──────────────────────────────────────────────
  *
- * - 它只探 `import type` **语句级**的形态（行首 `import type`）。内联 `import { type X }` 不是整行
- *   被剥，产物里会留 `import { }`，不在本判据内 —— 那种情况由构建产物自身的语法保证。
- * - 它不比较其它内容：源码里改了一个字符串、产物没重建，这条**抓不到**。
- *   「产物 == rebuild(src)」这条更强的判据需要跑完整 build，见 `npm run build` 的 CI 步骤。
- *   本判据是**便宜的常驻探针**，不是那条的替代。
+ * 它覆盖**两种**形态，各自用不同的判据（**实测** `strip` 的产物得出，不是推演）：
+ *
+ *   形态 A  语句级 `import type { A } from '…'`
+ *           产物：整行被擦成**纯空白**（保留列宽）。
+ *           判据：产物同一行号是纯空白。
+ *
+ *   形态 B  内联 `import { type A } from '…'` / `import { type A, b }` / `import { b, type A }`
+ *           产物：**保留 import 骨架**，只把 `type A` 擦成空格：
+ *               `import {        } from "./x.js"`      ← 全是类型
+ *               `import {         b } from "./x.js"`    ← 混合
+ *               `import { b,        } from "./x.js"`    ← 混合
+ *           判据：产物同一行号仍是 `import { … } from '…'`，且**不含** `type` 关键字，
+ *                 且成员列表里与「源码去掉所有 `type X` 后的值成员」一致。
+ *
+ * **不覆盖**：
+ *   - 源码改了非类型内容、产物没重建（那需要 `git diff --exit-code -- lib`，是 CI 的步骤）；
+ *   - 产物被手工编辑成「仍然合法但语义不同」（本判据只看 import 行）。
+ *
+ * 这两条边界是刻意的：一条看起来覆盖一切的门禁比一条说清自己范围的门禁更危险。
  */
 
 import test from 'node:test'
@@ -76,6 +90,44 @@ const typeImportLines = (srcLines) => {
     if (/^import\s+type\b/u.test(srcLines[i])) out.push(i)
   }
   return out
+}
+
+/**
+ * 源码里的**内联** `import { type X }` 的 0-based 行号。
+ * 与 `import type` 的区别：`type` 在花括号**里面**，语句仍是值 import 的骨架。
+ */
+const inlineTypeImportLines = (srcLines) => {
+  const out = []
+  for (let i = 0; i < srcLines.length; i += 1) {
+    if (/^import\s*\{[^}]*\btype\s+\w/u.test(srcLines[i])) out.push(i)
+  }
+  return out
+}
+
+/**
+ * 源码一行的值成员（去掉 `type X` 与 `X as Y` 重命名）。
+ * `import { type A, b }` → `['b']`；`import { b, type A }` → `['b']`。
+ */
+const valueMembersOf = (line) => {
+  const m = line.match(/^import\s*\{([^}]*)\}/u)
+  if (m === null) return []
+  return m[1].split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0)
+    .filter((s) => !/^type\s+/u.test(s))
+    .map((s) => s.split(/\s+as\s+/u)[0].trim())
+    .sort()
+}
+
+/** 产物一行的值成员（产物里 `type X` 已被擦掉，所以剩下什么就是什么）。 */
+const libValueMembersOf = (line) => {
+  const m = line.match(/^import\s*\{([^}]*)\}\s*from\s*['"][^'"]+['"]/u)
+  if (m === null) return undefined
+  return m[1].split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0)
+    .map((s) => s.split(/\s+as\s+/u)[0].trim())
+    .sort()
 }
 
 test('v209 ①: 每条 import type 在产物同一位置是一行纯空白', () => {
@@ -121,7 +173,57 @@ test('v209 ②: 行数守恒 —— strip 只擦内容，不删行', () => {
     '产物行数与源码不守恒 —— strip 是保位擦除，不该增删行：\n  ' + failures.join('\n  '))
 })
 
-test('v209 ③: 判据本身能分辨 —— 缺一行 / 位置错开 都必须被抓到（假数据 can-red）', () => {
+test('v209 ③: 内联 `import { type X }` 在产物里保留骨架、只擦成员（与语句级判据不同）', () => {
+  /**
+   * 实测 `strip` 的产物（见测试末尾的 can-red）：
+   *
+   *     src  import { type A, b } from "./x.js"
+   *     lib  import {         b } from "./x.js"      ← 骨架还在，type A 被擦成空格
+   *
+   * 所以这条不能用「产物是纯空白」判，它要问三个问题：
+   *   1. 产物同一行仍是 `import { … } from '…'`；
+   *   2. 产物行里不含 `type` 关键字（说明类型成员真的被擦掉了）；
+   *   3. 产物的值成员 == 源码去掉所有 `type X` 后的值成员。
+   */
+  const failures = []
+  let checked = 0
+  for (const rel of MODULES) {
+    const { srcLines, libLines } = readBoth(rel)
+    for (const i of inlineTypeImportLines(srcLines)) {
+      checked += 1
+      const at = i + LIB_LINE_OFFSET
+      const srcLine = srcLines[i]
+      const libLine = libLines[at]
+      if (libLine === undefined) {
+        failures.push(`${rel}:L${i + 1} 源码是内联 import type，但产物没有这一行`)
+        continue
+      }
+      if (!/^import\s*\{[^}]*\}\s*from\s*['"][^'"]+['"]/u.test(libLine)) {
+        failures.push(`${rel}:L${i + 1} 产物里这一行不是 import 骨架：「${libLine.slice(0, 60)}」`)
+        continue
+      }
+      if (/\btype\b/u.test(libLine)) {
+        failures.push(`${rel}:L${i + 1} 产物里仍含 type 关键字：「${libLine.slice(0, 60)}」`)
+        continue
+      }
+      const want = valueMembersOf(srcLine)
+      const got = libValueMembersOf(libLine)
+      if (got === undefined) {
+        failures.push(`${rel}:L${i + 1} 产物行的成员列表解析失败：「${libLine.slice(0, 60)}」`)
+        continue
+      }
+      if (JSON.stringify(want) !== JSON.stringify(got)) {
+        failures.push(`${rel}:L${i + 1} 值成员不符：源码去 type 后 [${want.join(',')}]，产物 [${got.join(',')}]`)
+      }
+    }
+  }
+  // 现状：本仓 0 条内联形态。这条断言是**为将来准备的**，但它必须能工作 ——
+  // 下面 can-red 用假数据证明它确实能红。所以不 skip、不 early-return。
+  assert.deepEqual(failures, [],
+    `内联 import type 的产物不符（本次检查 ${checked} 条）：\n  ` + failures.join('\n  '))
+})
+
+test('v209 ④: 两条判据都能红 —— 语句级缺行 / 内联骨架错 / 内联 type 未擦（假数据 can-red）', () => {
   /**
    * 判据被抽成一个纯函数来喂假数据。理由同 v205/v206/v207 的 can-red：
    * 「0 违规」只有在判据**能**报违规时才有意义。
@@ -194,4 +296,67 @@ test('v209 ③: 判据本身能分辨 —— 缺一行 / 位置错开 都必须�
 
   // ⑥ 没有 import type 的文件 ⇒ 恒空（判据不误报普通文件）
   assert.deepEqual(check(['// banner', 'export const y = 2'], ['// GENERATED', '// banner', 'export const y = 2']), [])
+
+  // ── 内联形态的判据（与上面不同：看骨架 + 值成员，不看纯空白）──
+  const checkInline = (srcLines, libLines) => {
+    const failures = []
+    for (const i of inlineTypeImportLines(srcLines)) {
+      const at = i + LIB_LINE_OFFSET
+      const srcLine = srcLines[i]
+      const libLine = libLines[at]
+      if (libLine === undefined) { failures.push(`missing@L${i + 1}`); continue }
+      if (!/^import\s*\{[^}]*\}\s*from\s*['"][^'"]+['"]/u.test(libLine)) { failures.push(`no-skeleton@L${i + 1}`); continue }
+      if (/\btype\b/u.test(libLine)) { failures.push(`type-left@L${i + 1}`); continue }
+      const want = valueMembersOf(srcLine)
+      const got = libValueMembersOf(libLine)
+      if (got === undefined) { failures.push(`unparsable@L${i + 1}`); continue }
+      if (JSON.stringify(want) !== JSON.stringify(got)) failures.push(`members@L${i + 1}`)
+    }
+    return failures
+  }
+
+  // ⑦ 内联全类型：`import { type A }` → `import {        }`
+  {
+    const src = ['// banner', 'import { type A } from "./x.js"', 'export const c = 1']
+    const okLib = ['// GENERATED', '// banner', 'import {        } from "./x.js"', 'export const c = 1']
+    assert.deepEqual(checkInline(src, okLib), [], '全类型内联：骨架保留、成员为空 ⇒ 合规')
+  }
+
+  // ⑧ 内联混合（type 在前）：`import { type A, b }` → `import {         b }`
+  {
+    const src = ['// banner', 'import { type A, b } from "./x.js"', 'export const c = 1']
+    const okLib = ['// GENERATED', '// banner', 'import {         b } from "./x.js"', 'export const c = 1']
+    assert.deepEqual(checkInline(src, okLib), [], '混合内联：值成员只剩 b ⇒ 合规')
+  }
+
+  // ⑨ 内联混合（type 在后）：`import { b, type A }` → `import { b,        }`
+  {
+    const src = ['// banner', 'import { b, type A } from "./x.js"', 'export const c = 1']
+    const okLib = ['// GENERATED', '// banner', 'import { b,        } from "./x.js"', 'export const c = 1']
+    assert.deepEqual(checkInline(src, okLib), [], '混合内联（type 在后）：值成员只剩 b ⇒ 合规')
+  }
+
+  // ⑩ 关键 can-red：产物里 `type` 没被擦（说明是旧产物或 build 用的是不 strip 的路径）
+  {
+    const src = ['// banner', 'import { type A, b } from "./x.js"', 'export const c = 1']
+    const badLib = ['// GENERATED', '// banner', 'import { type A, b } from "./x.js"', 'export const c = 1']
+    assert.deepEqual(checkInline(src, badLib), ['type-left@L2'],
+      '产物里 type 还在 ⇒ 必须红（这是「产物没重建」的另一种形状）')
+  }
+
+  // ⑪ can-red：产物把整行擦成空白（把内联错当成语句级）
+  {
+    const src = ['// banner', 'import { type A, b } from "./x.js"', 'export const c = 1']
+    const badLib = ['// GENERATED', '// banner', '                        ', 'export const c = 1']
+    assert.deepEqual(checkInline(src, badLib), ['no-skeleton@L2'],
+      '内联形态的骨架被擦掉 ⇒ 必须红（说明用了错误的判据）')
+  }
+
+  // ⑫ can-red：值成员被错擦（type 擦对了但多擦了一个值）
+  {
+    const src = ['// banner', 'import { type A, b } from "./x.js"', 'export const c = 1']
+    const badLib = ['// GENERATED', '// banner', 'import {               } from "./x.js"', 'export const c = 1']
+    assert.deepEqual(checkInline(src, badLib), ['members@L2'],
+      '值成员 b 被一起擦掉 ⇒ 必须红（这会变成运行期 ReferenceError）')
+  }
 })

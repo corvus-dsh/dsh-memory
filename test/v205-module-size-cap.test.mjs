@@ -80,6 +80,7 @@ const SCANNED = [
   'lock.ts',
   'retrieve.ts',
   'retrieve/interning.ts',
+  'retrieve/storage-tier.ts',
   'segment.ts',
   'skill-cache.ts',
   'sqlite-index.ts',

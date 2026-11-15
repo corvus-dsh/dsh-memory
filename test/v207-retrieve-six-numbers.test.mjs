@@ -81,22 +81,31 @@ const AVAILABLE = compilerAvailable()
  * 并逐项与 `docs/retrieve-families-and-tiers.md` 的历史表并列（那份文档记的是**搬前**的
  * 快照，因而也保留 —— 它不是过期的真理，是那个时点的记录）。
  *
- * 旧值 → 新值：
- *   分量 19 → 21（簇被拆开后，原来连在一起的两块各自成家）
- *   主干 68/1251 → 51/955（14 个声明连同它们的边一起离开）
- *   SCC 89 → 75，层 8 → 6，声明 89 → 75，跨度和 1535 → 1362
+ * ── 2026-11-15：第二步搬运之后再次更新 ──────────────────────────────────────────────────────────
+ *
+ * 搬走 6 个声明（→ `src/retrieve/storage-tier.ts`）：3 个 let + setStorageTier + getStorageTier
+ * + currentIndex。三个 let 是**模块级状态**，所以它们的 3 个节点整个离开本文件的图。
+ *
+ * 三步的值：
+ *   搬前（第一步前）  19 / 68·1251 / 89 / 8 / 486·413·373·263 / 89·1535
+ *   第一步后          21 / 51·955  / 75 / 6 / 486·362·295·219 / 75·1362
+ *   第二步后          21 / 45·927  / 69 / 5 / 486·362·282·204 / 69·1334
+ *
+ * 注意「无向连通分量 21 → 21」不变：被搬走的 6 个声明在原图里构成一个**独立分量**？
+ * 不是 —— 它们原本就与主干相连（currentIndex 被 memoryDocumentsFor 调用）。
+ * 分量数不变是因为主干仍是一个分量，而 6 个碎片分量本来就不含这几个名字。
  */
 const DOCUMENTED = {
   components: 21,
-  trunkDeclarations: 51,
-  trunkLines: 955,
-  sccs: 75,
+  trunkDeclarations: 45,
+  trunkLines: 927,
+  sccs: 69,
   nontrivialSccs: 0,
-  layers: 6,
-  tiers: { D: 486, C: 362, B: 295, A: 219 },
-  tierCounts: { D: 4, C: 7, B: 13, A: 51 },
-  declarations: 75,
-  spanSum: 1362,
+  layers: 5,
+  tiers: { D: 486, C: 362, B: 282, A: 204 },
+  tierCounts: { D: 4, C: 7, B: 12, A: 46 },
+  declarations: 69,
+  spanSum: 1334,
 }
 
 test('v207 ①: 六个数字与 docs/retrieve-families-and-tiers.md 逐项相等', (t) => {
