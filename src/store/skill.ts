@@ -22,7 +22,7 @@ import { join } from 'node:path'
 
 import type { EvidenceRef, ExtractedSkill, MemoryProvenance } from '../extract.js'
 import { jaccard, trigrams } from '../dedupe.js'
-import { replaceEdges, writeEdge, writeEdges } from '../edges.js'
+import { writeEdge, writeEdges } from '../edges.js'
 import { asVocab } from './layer.js'
 import { atomicWrite } from './io.js'
 import type { SkillMeta } from './layer.js'

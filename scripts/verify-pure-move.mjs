@@ -170,6 +170,34 @@ export const KNOWN_FORMAT_CORRECTIONS = [
   },
 ]
 
+/**
+ * ── TEST-ONLY OVERRIDE, AND WHY IT IS NOT A BACK DOOR ─────────────────────────────────────────
+ *
+ * `test/v203-pure-move-exemptions.test.mjs` has to prove that a RELAXED registry fails. Without an
+ * override it would have to edit this file (or the tree under test), which makes the test
+ * destructive and order-dependent.
+ *
+ * The override is deliberately narrow:
+ *   - it only REPLACES the list; the matching rules, the STALE logic and the exit codes are the
+ *     same code paths the real run uses;
+ *   - it can only be more permissive than reality, never less — and a more permissive registry
+ *     failing is exactly what the test asserts;
+ *   - it is read ONCE here, so no caller can swap it mid-run.
+ *
+ * If this ever becomes a place to park a real exemption "temporarily", that is the failure mode:
+ * exemptions belong in `KNOWN_FORMAT_CORRECTIONS` above, where a reader sees them.
+ */
+const registryOverride = (() => {
+  const raw = process.env.PPM_CORRECTIONS_JSON
+  if (raw === undefined || raw === '') return undefined
+  const parsed = JSON.parse(raw)
+  if (!Array.isArray(parsed)) throw new Error('PPM_CORRECTIONS_JSON must be a JSON array')
+  return parsed
+})()
+
+/** The registry actually used by a run: the override when present, else the real list. */
+const activeRegistry = registryOverride ?? KNOWN_FORMAT_CORRECTIONS
+
 /** Every `.ts`-bearing file under src/, as absolute paths. */
 function sourceFiles() {
   const out = []
@@ -355,7 +383,7 @@ if (isMain) {
       // pure correction still failed. Measured by the three-scenario probe.)
       const absorbed = []
       const remaining = []
-      const registryLeft = KNOWN_FORMAT_CORRECTIONS.map((entry) => ({ ...entry, usedGone: false, usedCame: false }))
+      const registryLeft = activeRegistry.map((entry) => ({ ...entry, usedGone: false, usedCame: false }))
 
       for (const diff of allDifferences) {
         if (diff.before > 0 && diff.after === 0) {
