@@ -87,33 +87,35 @@ const AVAILABLE = compilerAvailable()
  * 搬走 6 个声明（→ `src/retrieve/storage-tier.ts`）：3 个 let + setStorageTier + getStorageTier
  * + currentIndex。三个 let 是**模块级状态**，所以它们的 3 个节点整个离开本文件的图。
  *
- * ── 2026-11-15：第四步搬运之后再次更新（L4 → retrieve/documents.ts）──────────────────────────────
+ * ── 2026-11-16：第五步搬运之后再次更新（场景族 → retrieve/scene.ts）──────────────────────────────
  *
- * 搬走 8 个声明（L4 整层）：ERROR_IDENTIFIER / STOPWORDS / contentOf / layerDocuments /
- * looksLikeIncidentLog / negativeDocuments / skillDocuments / tierDocumentOf。
- * 这是**一次搬走整层**，所以拓扑层数从 5 掉到 4。
+ * 搬走 10 个声明：SCENE_PROMPT / SceneOptions / SceneCacheEntry / sceneCache / clearSceneCache /
+ * sceneCacheStats / SCENE_TAG / classifyScene / LEGACY_SCENE_HINTS / inferScene。
+ * 场景族跨了四个拓扑层（L0/L1/L2/L3），整族搬走后层数不变（仍 4），但主干从 30 缩到 22。
  *
- * 五步的值：
+ * 六步的值：
  *   搬前（第一步前）  19 / 68·1251 / 89 / 8 / 486·413·373·263 / 89·1535
  *   第一步后          21 / 51·955  / 75 / 6 / 486·362·295·219 / 75·1362
  *   第二步后          21 / 45·927  / 69 / 5 / 486·362·282·204 / 69·1334
  *   第三步后          21 / 40·894  / 64 / 5 / 486·362·261·192 / 64·1301
  *   第四步后          22 / 30·647  / 56 / 4 / 365·317·208·175 / 56·1065
+ *   第五步后          20 / 22·557  / 46 / 4 / 365·254·208·137 / 46·964
  *
- * 分量数 21 → 22：documents.ts 的 8 个声明原来连在主干上，搬走后主干缩小（40→30 声明），
- * 而 `contentOf` 那个只有 `Document` 类型边的碎片变成了独立分量。
+ * 分量 22 → 20：场景族从主干里离开后，主干从 30 缩到 22；
+ * 而 `SceneOptions`/`SceneCacheEntry` 这两个纯类型声明随族走，
+ * 它们在原图里各自只与 `classifyScene`/`sceneCache` 相连，整体离开。
  */
 const DOCUMENTED = {
-  components: 22,
-  trunkDeclarations: 30,
-  trunkLines: 647,
-  sccs: 56,
+  components: 20,
+  trunkDeclarations: 22,
+  trunkLines: 557,
+  sccs: 46,
   nontrivialSccs: 0,
   layers: 4,
-  tiers: { D: 365, C: 317, B: 208, A: 175 },
-  tierCounts: { D: 3, C: 6, B: 9, A: 38 },
-  declarations: 56,
-  spanSum: 1065,
+  tiers: { D: 365, C: 254, B: 208, A: 137 },
+  tierCounts: { D: 3, C: 5, B: 9, A: 29 },
+  declarations: 46,
+  spanSum: 964,
 }
 
 test('v207 ①: 当前六数与内置基线逐项相等（基线来自实测，不是从文档反读）', (t) => {

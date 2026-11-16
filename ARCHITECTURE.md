@@ -106,17 +106,24 @@
 | can-red | `v209 ④` 用假数据覆盖：语句级缺行 / 位置错开 / 产物过短 / 无 import type / 内联全类型 / 内联混合（type 在前后两种）/ 内联 `type` 未擦 / 内联骨架被擦 / 内联值成员被错擦。**共 6 类 12 个用例**，确保两条判据都真能红。 |
 | 复查方式 | `node --test test/v209-lib-sync-typeimports.test.mjs`（4 条，含 can-red）。 |
 
-### TD-M15 **CI 不覆盖** v201 / v207 / v208 / v210（2026-11-15 登记，2026-11-16 补 v210；用户裁定③④）
+### TD-M15 **CI 不覆盖** v201 / v207 / v208 / v210 / v212（2026-11-15 登记，2026-11-16 补 v210、v212 并订正归因；用户裁定③④）
 
 | 项 | 内容 |
 |---|---|
-| 事实 | 这**四个**测试文件全部依赖 `scripts/closure.mjs`（TypeScript 编译器 API）。本包 `package.json` 的 `dependencies` 与 `devDependencies` **都是空的**，CI 只跑 `npm install`（无依赖可装），所以 CI 上 `import('typescript')` 必然失败 ⇒ 这**四个**文件**整片 skip**。 |
-| 谁受影响 | `v201-closure-label-consistency`（2 条）、`v207-retrieve-six-numbers`（7 条）、`v208-v207-canred`（1 条）、`v210-classify-buckets`（1 条）。合计 **11 条在 CI 上永远是 skip**，本地完整克隆上是真跑。 |
-| **CI 到底覆盖了什么** | 现状：全套 490 条中 **479 条**在 CI 真跑；**`v201/v207/v208/v210` 的 11 条不在其中**。（这两个绝对数会随测试增减漂移 —— 判据请看「11 条」这个差，而不是绝对数。） |
-| **CI 不覆盖的是什么** | ① 「`retrieve.ts` 的六个数字（分量 / 主干 / SCC / 层 / 四档 / 声明和）」；② 「`--classify` 的 can-red 是否仍能抓住注入」；③ 「closure 两条路径的 mutable 标签一致」；④ 「`--classify` 的两侧分桶与 `isCommentLine` 收紧」——`v210` 的前三条是纯函数（CI 能跑），但它整文件在 `compilerAvailable()` 为假时直接 skip，所以那三条也一起不跑。这四件事都**只在本地完整克隆上被验证**。 |
+| 事实 | 这**五个**测试文件里，**四个**依赖 `scripts/closure.mjs`（TypeScript 编译器 API），**第五个不依赖**。本包 `package.json` 的 `dependencies` 与 `devDependencies` **都是空的**，CI 只跑 `npm install`（无依赖可装），所以 CI 上 `import('typescript')` 必然失败 ⇒ 前四个文件**整片 skip**。第五个（`v210`）是纯文本比较，**在 CI 上真跑**，只有它内部那条需要历史提交的 ⑦ 会 skip。 |
+| 谁受影响 | 因缺 typescript：`v201-closure-label-consistency`（2 条）、`v207-retrieve-six-numbers`（7 条）、`v208-v207-canred`（1 条）、`v212-retrieve-no-mutable-state`（2 条）= **12 条**。因缺 git 历史：`v210-classify-buckets` ⑦（1 条）。合计 **13 条**不在 CI 覆盖内。 |
+| **CI 到底覆盖了什么** | 现状：全套 **497 条**中 **484 条**在 CI 真跑；**上述 13 条不在其中**。（这两个绝对数会随测试增减漂移 —— 判据请看「13 条」这个差，而不是绝对数。） |
+| **CI 不覆盖的是什么** | ① 「`retrieve.ts` 的六个数字（分量 / 主干 / SCC / 层 / 四档 / 声明和）」；② 「closure 两条路径的 mutable 标签一致」（`v201`）；③ 「`retrieve.ts` 的模块级可变绑定 = 0」（`v212`，第五步裁定②的机械断言）；④ 「按历史提交复算某一步的实测」（`v207 ①b` 要 `0381c6c`、`v210 ⑦` 要 `f9d1abf`）——这两个是**历史声明**，浅克隆下永远无法验证。 |
+| **CI 覆盖了什么（容易误判的一半）** | `v210` 的 ①–⑥ 在 CI 上**真跑**，包括三条 can-red（删一行真代码 / 删整个函数 / 只删注释）。所以「`--classify` 的判据本身还能咬住注入」这件事**在 CI 上是有覆盖的**；没覆盖的只是它对着**某一步历史树**复算出的那个具体数字（⑦）。 |
 | 为什么不预生成声明表快照 | 快照能把 CI 变绿，但它验证的是「今天的结果等于昨天的快照」——文件一改，快照就过时，而**过时的快照比没有覆盖更危险**：它会让 CI 显示绿色，同时六个数字早已漂移。测量工具必须量**当前**的树，不能量一份冻结的表。 |
-| 这条边界的正确读法 | 看到 CI 绿，**不能**推断「门禁全部通过」。必须知道：涉及 TypeScript 编译器的 11 条只在本地跑。这也是为什么每次搬运的门禁报告里，v207/v208 的数字要**同时**给出「本地实测」与「CI 是否覆盖」。 |
-| 复查方式 | 本地（完整克隆，工作区根有 `node_modules/typescript`）：`node --test test/v20{1,7,8}*.test.mjs test/v210-classify-buckets.test.mjs`。CI 日志里搜 `ℹ skipped` 应能看到这 11 条。 |
+| 这条边界的正确读法 | 看到 CI 绿，**不能**推断「门禁全部通过」。必须知道：涉及 TypeScript 编译器的 12 条、以及两条历史复算，只在本地跑。这也是为什么每次搬运的门禁报告里，v207/v208/v212 的数字要**同时**给出「本地实测」与「CI 是否覆盖」。 |
+| 复查方式（可执行） | 模拟 CI 需要两个条件同时成立 —— 缺 typescript、且历史不可达。做法：把仓复制到工作区外的任意目录（副本里可以随意改），`rm -rf .git && git init && git add -A && git commit`（历史不可达），再往副本里放一个 `node_modules/typescript` 桩（`index.js` 里 `throw new Error('not installed')`，`package.json` 的 `exports` 指向它），然后 `node --test test/*.test.mjs`。2026-11-16 实测输出：**tests 497 / pass 484 / fail 0 / skipped 13**。逐文件：`v201` 2、`v207` 7、`v208` 1、`v212` 2、`v210` 1。 |
+
+> **订正（2026-11-16）**：本表上一版写「11 条」「四个文件全部依赖 closure」。
+> 实测证明 `v210` **不依赖** typescript（`--classify` 只做文本多重集比较），
+> 它的 ①–⑥ 在 CI 上全部真跑，只有 ⑦ 因缺 `f9d1abf` 跳过。
+> 错因是把「缺编译器」与「缺历史提交」两种原因并成一条 —— 两者在 CI 上同时成立，
+> 但只有前者会让整个文件 skip。
 
 ---
 

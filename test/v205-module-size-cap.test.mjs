@@ -82,6 +82,7 @@ const SCANNED = [
   'retrieve/commit-cache.ts',
   'retrieve/documents.ts',
   'retrieve/interning.ts',
+  'retrieve/scene.ts',
   'retrieve/storage-tier.ts',
   'segment.ts',
   'skill-cache.ts',
@@ -127,15 +128,18 @@ const EXEMPT = new Map([
       + '所以登记为天花板：尺寸可见、不可增长。',
   }],
   ['retrieve.ts', {
-    ceiling: 1419,
+    ceiling: 1294,
     reason:
       '检索层：词法召回、IDF×鲜活度×重要度打分、两阶段 LLM 过滤、提示渲染。它与 store.ts 曾共享大量'
-      + 'helper。2026-11-15 已完成五步搬运：'
+      + 'helper。2026-11-16 已完成五步搬运：'
       + '① 14 声明 → retrieve/interning.ts，② 6 声明 → retrieve/storage-tier.ts，'
-      + '③ 5 声明 → retrieve/commit-cache.ts，④ 8 声明 → retrieve/documents.ts'
-      + '（2009 → 1763 → 1718 → 1673 → 1419）。'
-      + '剩余主干 30 声明 / 647 行。下一步候选：L2 的 scoreDocuments（108 行，占该层 62.8% —— '
-      + '实测比 L4 的 skillDocuments 更集中）。'
+      + '③ 5 声明 → retrieve/commit-cache.ts，④ 8 声明 → retrieve/documents.ts，'
+      + '⑤ 10 声明 → retrieve/scene.ts（2009 → 1763 → 1718 → 1673 → 1419 → 1294）。'
+      + '第五步之后**模块级可变状态归零**（由 v212 机械断言）。'
+      + '剩余主干 22 声明 / 557 行。'
+      + '层账：1294 仍 > 800；把 L3+L2+L1 都搬完也还有约 950 行 —— '
+      + '要到 800 以下只能动 L0（约 596 行），那一步是「要不要把 retrieve.ts 变成纯壳」的战略决定，'
+      + '不是「下一步搬哪层」。'
       + 'ceiling 随每次搬运收紧到新实测值 —— 这是棘轮，不是自觉'
       + '（由「ceiling 必须等于实测」那条断言强制）。'
       + 'D-1 仍落在这里的 hitOf，按裁定等重构完成后再修。',

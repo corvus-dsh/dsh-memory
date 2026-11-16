@@ -7,37 +7,43 @@
 
 - 覆盖目录：`src`，**递归**（含 `src/store/` 与 `src/retrieve/` 两个子目录）
 - 计入条件：文件名 `endsWith('.ts')`
-- 实测：**36 个模块 / 14,722 行**
+- 实测：**37 个模块 / 14,761 行**
 - 三个方向都查：① 磁盘 → 表（新文件不能悄悄进）；② 表 → 磁盘（删掉的行不能留着）；
   ③ 依赖列 → 磁盘（不能指向不存在的模块）。第四条额外查：表本身不能有**值**环。
 - 第五个方向：`test/module-registry.test.mjs` 的 `ROW` 正则必须能**读进来**每一个真实文件名 ——
   一个读不进表的文件名，等于一个不受监管的文件名（下划线、子目录斜杠各踩过一次）。
 
-### 覆盖边界：本表的守护在 CI 上**完整生效**，但有 11 条门禁不在 CI 覆盖内
+### 覆盖边界：本表的守护在 CI 上**完整生效**，但有 13 条门禁不在 CI 覆盖内
 
 本表自身的 6 条断言（双向一致性、职责列非空、依赖列指向真实模块、无值环、type-only 标签为真）
 只用 `fs` + 正则，**CI 上真跑**。
 
-但仓里另有**四个**测试文件依赖 TypeScript 编译器（`scripts/closure.mjs`），而本包 `package.json`
-依赖为空、CI 不装 typescript ⇒ 它们在 CI 上整片 skip：
+但仓里另有**五个**测试文件的部分断言依赖本机条件。**2026-11-16 用真实模拟重测**
+（`git init` 单提交使历史不可达 + `node_modules/typescript` 抛错的桩 + 全部 497 条）：
 
-| 文件 | 条数 | CI |
-|---|---|---|
-| `test/v201-closure-label-consistency.test.mjs` | 2 | **skip** |
-| `test/v207-retrieve-six-numbers.test.mjs` | 7 | **skip** |
-| `test/v208-v207-canred.test.mjs` | 1 | **skip** |
-| `test/v210-classify-buckets.test.mjs` | 1 | **skip**（整文件；它内部有 3 条纯函数，本可在 CI 跑，但 `compilerAvailable()` 为假时整条测试提前 skip）|
+| 文件 | 条数 | CI | 为什么 |
+|---|---|---|---|
+| `test/v201-closure-label-consistency.test.mjs` | 2 | **skip** | 依赖 `scripts/closure.mjs` → typescript |
+| `test/v207-retrieve-six-numbers.test.mjs` | 7 | **skip** | 依赖 closure；①b 还额外要历史提交 |
+| `test/v208-v207-canred.test.mjs` | 1 | **skip** | 依赖 closure |
+| `test/v212-retrieve-no-mutable-state.test.mjs` | 2 | **skip** | 依赖 closure（读 `--declarations` 的 `mutable` 字段）|
+| `test/v210-classify-buckets.test.mjs` | **1**（共 7 条）| **skip 1 / 跑 6** | 它**不依赖** typescript（`--classify` 是纯文本多重集比较）。①–⑥ 在 CI 真跑，只有 ⑦ 因缺历史提交 `f9d1abf` 跳 |
 
-合计 **11 条**。判据、理由与「为什么不预生成快照」写在 `ARCHITECTURE.md` 的 **TD-M15**。
-一句话：**看到 CI 绿，不能推断这 11 条过了。**
+合计 **13 条**（12 条因缺 typescript，1 条因缺 git 历史）。实测 497 条中 **484 条在 CI 真跑**。
+
+> **订正（2026-11-16）**：上一版这里写「11 条」、并把 `v210` 记成「整文件 skip、内部的 3 条纯函数也不跑」。
+> 那是**错的**：`v210` 一行都不碰 typescript，它的 ①–⑥（含三条 can-red）在 CI 上全部真跑。
+> 错因是把「缺编译器」和「缺历史提交」两种不同原因并成了一条。
+> 判据、理由与「为什么不预生成快照」写在 `ARCHITECTURE.md` 的 **TD-M15**。
+> 一句话：**看到 CI 绿，不能推断这 13 条过了。**
 
 ## 现状分布（实测，非估计）
 
 | 项 | 值 |
 |---|---|
 | 模块数 | **36**（扁平 27 + `store/` 5 + `retrieve/` 4） |
-| 总行数 | **14,722** |
-| > 800 行的文件 | **3** 个（`index.ts` 2361、`retrieve.ts` 1419、`store/skill.ts` 985） |
+| 总行数 | **14,761** |
+| > 800 行的文件 | **3** 个（`index.ts` 2361、`retrieve.ts` 1294、`store/skill.ts` 985） |
 | 最大文件 | **`index.ts`** 2361 行（占 **16.0%**） |
 
 > **订正（2026-11-15）**：上一版这里写「扁平一层 / 27 个模块 / 14,211 行 / 最大 `store.ts` 2479」。
@@ -109,3 +115,4 @@ filter.ts -> retrieve.ts : type-only   （import type { MemoryHit }，运行时�
 | `src/retrieve/storage-tier.ts` | 存储选路：json 默认、sqlite 可选；三个模块级 let 与它们的唯一写者同处一模块。 | `currentIndex`, `getStorageTier`, `setStorageTier` …（共 3） | sqlite-index.ts |
 | `src/retrieve/commit-cache.ts` | 工作区 commit 归属：按分钟缓存，失败回落到空串；commit 漂移判定的权重常量同处一模块。 | `COMMIT_DRIFT_WEIGHT`, `clearCommitCache`, `currentCommitOf`, `sameCommit` | — |
 | `src/retrieve/documents.ts` | 取数层：把 SKILL.md / negatives.jsonl / facts-experiences.jsonl / sqlite 索引行都转成检索用的 Document。L4 整层（8 声明）。 | `ERROR_IDENTIFIER`, `STOPWORDS`, `contentOf`, `layerDocuments`, `looksLikeIncidentLog`, `negativeDocuments`, `skillDocuments`, `tierDocumentOf` | edges.ts, ledger-cache.ts, retrieve.ts (type-only), retrieve/interning.ts, skill-cache.ts, sqlite-index.ts (type-only), store/skill.ts, workspace.ts |
+| `src/retrieve/scene.ts` | 场景分类闭环：`sceneCache` 状态 + 它的读写者 + 提示/正则 + LLM 与词法两条分类路径。搬完使 `retrieve.ts` 的模块级可变状态归零。 | `LEGACY_SCENE_HINTS`, `SCENE_PROMPT`, `SCENE_TAG`, `SceneCacheEntry`, `SceneOptions`, `classifyScene`, `clearSceneCache`, `inferScene`, `sceneCache`, `sceneCacheStats` | extract.ts (type-only) |

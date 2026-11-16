@@ -96,7 +96,7 @@ const BASELINE = new Map([
   // 三处在 `git show HEAD:src/store.ts` 里逐字存在，只是换了文件 —— 也就是本清单的 D-4 / D-5。
   // **冻结的是身份，不是数字**：真正的判据是下面的 BASELINE_IDENTITIES 里那三条仍在，
   // 而不是"哪个文件背了它"。搬文件必然改文件名，把基线钉死在文件上会把每一步搬运都报成新债。
-  ['retrieve.ts', 5],
+  ['retrieve.ts', 4],
   ['store/layer.ts', 3],
   ['index.ts', 2],
   ['extract.ts', 1],
@@ -249,6 +249,13 @@ const BASELINE_IDENTITIES = new Map([
   // 搬完只是换了文件。若把身份钉死在文件名上，**每一次搬运都会报成引入新债**，
   // 而"搬文件"正是这个仓库当前唯一在做的事 —— 那样这条门禁会逼人每次都去改基线。
   // 记法：文件路径是**位置**，不是身份；身份是 code + message。
+  //
+  // ⚠️ 2026-11-16 第五步搬运（场景族 → `retrieve/scene.ts`）：同一手法再一次适用。
+  // `classifyScene` 里那个 `reasoningEffort` 不在 `LlmLike.stream` 参数类型里的缺陷，
+  // 随函数一起搬进了新文件；message 逐字未变，因此身份从 `retrieve.ts` 改名为
+  // `retrieve/scene.ts` —— **不是冻结一条新缺陷**，总数仍是 12。
+  // 该缺陷本身仍然开着（它是一条真 bug：`reasoningEffort` 被传给一个不声明它的参数类型），
+  // 按裁定不在搬运步骤里顺手改签名 —— 那会让这一步不再是纯位移。
   ["extract.ts\u00002353\u0000Object literal may only specify known properties, and 'domain' does not exist in type 'ExtractedExperience'.", 1],
   ["index.ts\u00002300\u0000Duplicate identifier 'EvidenceRef'.", 2],
   ["ledger-cache.ts\u00002339\u0000Property 'unref' does not exist on type 'number'.", 1],
@@ -256,7 +263,7 @@ const BASELINE_IDENTITIES = new Map([
   ["retrieve.ts\u00002339\u0000Property 'currentCommit' does not exist on type '{ threshold?: number; now?: number; scene?: string; workspace?: string; taskTerms?: ReadonlySet<string>; taskAlignment?: boolean; taskFixIntent?: boolean; }'.", 1],
   ["retrieve.ts\u00002339\u0000Property 'currentCommit' does not exist on type 'CandidateOptions'.", 1],
   ["retrieve.ts\u00002339\u0000Property 'updatedAt' does not exist on type 'MemoryHit'.", 1],
-  ["retrieve.ts\u00002353\u0000Object literal may only specify known properties, and 'reasoningEffort' does not exist in type '{ provider?: string; model?: string; system?: string; messages: { role: string; content: { type: \"text\"; text: string; }[]; }[]; maxTokens?: number; signal?: AbortSignal; }'.", 1],
+  ["retrieve/scene.ts\u00002353\u0000Object literal may only specify known properties, and 'reasoningEffort' does not exist in type '{ provider?: string; model?: string; system?: string; messages: { role: string; content: { type: \"text\"; text: string; }[]; }[]; maxTokens?: number; signal?: AbortSignal; }'.", 1],
   ["store/layer.ts\u00002345\u0000Argument of type 'ExtractedNegative' is not assignable to parameter of type 'NegativeRecord'.   Types of property 'evidence' are incompatible.     Type 'EvidenceRef[]' is not assignable to type 'number[]'.       Type 'EvidenceRef' is not assignable to type 'number'.", 1],
   ["store/layer.ts\u00002345\u0000Argument of type 'LayerRecord[]' is not assignable to parameter of type 'readonly Record<string, unknown>[]'.   Type 'LayerRecord' is not assignable to type 'Record<string, unknown>'.     Index signature for type 'string' is missing in type 'LayerRecord'.", 1],
   ["store/layer.ts\u00002353\u0000Object literal may only specify known properties, and 'timestamp' does not exist in type 'LayerRecord'.", 1],
