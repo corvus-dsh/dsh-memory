@@ -105,14 +105,19 @@ export type { SceneOptions } from './retrieve/scene.js'
 | `type-budget` | OK（2459 导入未导出：**0**；`retrieve.ts` 5 → **4**）|
 | `check-cycles` | nodes 37 / value edges 83 / **ACYCLIC**（0 条值环）|
 | `build` | 37 modules，重复 build 后 `lib/` 零差异 |
+| **导出面** | `lib/retrieve.js` **34 条**（与搬前逐条相同）|
+| **模块级可变绑定** | `retrieve.ts` = **0**（`v212 ①`）|
+| **CI（双 Node）** | 见提交后的 Actions（本轮由我在推送后自行轮询）|
 
 > **「全注释」是什么意思**：那 34 行是**整棵树相对父提交的净增非空行**，不是「搬过去的 128 行全是注释」——
 > 判据是**全树多重集**比较，搬走的代码行在新模块里逐字重现，两侧互相抵消，所以既不在 APPEARED 也不在
 > DISAPPEARED 里出现。净增的 34 行全部是**新写的说明文字**（主要是新模块的文件头注释），
 > 因此结论是：**这一步没有新增任何逻辑行，只新增了文档。**
-| **导出面** | `lib/retrieve.js` **34 条**（与搬前逐条相同）|
-| **模块级可变绑定** | `retrieve.ts` = **0**（`v212 ①`）|
-| **CI（双 Node）** | 见提交后的 Actions（本轮由我在推送后自行轮询）|
+>
+> 半句补充：那 3 行 `import { classifyScene, inferScene }` / 两行 `export …` **也在这一步新增了**，
+> 只是它们以 `import ` / `export ` 开头，被判据当成**搬移的管线**在分桶之前就剔除了 ——
+> 所以「34 行全是注释」不等于「这一步只改了注释」。**管线是必须的产物**（纯位移必然要加 import 与 re-export），
+> 但它是**新增行**，别把它读成「什么也没加」。
 
 ---
 

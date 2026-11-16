@@ -458,6 +458,29 @@ if (droppedIdentities.length > 0) {
   for (const key of droppedIdentities) console.log(`    GONE  ${describeIdentity(key)}`)
 }
 
+/**
+ * ── 四条 2339 的**当前位置**：打印，不手抄（裁定③）──────────────────────────────────────────────
+ *
+ * 文档里引这些缺陷时曾经写死行号（`retrieve.ts:190` / `:1420` / `:1614` / `:1903` / `:1927`），
+ * 六步搬运之后每一个都漂了 —— 而且漂得**很安静**：数字还在，只是指向了别的代码。
+ * 这类错误没有门禁会红（悬空引用判据只查「超出文件尾」，查不出「指错了行」）。
+ *
+ * 处置：定位一律用**符号名**（`renderHint` / `retrieveCandidates` / `classifyScene` …），
+ * 当前行号由这一节打印出来，文档引用它、不抄它。
+ *
+ * 放在 violations 之前：失败时也需要看到位置。
+ */
+const positions = codeDefects(report)
+  .filter((d) => d.code === 2339)
+  .sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line)
+if (positions.length > 0) {
+  console.log('\n── 2339 的当前位置（文档请引这一节的输出，不要手抄行号）──')
+  for (const d of positions) {
+    const short = d.message.length > 70 ? `${d.message.slice(0, 70)}…` : d.message
+    console.log(`  ${d.file}:${d.line}  ${short}`)
+  }
+}
+
 if (violations.length > 0) {
   console.error(`\nFAIL type budget on ${violations.length} touched file(s):`)
   for (const v of violations) console.error(`  ${v.file}: ${v.base} → ${v.now}  (${v.why})`)

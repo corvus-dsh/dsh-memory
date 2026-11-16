@@ -84,7 +84,7 @@ GRAFT_CLOSURE_SRC     ← 它只是被转发给 closure.mjs 的值。
 
 ### 是什么
 
-`hitOf()`（`retrieve.ts:1348-1376`）从内部 `Document` 复制 18 个字段到对外的 `MemoryHit`，
+`hitOf()` 从内部 `Document` 复制 18 个字段到对外的 `MemoryHit`，
 **唯独漏了 `ageDays`**。而 `renderHint()` 在 `:1927` 读 `negative.ageDays`。
 
 ### 性质：**未完成功能**（不是类型欠账）
@@ -94,10 +94,10 @@ GRAFT_CLOSURE_SRC     ← 它只是被转发给 closure.mjs 的值。
 > **不是**「`renderHint` 读不到 `ageDays`」——降权是生效的。
 > 而是：**降权生效、文案不生效。**
 
-依据（`retrieve.ts:1087-1097`，`negativeDocuments()` 构造 `Document` 时）：
+依据（`negativeDocuments()` 构造 `Document` 时）：
 
 ```ts
-ageDays: ageDaysOf(typeof record.at === 'string' ? record.at : undefined, now),   // :1087 算出来了
+ageDays: ageDaysOf(typeof record.at === 'string' ? record.at : undefined, now),   // negativeDocuments 里算出来了
 …
 importance:
   (1 + Math.min(0.5, 0.15 * Math.log(1 + Math.max(1, hits)))) *
@@ -108,7 +108,7 @@ importance:
 ```
 
 - `isStaleNegative` 在 **:1095 被直接调用、并且真的生效** —— 老的一次性负面记录**确实被降权到 0.5**；
-- `Document.ageDays` 也算出来了（`:1087`）；
+- `Document.ageDays` 也算出来了（`negativeDocuments()` 里）；
 - 缺的只是：**这个值没被搬到 `hit` 上**，于是 `renderHint` 那个**读者**拿到 `undefined`。
 
 所以：
@@ -162,7 +162,7 @@ importance:
 
 - `appendLayer()` 的入参类型（`store.ts:2093-2102`）**声明了 `domain?: string`**；
 - 且 `:2141` 真的把它写盘（`domain: /^[a-z]…/ ? … : 'general'`）；
-- **它有消费方**：`retrieve.ts:1157` 的 `layerDocumentOf`（经验/事实层读取器）写
+- **它有消费方**：`layerDocumentOf`（经验/事实层读取器）写
   `domain: String(record.domain ?? 'general')…`，进而进入候选的冲突轴与过滤器输入
   （`filter.ts:126` 的 `domain=${candidate.domain ?? 'general'}`）。
 

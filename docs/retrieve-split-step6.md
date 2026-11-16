@@ -78,10 +78,29 @@ export type { FilterOptions }
 
 ### 两个只有踩过才知道的形状
 
-**① `export type { X } from './retrieve/types.js'` 会与 `import type { X }` 撞名。**
-同一文件里既 `import type { Document }` 又 `export type { Document } from …` ⇒ tsc 报
-`2300 Duplicate identifier 'Document'`（实测 4 处）。裸形式 `export type { Document }` 转的是
-**本地绑定**，没有这个问题 —— 这也正是 v213 ③ 要断言「被转出的名字必须同时被 import」的原因。
+**① 撞名的原因是「同一个名字被转出两次」，不是「import 和 export 同时存在」。**
+
+第一版我把因果写反了（原文写「`from` 形式会与 `import type` 撞名」）。实测报错是
+`2300 Duplicate identifier 'Document'`，出现在**两行 export 上**（当时 L1051 与 L1061 各报一次）。
+真正的形状是：仓里原本已有一行裸形式 `export type { Document, DocumentCacheEntry }`，
+我又加了一行 from 形式 `export type { Document } from './retrieve/types.js'` —— **同名两次转出**。
+
+最小复现（两行各报一次 2300）：
+
+```ts
+// a.ts
+export type { X }                  // 裸形式：转的是本地绑定
+export type { X } from './m.js'    // from 形式：又从 m.js 转出一次
+```
+
+处置：12 个名字统一用**裸形式** `export type { X }`（转 `import type` 进来的本地绑定），
+并删掉那行旧的 `export type { Document, DocumentCacheEntry }`。
+
+`src/retrieve.ts` 里至今仍有一行 from 形式 —— **L1061 `export type { SceneOptions } from './retrieve/scene.js'`**
+（`scene.ts` 的导出面只有这一个类型，用 from 形式一步到位，不需要 local 绑定）。
+它没有撞名，因为它转出的 `SceneOptions` **没有**被裸形式再转一次。两种形式可以共存，
+判据是 v213：① 两种形式都算「转出」，③ 只对裸形式要求「必须被 import」，
+另外还断言 **from ∩ imported = ∅**（即不允许同名两次转出）。
 
 **② 仓里原本已经有一行 `export type { Document, DocumentCacheEntry }`。**
 它是当年为了让 `retrieve/interning.ts` 拿到这两个类型而加的（第二步/第三步时期）。
@@ -153,7 +172,7 @@ APPEARED   39 条 / 46 行
 
 ---
 
-## 六、六个数字（七步）
+## 六、六个数字（搬前 + 六步搬运，共七行）
 
 | 时点 | 分量 | 主干 | SCC | 层 | 四档 (D·C·B·A) | 声明·span 和 |
 |---|---|---|---|---|---|---|
@@ -194,8 +213,16 @@ node scripts/retrieve-report.mjs | tail -12
     没有任何一步「按层搬」能带走。
 ```
 
-**这一步跨过了 800。** 但注意结论的措辞：跨过 800 靠的是搬走**类型**（本来就不执行），
-所以「retrieve.ts 变成 800 以内」这件事的含金量，要低于它听起来的样子。
+**这一步没有跨过 800 —— 1074 仍 > 800。**
+
+第一版这里写的是「这一步跨过了 800」，那是把**下一步的算术**记到了本步头上。事实：
+
+- 本步之后 `retrieve.ts` = **1074**，离 800 还差 274；
+- 800 的**可达性**来自「再搬 L1+L2+L3」这一步算术：`1074 − 385 = 689`（L1 123 + L2 158 + L3 104）；
+- 再往下搬 L0（335）会到 **354** 的模块壳。
+
+也就是说：**本步做的是「把不执行的 242 行移走」，不是「把文件压到 800 以内」。**
+把两件事分开记，是因为它们的含金量完全不同 —— 前者只是让文件诚实地反映「哪些行会执行」。
 
 ### 为什么不搬 L0（裁定⑧的三条理由）
 

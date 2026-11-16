@@ -203,7 +203,7 @@ jobs:
             grep -E '^ℹ (tests|pass|fail|skipped) ' test-output.log \
               | sed -E 's/^ℹ ([a-z]+) +([0-9]+)$/| \1 | \2 |/' || true
             echo
-            echo '<details><summary>Skipped / RESOURCE — CI 不覆盖的就是这些（期望 13 条）</summary>'
+            echo '<details><summary>Skipped / RESOURCE — CI 不覆盖的就是这些（条数以 `ARCHITECTURE.md` 的 TD-M15 为准）</summary>'
             echo
             echo '```'
             grep -E '^(﹣|✖).*# |^# SKIP|RESOURCE' test-output.log || echo '(none)'

@@ -21,14 +21,15 @@
 | # | 位置 | message |
 |---|---|---|
 | 1 | `ledger-cache.ts:472` | `Property 'unref' does not exist on type 'number'` |
-| 2 | `retrieveCandidates` 读 `options.currentCommit`（`retrieve.ts:560`）| `Property 'currentCommit' does not exist on type 'CandidateOptions'` |
-| 3 | `retrieve` 读 `options.currentCommit`（`retrieve.ts:704`）| `Property 'currentCommit' does not exist on type '{ threshold?…}'` |
-| 4 | `renderHint` 读 `document.updatedAt`（`retrieve.ts:944`）| `Property 'updatedAt' does not exist on type 'MemoryHit'` |
-| 5 | `renderHint` 读 `negative.ageDays`（`retrieve.ts:968`）| `Property 'ageDays' does not exist on type 'MemoryHit'` |
+| 2 | `retrieveCandidates` 读 `options.currentCommit`（`retrieve.ts:565`）| `Property 'currentCommit' does not exist on type 'CandidateOptions'` |
+| 3 | `retrieve` 读 `options.currentCommit`（`retrieve.ts:709`）| `Property 'currentCommit' does not exist on type '{ threshold?…}'` |
+| 4 | `renderHint` 读 `document.updatedAt`（`retrieve.ts:949`）| `Property 'updatedAt' does not exist on type 'MemoryHit'` |
+| 5 | `renderHint` 读 `negative.ageDays`（`retrieve.ts:973`）| `Property 'ageDays' does not exist on type 'MemoryHit'` |
 
 > **记号说明（2026-11-16）**：本表原先只写行号（`:1420` / `:1614` / `:1903` / `:1927`），而 `retrieve.ts`
-> 每搬一步这些行号就集体漂移一次 —— 第五步之后它们分别是 **698 / 892 / 1181 / 1205**。
-> 现在一律以**声明名**定位，行号只在括号里给一次当前值（会漂移的是括号里的那个，不是符号）。
+> 每搬一步这些行号就集体漂移一次。现在一律以**声明名**定位；括号里的行号是**当前值**，
+> **由 `node scripts/type-budget.mjs` 的「2339 的当前位置」一节打印** —— 文档不自己算、也不该手抄，
+> 漂了就跑那条命令照抄。（第六步之后：`565` / `709` / `949` / `973`。）
 
 **把"某个 code 的计数"读成"某个 message 的计数"**，与本项目反复记过的「字段存在 ≠ 内容正确」同族。
 下面按这 5 条逐条追。
@@ -121,11 +122,15 @@ hitOf 复制的字段数: 18
 
 ```
 $ grep '\.validAt' src/*.ts
-retrieve.ts:119   validAt: row.validAt        ← 读的是 ledger row
-retrieve.ts:808   document.validAt            ← 读的是 Document
-retrieve.ts:924   validAt: validity.validAt   ← 构造
-retrieve.ts:1368  ...(document.validAt …)     ← hitOf 里**复制**进 hit
+retrieve.ts 读 ledger row    →  validAt: row.validAt        ← 读的是 ledger row（取数层已搬进 documents.ts）
+retrieve.ts 的 isActive      →  document.validAt            ← 读的是 Document
+documents.ts 构造 Document   →  validAt: validity.validAt   ← 构造
+retrieve.ts 的 hitOf         →  ...(document.validAt …)     ← hitOf 里**复制**进 hit
 ```
+
+> 上面四处一律用**符号名**定位，不给行号：`retrieve.ts` 六步搬运后从 2009 缩到 1074，
+> 这几个位置的旧行号（`:119` / `:808` / `:924` / `:1368`）有的已指向别的代码、有的直接超出文件尾。
+> 行号会漂，符号不会。`v214` 现在会拦住「落在文件尾之外」的引用。
 
 **没有任何一处从 hit 上读 `validAt`**，所以 TS 没有机会报错。
 它与 `updatedAt`、`ageDays` 是**同一个形状**（`hitOf` 复制 → 接口没声明），
@@ -143,7 +148,7 @@ retrieve.ts:1368  ...(document.validAt …)     ← hitOf 里**复制**进 hit
 
 - `Document`（内部记录）声明并算出 `ageDays`；
 - `hitOf()` **没有**把它复制进 `MemoryHit`（它的返回对象里没有 ageDays 那一行）；
-- `renderHint()` 读 `negative.ageDays`（`retrieve.ts:968`）→ 永远是 `undefined`；
+- `renderHint()` 读 `negative.ageDays`（`retrieve.ts:973`）→ 永远是 `undefined`；
 - `isStaleNegative()` 里 `Number(undefined ?? 0)` = 0 ⇒ `0 <= 30` ⇒ **永不 stale**；
 - 于是 v0.21 的 `[历史偶发错误，仅供参考]` 前缀**在生产里永远不会出现**。
 
@@ -454,9 +459,9 @@ applyInner: 22 declaration(s), 2062 lines
 | code | 位置 | 定性 | 修法行数 | 运行时有影响吗 |
 |---|---|---|---|---|
 | 2339 | `ledger-cache.ts:472` | **环境产物**（缺 `@types/node`，DOM 的 `setInterval` 返回 `number`） | 0（装 @types/node 自消） | 无（`unref?.()` 有 fallback，且 Node 真有 unref） |
-| 2339 | `retrieveCandidates` / `retrieve` 读 `options.currentCommit`（`retrieve.ts:560` / `:704`）| 类型欠账（`currentCommit` 两处未声明） | **2** | 无 |
-| 2339 | `renderHint` 读 `document.updatedAt`（`retrieve.ts:944`）| 类型欠账（`hitOf` 已复制 `updatedAt`，接口没声明） | **1** | 无 |
-| 2339 | `renderHint` 读 `negative.ageDays`（`retrieve.ts:968`）| **代码欠账（真行为缺陷）**：`hitOf` 不复制 `ageDays` ⇒ 过期前缀永不出现 | **2**（1 行复制 + 1 行接口） | **有，已实测** |
+| 2339 | `retrieveCandidates` / `retrieve` 读 `options.currentCommit`（`retrieve.ts:565` / `:709`）| 类型欠账（`currentCommit` 两处未声明） | **2** | 无 |
+| 2339 | `renderHint` 读 `document.updatedAt`（`retrieve.ts:949`）| 类型欠账（`hitOf` 已复制 `updatedAt`，接口没声明） | **1** | 无 |
+| 2339 | `renderHint` 读 `negative.ageDays`（`retrieve.ts:973`）| **代码欠账（真行为缺陷）**：`hitOf` 不复制 `ageDays` ⇒ 过期前缀永不出现 | **2**（1 行复制 + 1 行接口） | **有，已实测** |
 | 2300 | `index.ts:21,65` | 合并遗留（同文件重复 type import） | **2** | 无 |
 | 2353 | `extract.ts:474` | 类型欠账（`appendLayer` 已持久化 `domain`） | **1** | 无（数据已写盘） |
 | 2353 | `classifyScene` 的 `reasoningEffort`（`retrieve/scene.ts:94`）| 类型欠账（宿主认该字段；filter 用展开绕过了检查） | **1** | 无 |
@@ -478,7 +483,7 @@ applyInner: 22 declaration(s), 2062 lines
 
 | 项 | 状态 |
 |---|---|
-| `ExtractedExperience.domain` 是否**真的**被下游消费 | **已核：有消费方。** `retrieve.ts:1157` 的 `layerDocumentOf`（经验/事实层读取器）写 `domain: String(record.domain ?? 'general')…`，它进而进入候选的冲突轴与过滤器输入（`filter.ts:126` 的 `domain=${candidate.domain ?? 'general'}`）。所以是**类型欠账**，不是多余字段。 |
+| `ExtractedExperience.domain` 是否**真的**被下游消费 | **已核：有消费方。** `layerDocumentOf`（经验/事实层读取器）写 `domain: String(record.domain ?? 'general')…`，它进而进入候选的冲突轴与过滤器输入（`filter.ts:126` 的 `domain=${candidate.domain ?? 'general'}`）。所以是**类型欠账**，不是多余字段。 |
 | `reasoningEffort` 在宿主侧的具体语义 | 只有 `filter.ts` 的实测报错作为证据；**没读宿主 adapter 源码** |
 | `ageDays` 修复后的行为变化 | **已实测（副本里改完重建再跑）。** 同一条 100 天前、hits=1 的 negative：<br>修复前 `ageDays: "undefined"` → hint 无过期前缀（`hasStalePrefix: false`）<br>修复后 `ageDays: 100.000…` → hint 变成 `…（记忆提示：[历史偶发错误，仅供参考] 另有一次「连接超时」翻车，先核对再重跑。）`（`hasStalePrefix: true`）<br>**这就是那 2 行（1 行复制 + 1 行声明）换来的一处真实行为变化。** |
 | `types.ts` 拆分对 `lib/retrieve.js` 公开面的影响 | **已核（补做了构建）。** 副本里真的跑 `scripts/build.mjs`：构建 OK；`lib/retrieve.js` 运行时导出数 **拆分前 34 → 拆分后 34**，名字集合逐个比对一致（`retrieve` / `renderHint` / `retrieveCandidates` 等全在）。类型被擦除，所以 `re-export` 在产物里没有痕迹是正常的。 |

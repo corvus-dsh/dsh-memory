@@ -265,7 +265,7 @@ artifact = loose.filter(d => !isEnvironment(d) && !strictKeys.has(`${d.code}|${d
 | code | 位置 | loose 措辞 | strict 措辞 |
 |---|---|---|---|
 | 2353 | `classifyScene` 的 `reasoningEffort`（现 `retrieve/scene.ts:94`）| `… '{ provider?: string; model?: … }'` | `… '{ provider?: string \| undefined; … }'` |
-| 2339 | `retrieve` 读 `options.currentCommit`（现 `retrieve.ts:704`）| `… '{ threshold?: number; now?: number; … }'` | `… '{ threshold?: number \| undefined; … }'` |
+| 2339 | `retrieve` 读 `options.currentCommit`（现 `retrieve.ts:709`）| `… '{ threshold?: number; now?: number; … }'` | `… '{ threshold?: number \| undefined; … }'` |
 
 两条在 strict 里**同文件、同行、同 code 都存在** —— 所以它们不是 ARTIFACT。
 
