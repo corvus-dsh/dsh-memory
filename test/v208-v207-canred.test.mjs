@@ -178,9 +178,6 @@ test('v208 can-red：v207 的四组注入都必须变红（在仓内临时副本
     const baseline = runV207In(root)
     const b = counts(baseline.out)
     assert.equal(baseline.code, 0, `副本里基线必须绿，实测 exit ${baseline.code}\n${baseline.out.slice(-800)}`)
-    assert.equal(b.skipped, 0,
-      'v207 必须真的执行（skipped=0）。skipped>0 时「注入不红」不能说明门禁宽 —— '
-      + '只说明测试没跑。副本放在仓内才有编译器可用。')
     /**
      * ── 只保留一条断言：`pass + skipped === 7` ──────────────────────────────────────────────────
      *
@@ -205,6 +202,16 @@ test('v208 can-red：v207 的四组注入都必须变红（在仓内临时副本
      *    根本走不到这里。换句话说：CI 没有 typescript 时，v208 是**一条明确的 skip**，
      *    不是「跑过了」也不是「失败」。这一点与裁定③的处置配套（见 README 与
      *    ARCHITECTURE.md 的「CI 不覆盖」说明）。
+     *
+     * ── 又删掉了一条（2026-11-16，用户裁定）──────────────────────────────────────────────────────
+     *
+     * 这里原先还有第三条：`assert.equal(b.skipped, 0, 'v207 必须真的执行…')`。
+     * 它与 (a) 的组合是**要求 pass 恰好 7、skip 恰好 0** —— 那在浅克隆下直接红
+     * （`①b` 会 RESOURCE skip），于是同一个「CI 不覆盖」的事实被表达了两遍。
+     *
+     * 现在只留 (a)：它容得下 `pass=6 / skipped=1`（浅克隆）与 `pass=7 / skipped=0`（完整克隆），
+     * 而「少了一条测试」仍然会红。跳过的具体原因由 `①b` 自己的 RESOURCE reason 打印，
+     * 不需要在这里再断言一次。
      */
     const totalRun = b.pass + b.skipped
     assert.equal(totalRun, 7, `v207 应有 7 条（含 skip），实测 pass=${b.pass} skipped=${b.skipped}`)

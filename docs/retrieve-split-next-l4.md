@@ -64,7 +64,12 @@
 |---|---|
 | `ERROR_IDENTIFIER` | `allowsTask` |
 | `STOPWORDS` | `extractTaskTerms`、`allowsTask`、`scoreDocuments` |
-| `contentOf` | `isPoisoned`、`Document`（类型层）|
+| `contentOf` | `isPoisoned`（**唯一的值引用者**）|
+
+> **订正（2026-11-16）**：这一格原先写「`isPoisoned`、`Document`（类型层）」。
+> 实测 `contentOf` 在 `retrieve.ts` 里只有**一个**值引用：`isPoisoned` 的
+> `scanThreat(contentOf(document))`（L529）。`Document` 那处是 L249 一行**注释**里的文字提及，
+> 不是引用 —— 把注释里的字样算成引用，会让「段外引用」这个数字虚高。
 | `layerDocuments` | `memoryDocumentsFor`、`collectAllDocuments` |
 | `looksLikeIncidentLog` | `allowsTask` |
 | `negativeDocuments` | `memoryDocumentsFor`、`collectAllDocuments` |

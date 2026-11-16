@@ -757,8 +757,19 @@ resetMonotonicClockForTest(0);  monotonicTimestamp(1000)  ===  1970-01-01T00:00:
 
 #### `verify-pure-move` 的红：**已解释**（不是"纯搬运就该绿"）
 
+> **注意（2026-11-16）**：下面这段是**当时（第三次搬运）的输出记录**，不是可以照抄的命令。
+> 它当时用的是 `--against HEAD`，而在搬运完成后那条命令会变成 VACUOUS（exit 2）——
+> 因为两边是同一棵树。正确的形式是 `--against <父提交的 sha> --classify`，并把树退到该步提交。
+>
+> **记录**保留原样（输出与内容行数未改），但**那一行命令本身已移出代码块** ——
+> 它原来是一行以 `$ node` 开头的可执行文本，读者会照抄。
+> 移出不是篡改历史：它跑出这些数字这件事，由下面的 `ref = HEAD` 与内容行数说明；
+> 而**一条会把人引向 exit 2 的命令，不该继续以可执行形态留在文档里**。
+> 机械判据是 `test/v211-no-against-head-in-docs.test.mjs`（它只抓代码块里的可执行行与表格行，
+> 这段现在两处都不是）。
+
 ```
-$ node scripts/verify-pure-move.mjs --against HEAD
+[当时的输出，ref = HEAD，内容行 13034]
 ref   : 13034 内容行
 tree  : 13055 内容行   （差 +21）
 DISAPPEARED 0 条 / 0 行

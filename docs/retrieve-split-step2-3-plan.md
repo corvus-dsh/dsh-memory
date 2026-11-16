@@ -125,7 +125,15 @@
 |---|---|
 | 三项前置分析 | 簇内闭包 ⊆ N、对簇外依赖（**含 import 进来的符号**）、段外引用 |
 | `npm test` | 全绿 / skipped 0 |
-| `verify-pure-move --against HEAD` | 消失 0 行；新增 = 注释 + 管线，**逻辑必须 0** |
+| `verify-pure-move --against <该步的父提交> --classify` | 消失 0 行；新增 = 注释 + 管线，**逻辑必须 0** |
+
+> **订正（2026-11-16）**：上一行原先写 `--against HEAD`。那是错的，两个原因：
+> ① 搬运完成后 HEAD 已含改动 ⇒ 两边同一棵树 ⇒ **VACUOUS**（exit 2），既不是绿也不是红；
+> ② 不带 `--classify` 时主路径对「新增注释」是红的（它比内容行多重集，而每步搬运都会写头注释）。
+>
+> 正确形式必须**带父提交 + `--classify`**，且**树要退到该步提交**（worktree 检出 + 复制当前脚本）。
+> 这条错在 step1/step2/step3/step4 各犯一次，现在是第四次之后 ——
+> 机械判据见 `test/v211-no-against-head-in-docs.test.mjs`（含表格行的 can-red ⑤）。
 | `check-cycles` | ACYCLIC |
 | `type-budget` | OK（这条抓类型层断链，测试看不见） |
 | `v205` 尺寸门禁 | 新文件必须登记，且 ≤ 800 |

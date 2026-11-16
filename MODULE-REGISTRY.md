@@ -13,12 +13,12 @@
 - 第五个方向：`test/module-registry.test.mjs` 的 `ROW` 正则必须能**读进来**每一个真实文件名 ——
   一个读不进表的文件名，等于一个不受监管的文件名（下划线、子目录斜杠各踩过一次）。
 
-### 覆盖边界：本表的守护在 CI 上**完整生效**，但有 10 条门禁不在 CI 覆盖内
+### 覆盖边界：本表的守护在 CI 上**完整生效**，但有 11 条门禁不在 CI 覆盖内
 
 本表自身的 6 条断言（双向一致性、职责列非空、依赖列指向真实模块、无值环、type-only 标签为真）
 只用 `fs` + 正则，**CI 上真跑**。
 
-但仓里另有三个测试文件依赖 TypeScript 编译器（`scripts/closure.mjs`），而本包 `package.json`
+但仓里另有**四个**测试文件依赖 TypeScript 编译器（`scripts/closure.mjs`），而本包 `package.json`
 依赖为空、CI 不装 typescript ⇒ 它们在 CI 上整片 skip：
 
 | 文件 | 条数 | CI |
@@ -26,9 +26,10 @@
 | `test/v201-closure-label-consistency.test.mjs` | 2 | **skip** |
 | `test/v207-retrieve-six-numbers.test.mjs` | 7 | **skip** |
 | `test/v208-v207-canred.test.mjs` | 1 | **skip** |
+| `test/v210-classify-buckets.test.mjs` | 1 | **skip**（整文件；它内部有 3 条纯函数，本可在 CI 跑，但 `compilerAvailable()` 为假时整条测试提前 skip）|
 
-合计 **10 条**。判据、理由与「为什么不预生成快照」写在 `ARCHITECTURE.md` 的 **TD-M15**。
-一句话：**看到 CI 绿，不能推断这 10 条过了。**
+合计 **11 条**。判据、理由与「为什么不预生成快照」写在 `ARCHITECTURE.md` 的 **TD-M15**。
+一句话：**看到 CI 绿，不能推断这 11 条过了。**
 
 ## 现状分布（实测，非估计）
 
