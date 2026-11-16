@@ -61,8 +61,6 @@ const declarationsOf = () => {
   return rows.filter((row) => row.file === TARGET)
 }
 
-const MUTABLE_KINDS = new Set(['reassigned', 'const-mutated', 'let/var', 'var', 'reassigned-and-mutated'])
-
 test('v212 ①: retrieve.ts 的模块级可变绑定 = 0', (t) => {
   let rows
   try {

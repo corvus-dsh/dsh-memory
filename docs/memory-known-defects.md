@@ -183,7 +183,11 @@ importance:
 
 ### 是什么
 
-`retrieve.ts:190` 直写 `reasoningEffort: 'off'`，但 `LlmLike.stream` 的选项类型（`extract.ts:609-618`）没有该字段 ⇒ `[2353]`。
+`classifyScene` 里直写 `reasoningEffort: 'off'`，但 `LlmLike.stream` 的选项类型（`extract.ts:609-618`）没有该字段 ⇒ `[2353]`。
+
+> 记号说明：本节原用行号定位（曾写 `retrieve.ts:190`）。行号随每次搬运漂移 ——
+> 第五步把这段代码搬进 `retrieve/scene.ts` 后它变成 **`retrieve/scene.ts:94`**。
+> 所以下面的定位一律优先用**符号名**，行号只在括号里给一次当前值。
 
 ### 性质：**类型欠账**
 

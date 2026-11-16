@@ -188,3 +188,42 @@ test('every type-only edge is REALLY type-only in the source (the label cannot l
     }
   }
 })
+
+/**
+ * ── 分布数字：**打印**，但不在文档里冻结 ────────────────────────────────────────────────────────
+ *
+ * MODULE-REGISTRY.md 曾有一节「现状分布（实测，非估计）」，里面写着「36 个模块 / 14,722 行 /
+ * 3 个超 800 / 最大 index.ts」。五次搬运里它过时了四次，最后一次是 retrieve 拆分的第五步
+ * （新模块进表了，那一节的「36」没跟着变成 37）。
+ *
+ * 这不是笔误问题，是**形状问题**：文档里写死的实测数字没有任何门禁会因为过时而红 ——
+ * 而「实测」两个字恰恰是它最像证据、最该被信任的地方。
+ *
+ * 处置：数字由这条测试**打印**（`t.diagnostic`，跑测试就能看到当前值），文档只留命令。
+ * 断言部分只查一件事：这些数字与表**自洽**（磁盘模块数 == 表行数），
+ * 真正的一致性由上面那六条负责，这里不重复。
+ */
+test('distribution: 模块数 / 总行数 / 超 800 / 最大文件（打印给文档引用，不在文档里冻结）', (t) => {
+  const files = modulesOnDisk()
+  const sizes = files.map((rel) => {
+    const parts = readFileSync(join(ROOT, rel), 'utf8').replace(/\r\n/gu, '\n').split('\n')
+    return { rel, lines: parts[parts.length - 1] === '' ? parts.length - 1 : parts.length }
+  })
+  const total = sizes.reduce((s, x) => s + x.lines, 0)
+  const over = sizes.filter((x) => x.lines > 800).sort((a, b) => b.lines - a.lines)
+  const max = sizes.reduce((a, b) => (b.lines > a.lines ? b : a))
+  const byDir = new Map()
+  for (const { rel } of sizes) {
+    const dir = rel.split('/').length > 2 ? rel.split('/')[1] : '(扁平 src/)'
+    byDir.set(dir, (byDir.get(dir) ?? 0) + 1)
+  }
+  const layout = [...byDir.entries()].map(([d, n]) => `${d} ${n}`).join(' + ')
+
+  t.diagnostic(`模块数 ${files.length}（${layout}）`)
+  t.diagnostic(`总行数 ${total}`)
+  t.diagnostic(`> 800 行 ${over.length} 个（${over.map((x) => `${x.rel} ${x.lines}`).join('、') || '无'}）`)
+  t.diagnostic(`最大文件 ${max.rel} ${max.lines} 行（占 ${(max.lines / total * 100).toFixed(1)}%）`)
+
+  assert.equal(files.length, readRows().length,
+    '磁盘上的模块数与登记表的行数不一致 —— 双向一致性由上面那两条负责，这里只做一次交叉核对')
+})

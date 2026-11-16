@@ -189,6 +189,45 @@ const TIER_OF = (n) => (n >= 100 ? 'D' : n >= 40 ? 'C' : n >= 12 ? 'B' : 'A')
 const tiers = { D: { n: 0, lines: 0 }, C: { n: 0, lines: 0 }, B: { n: 0, lines: 0 }, A: { n: 0, lines: 0 } }
 for (const d of decls) { const k = TIER_OF(d.lines); tiers[k].n += 1; tiers[k].lines += d.lines }
 
+const layerDetail = [...layers.entries()].sort((a, b) => a[0] - b[0]).map(([l, names]) => ({
+  layer: l,
+  declarations: names.length,
+  lines: names.reduce((s, n) => s + byName.get(n).lines, 0),
+  members: names.slice().sort(),
+}))
+
+/**
+ * ── 层账：整层搬完之后，文件还剩多少行 ────────────────────────────────────────────────────────────
+ *
+ * 这个数**必须由脚本算**，不能写进文档：文档里的「还剩 950 行」「最后剩 ~354 行」两版都是手算的，
+ * 每一版都跟着上一次搬运过时一次。第一次错在用了 1419 的基数、第二次错在把「声明 span 之和」
+ * 当成「文件净减」（实测差 30 行注释与空行）。
+ *
+ * 这里算三行，全部从**同一次测量**里来：
+ *   ① 当前文件行数                     （磁盘上的真实行数）
+ *   ② 搬完除 L0 以外的所有层之后        （文件行数 − 那些层的 span 之和）
+ *   ③ 再搬完 L0 之后                    （文件行数 − 全部 span 之和）= 模块壳
+ *
+ * ③ 之所以不是 0：剩下的 import / re-export / 文件头注释 / 空行都不是声明，
+ * 没有任何一步「按层搬」能把它们带走。
+ */
+const fileLines = (() => {
+  const parts = text.replace(/\r\n/gu, '\n').split('\n')
+  return parts[parts.length - 1] === '' ? parts.length - 1 : parts.length
+})()
+const spanSum = decls.reduce((s, d) => s + d.lines, 0)
+const upperLayers = layerDetail.filter((l) => l.layer >= 1)
+const upperLines = upperLayers.reduce((s, l) => s + l.lines, 0)
+const l0 = layerDetail.find((l) => l.layer === 0)
+const layerAccount = {
+  fileLines,
+  upperLayers: upperLayers.map((l) => `L${l.layer}`).join('+'),
+  upperLines,
+  afterUpperLayers: fileLines - upperLines,
+  l0Lines: l0 === undefined ? 0 : l0.lines,
+  afterL0: fileLines - spanSum,
+}
+
 const report = {
   file: FILE,
   spanSource: 'closure.mjs --declarations (compiler getStart/getEnd)',
@@ -199,18 +238,14 @@ const report = {
   layers: layers.size,
   tiers,
   declarations: decls.length,
-  spanSum: decls.reduce((s, d) => s + d.lines, 0),
+  spanSum,
+  layerAccount,
   componentDetail: components.map((c) => ({
     declarations: c.members.length,
     lines: c.lines,
     members: c.members.map((m) => m.name).sort(),
   })),
-  layerDetail: [...layers.entries()].sort((a, b) => a[0] - b[0]).map(([l, names]) => ({
-    layer: l,
-    declarations: names.length,
-    lines: names.reduce((s, n) => s + byName.get(n).lines, 0),
-    members: names.slice().sort(),
-  })),
+  layerDetail,
 }
 
 if (AS_JSON) {
@@ -237,3 +272,14 @@ console.log('── 拓扑层 ──')
 for (const l of report.layerDetail) {
   console.log(`  L${l.layer}  ${String(l.lines).padStart(4)} 行 / ${String(l.declarations).padStart(2)} 声明`)
 }
+
+console.log('')
+console.log('── 层账（整层搬完之后，这个文件还剩多少行）──')
+const la = report.layerAccount
+console.log(`  当前文件                                   ${String(la.fileLines).padStart(4)} 行`)
+console.log(`  搬完 ${la.upperLayers}（${la.upperLines} 行）${' '.repeat(Math.max(0, 18 - la.upperLayers.length))}${String(la.afterUpperLayers).padStart(4)} 行${la.afterUpperLayers > 800 ? '   ← 仍 > 800' : '   ← 已 ≤ 800'}`)
+console.log(`  再搬完 L0（${la.l0Lines} 行）${' '.repeat(Math.max(0, 18 - String(la.l0Lines).length))}${String(la.afterL0).padStart(4)} 行   ← 模块壳`)
+console.log('')
+console.log('  ⇒ 跨过 800 只能靠「动 L0」。搬完 L0 之后剩下的那一截是 import / re-export /')
+console.log('    文件头注释 / 空行 —— 它们不是声明，没有任何一步「按层搬」能带走。')
+console.log('    「下一步搬哪层」这个问法到不了 800，那是「要不要把本文件变成纯壳」的决定。')

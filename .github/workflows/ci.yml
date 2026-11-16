@@ -176,7 +176,44 @@ jobs:
         run: node --check lib/index.js
 
       - name: Test
-        run: npm test
+        # ── WHY THE SKIP LINES GO INTO THE JOB SUMMARY ──────────────────────────────────────
+        #
+        # 13 tests in this repo CANNOT run on CI: four files need the TypeScript compiler API
+        # (`scripts/closure.mjs`) and this package declares no dependencies, so `npm install`
+        # installs nothing; one more test needs a git history that a shallow clone does not have.
+        # They are enumerated in `ARCHITECTURE.md` TD-M15 and `MODULE-REGISTRY.md`.
+        #
+        # So a green Test step proves **484 of 497**, not all of them. Until now, finding out
+        # WHICH ones were skipped meant downloading the raw job log — which made the boundary
+        # easy to forget and easy to misreport as "everything ran". Printing the skip lines into
+        # `$GITHUB_STEP_SUMMARY` puts the boundary on the run's landing page, next to the green
+        # checkmark it qualifies.
+        #
+        # The step still fails exactly when `npm test` fails: the exit status is captured,
+        # the summary is written either way, and the status is re-raised at the end.
+        run: |
+          set -o pipefail
+          status=0
+          npm test 2>&1 | tee test-output.log || status=$?
+          {
+            echo '### Test suite'
+            echo
+            echo '| metric | count |'
+            echo '|---|---|'
+            grep -E '^ℹ (tests|pass|fail|skipped) ' test-output.log \
+              | sed -E 's/^ℹ ([a-z]+) +([0-9]+)$/| \1 | \2 |/' || true
+            echo
+            echo '<details><summary>Skipped / RESOURCE — CI 不覆盖的就是这些（期望 13 条）</summary>'
+            echo
+            echo '```'
+            grep -E '^(﹣|✖).*# |^# SKIP|RESOURCE' test-output.log || echo '(none)'
+            echo '```'
+            echo
+            echo '判据、理由与「CI 到底覆盖了什么」见 `ARCHITECTURE.md` 的 **TD-M15**。'
+            echo '**CI 绿 ≠ 这 13 条过了。**'
+            echo '</details>'
+          } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+          exit $status
 
       - name: Concurrency test (spawns 8 real processes — run SEPARATELY, and it is NOT skipped)
         # ── WHY THIS IS ITS OWN STEP, AND WHY THAT IS NOT A SKIP ────────────────────────────────────

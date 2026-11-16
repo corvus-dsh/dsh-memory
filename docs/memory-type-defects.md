@@ -21,10 +21,14 @@
 | # | 位置 | message |
 |---|---|---|
 | 1 | `ledger-cache.ts:472` | `Property 'unref' does not exist on type 'number'` |
-| 2 | `retrieve.ts:1420` | `Property 'currentCommit' does not exist on type 'CandidateOptions'` |
-| 3 | `retrieve.ts:1614` | `Property 'currentCommit' does not exist on type '{ threshold?…}'` |
-| 4 | `retrieve.ts:1903` | `Property 'updatedAt' does not exist on type 'MemoryHit'` |
-| 5 | `retrieve.ts:1927` | `Property 'ageDays' does not exist on type 'MemoryHit'` |
+| 2 | `retrieveCandidates` 读 `options.currentCommit`（`retrieve.ts:698`）| `Property 'currentCommit' does not exist on type 'CandidateOptions'` |
+| 3 | `retrieve` 读 `options.currentCommit`（`retrieve.ts:892`）| `Property 'currentCommit' does not exist on type '{ threshold?…}'` |
+| 4 | `renderHint` 读 `document.updatedAt`（`retrieve.ts:1181`）| `Property 'updatedAt' does not exist on type 'MemoryHit'` |
+| 5 | `renderHint` 读 `negative.ageDays`（`retrieve.ts:1205`）| `Property 'ageDays' does not exist on type 'MemoryHit'` |
+
+> **记号说明（2026-11-16）**：本表原先只写行号（`:1420` / `:1614` / `:1903` / `:1927`），而 `retrieve.ts`
+> 每搬一步这些行号就集体漂移一次 —— 第五步之后它们分别是 **698 / 892 / 1181 / 1205**。
+> 现在一律以**声明名**定位，行号只在括号里给一次当前值（会漂移的是括号里的那个，不是符号）。
 
 **把"某个 code 的计数"读成"某个 message 的计数"**，与本项目反复记过的「字段存在 ≠ 内容正确」同族。
 下面按这 5 条逐条追。
@@ -75,19 +79,19 @@ flushTimer.unref?.()          // ← 2339 在这里
 
 ## 二、另外 4 条 2339：2 条类型欠账 + **1 条真行为缺陷**
 
-### ① `retrieve.ts:1420` + `:1614` — 「`currentCommit` 两边都没声明」（类型欠账，2 行）
+### ① `retrieveCandidates` + `retrieve` 读 `options.currentCommit` — 「两边都没声明」（类型欠账，2 行）
 
-- `retrieveCandidates(…, options.currentCommit)` 传给 `scoreDocuments` 的 `currentCommitOverride`（`retrieve.ts:1214`）；
-- 但 `CandidateOptions`（`retrieve.ts:1378-1391`）没有该字段；
-- `retrieve()` 的**内联 options 类型**（`:1584-1595`）也没有。
+- `retrieveCandidates(…, options.currentCommit)` 传给 `scoreDocuments` 的 `currentCommitOverride`；
+- 但 `CandidateOptions` 接口（`retrieve.ts:656`）没有该字段；
+- `retrieve()` 的**内联 options 类型**也没有。
 
 同一个缺字段出现在**两个声明处**，所以要改 2 行（各加 `currentCommit?: string`）。
 **是类型欠账**：调用方一直在用，`scoreDocuments` 一直收 —— 只有"声明"缺。
 （这与 observer 的 2353 `inheritFrom` 完全同型。）
 
-### ② `retrieve.ts:1903` — `updatedAt`（类型欠账，1 行）
+### ② `renderHint` 读 `document.updatedAt` — `updatedAt`（类型欠账，1 行）
 
-`MemoryHit`（`retrieve.ts:262-302`）没有 `updatedAt`，但 `hitOf()` 在**同文件** `:1361` 明确复制了它：
+`MemoryHit`（`retrieve.ts:71`）没有 `updatedAt`，但 `hitOf()` 在**同文件**明确复制了它：
 
 ```ts
 ...(document.updatedAt === undefined ? {} : { updatedAt: document.updatedAt }),
@@ -133,13 +137,13 @@ retrieve.ts:1368  ...(document.validAt …)     ← hitOf 里**复制**进 hit
 真要修，把 `MemoryHit` 里缺的（`updatedAt` / `ageDays` / `validAt`）**一次补齐**，
 比按报错逐条打补丁更稳 —— 否则下一个读者出现时又是一条新 2339。
 
-### ③ `retrieve.ts:1927` — `ageDays`：**代码欠账（真行为缺陷，不是类型欠账）**
+### ③ `renderHint` 读 `negative.ageDays` — `ageDays`：**代码欠账（真行为缺陷，不是类型欠账）**
 
 这是本次追查里唯一一条**运行时行为错了**的。
 
-- `Document`（内部记录）有 `ageDays`，由 `:944 ageDays: usedDays` 计算并写入；
-- `hitOf()` **没有**把它复制进 `MemoryHit`（`:1348-1376` 里没有 ageDays 那一行）；
-- `renderHint()` 在 `:1927` 读 `negative.ageDays` → 永远是 `undefined`；
+- `Document`（内部记录）声明并算出 `ageDays`；
+- `hitOf()` **没有**把它复制进 `MemoryHit`（它的返回对象里没有 ageDays 那一行）；
+- `renderHint()` 读 `negative.ageDays`（`retrieve.ts:1205`）→ 永远是 `undefined`；
 - `isStaleNegative()` 里 `Number(undefined ?? 0)` = 0 ⇒ `0 <= 30` ⇒ **永不 stale**；
 - 于是 v0.21 的 `[历史偶发错误，仅供参考]` 前缀**在生产里永远不会出现**。
 
@@ -212,7 +216,7 @@ $ node _scratch/memory-dup2300-probe.mjs
 | code | 位置 | 具体字段 | 定性 | 修法 |
 |---|---|---|---|---|
 | 2353 | `extract.ts:474` | `domain` → `ExtractedExperience` | **类型欠账** | 1 行 |
-| 2353 | `retrieve.ts:190` | `reasoningEffort` → `LlmLike.stream` 选项 | **类型欠账** | 1 行 |
+| 2353 | `classifyScene` 的 `reasoningEffort`（`retrieve/scene.ts:94`）| `reasoningEffort` → `LlmLike.stream` 选项 | **类型欠账** | 1 行 |
 | 2353 | `store.ts:2148` | `timestamp` → `LayerRecord` | **类型欠账** | 1 行 |
 | 2345 | `store.ts:1615` | `ExtractedNegative.evidence` → `NegativeRecord.evidence` | **类型欠账** | 2 行 |
 | 2345 | `store.ts:2215` | `LayerRecord[]` → `Record<string,unknown>[]` | **纯结构可赋值性** | 1 行 |
@@ -229,7 +233,7 @@ $ node _scratch/memory-dup2300-probe.mjs
 **运行时无数据丢失**（对象字面量照样带着 `domain` 进 `appendLayer`），只是类型上不合法。
 → 类型欠账，**加 `domain?: MemoryDomain` 一行**。删字段才是真丢数据。
 
-### ② `retrieve.ts:190` `reasoningEffort` — 宿主**确实认这个字段**
+### ② `classifyScene` 的 `reasoningEffort`（`retrieve/scene.ts:94`）— 宿主**确实认这个字段**
 
 - `LlmLike.stream` 的选项类型（`extract.ts:609-618`）没有该字段；
 - `filter.ts` 却明确用它，并**记了实测**（`:174-186`）：
@@ -240,7 +244,7 @@ $ node _scratch/memory-dup2300-probe.mjs
   能收到"不支持 reasoning effort"这种报错，说明**字段真的传到了宿主**。
 
 - **为什么只报 retrieve 不报 filter**：`filter.ts:192` 用展开写 `...(x === undefined ? {} : { reasoningEffort })`，
-  对象展开**绕过 excess property check**；`retrieve.ts:190` 是字面量直写，于是被查出来。
+  对象展开**绕过 excess property check**；`classifyScene` 里（`retrieve/scene.ts:94`，原在 `retrieve.ts`）是字面量直写，于是被查出来。
 
   > 这一条本身值得记：**展开语法是一个类型检查的盲点**，同一个非法字段用展开写就"合法"了。
 
@@ -450,12 +454,12 @@ applyInner: 22 declaration(s), 2062 lines
 | code | 位置 | 定性 | 修法行数 | 运行时有影响吗 |
 |---|---|---|---|---|
 | 2339 | `ledger-cache.ts:472` | **环境产物**（缺 `@types/node`，DOM 的 `setInterval` 返回 `number`） | 0（装 @types/node 自消） | 无（`unref?.()` 有 fallback，且 Node 真有 unref） |
-| 2339 | `retrieve.ts:1420` / `:1614` | 类型欠账（`currentCommit` 两处未声明） | **2** | 无 |
-| 2339 | `retrieve.ts:1903` | 类型欠账（`hitOf` 已复制 `updatedAt`，接口没声明） | **1** | 无 |
-| 2339 | `retrieve.ts:1927` | **代码欠账（真行为缺陷）**：`hitOf` 不复制 `ageDays` ⇒ 过期前缀永不出现 | **2**（1 行复制 + 1 行接口） | **有，已实测** |
+| 2339 | `retrieveCandidates` / `retrieve` 读 `options.currentCommit`（`retrieve.ts:698` / `:892`）| 类型欠账（`currentCommit` 两处未声明） | **2** | 无 |
+| 2339 | `renderHint` 读 `document.updatedAt`（`retrieve.ts:1181`）| 类型欠账（`hitOf` 已复制 `updatedAt`，接口没声明） | **1** | 无 |
+| 2339 | `renderHint` 读 `negative.ageDays`（`retrieve.ts:1205`）| **代码欠账（真行为缺陷）**：`hitOf` 不复制 `ageDays` ⇒ 过期前缀永不出现 | **2**（1 行复制 + 1 行接口） | **有，已实测** |
 | 2300 | `index.ts:21,65` | 合并遗留（同文件重复 type import） | **2** | 无 |
 | 2353 | `extract.ts:474` | 类型欠账（`appendLayer` 已持久化 `domain`） | **1** | 无（数据已写盘） |
-| 2353 | `retrieve.ts:190` | 类型欠账（宿主认该字段；filter 用展开绕过了检查） | **1** | 无 |
+| 2353 | `classifyScene` 的 `reasoningEffort`（`retrieve/scene.ts:94`）| 类型欠账（宿主认该字段；filter 用展开绕过了检查） | **1** | 无 |
 | 2353 | `store.ts:2148` | 类型欠账（写入总会写 `timestamp`） | **1** | 无 |
 | 2345 | `store.ts:1615` | 类型欠账（`dedupe.NegativeRecord` 停在 v0.7 前） | **2** | 无（`planNegative` 不读 evidence） |
 | 2345 | `store.ts:2215` | 纯结构可赋值性（无 index signature） | **1** | 无 |
