@@ -21,10 +21,10 @@
 | # | 位置 | message |
 |---|---|---|
 | 1 | `ledger-cache.ts:472` | `Property 'unref' does not exist on type 'number'` |
-| 2 | `retrieveCandidates` 读 `options.currentCommit`（`retrieve.ts:698`）| `Property 'currentCommit' does not exist on type 'CandidateOptions'` |
-| 3 | `retrieve` 读 `options.currentCommit`（`retrieve.ts:892`）| `Property 'currentCommit' does not exist on type '{ threshold?…}'` |
-| 4 | `renderHint` 读 `document.updatedAt`（`retrieve.ts:1181`）| `Property 'updatedAt' does not exist on type 'MemoryHit'` |
-| 5 | `renderHint` 读 `negative.ageDays`（`retrieve.ts:1205`）| `Property 'ageDays' does not exist on type 'MemoryHit'` |
+| 2 | `retrieveCandidates` 读 `options.currentCommit`（`retrieve.ts:560`）| `Property 'currentCommit' does not exist on type 'CandidateOptions'` |
+| 3 | `retrieve` 读 `options.currentCommit`（`retrieve.ts:704`）| `Property 'currentCommit' does not exist on type '{ threshold?…}'` |
+| 4 | `renderHint` 读 `document.updatedAt`（`retrieve.ts:944`）| `Property 'updatedAt' does not exist on type 'MemoryHit'` |
+| 5 | `renderHint` 读 `negative.ageDays`（`retrieve.ts:968`）| `Property 'ageDays' does not exist on type 'MemoryHit'` |
 
 > **记号说明（2026-11-16）**：本表原先只写行号（`:1420` / `:1614` / `:1903` / `:1927`），而 `retrieve.ts`
 > 每搬一步这些行号就集体漂移一次 —— 第五步之后它们分别是 **698 / 892 / 1181 / 1205**。
@@ -143,7 +143,7 @@ retrieve.ts:1368  ...(document.validAt …)     ← hitOf 里**复制**进 hit
 
 - `Document`（内部记录）声明并算出 `ageDays`；
 - `hitOf()` **没有**把它复制进 `MemoryHit`（它的返回对象里没有 ageDays 那一行）；
-- `renderHint()` 读 `negative.ageDays`（`retrieve.ts:1205`）→ 永远是 `undefined`；
+- `renderHint()` 读 `negative.ageDays`（`retrieve.ts:968`）→ 永远是 `undefined`；
 - `isStaleNegative()` 里 `Number(undefined ?? 0)` = 0 ⇒ `0 <= 30` ⇒ **永不 stale**；
 - 于是 v0.21 的 `[历史偶发错误，仅供参考]` 前缀**在生产里永远不会出现**。
 
@@ -454,9 +454,9 @@ applyInner: 22 declaration(s), 2062 lines
 | code | 位置 | 定性 | 修法行数 | 运行时有影响吗 |
 |---|---|---|---|---|
 | 2339 | `ledger-cache.ts:472` | **环境产物**（缺 `@types/node`，DOM 的 `setInterval` 返回 `number`） | 0（装 @types/node 自消） | 无（`unref?.()` 有 fallback，且 Node 真有 unref） |
-| 2339 | `retrieveCandidates` / `retrieve` 读 `options.currentCommit`（`retrieve.ts:698` / `:892`）| 类型欠账（`currentCommit` 两处未声明） | **2** | 无 |
-| 2339 | `renderHint` 读 `document.updatedAt`（`retrieve.ts:1181`）| 类型欠账（`hitOf` 已复制 `updatedAt`，接口没声明） | **1** | 无 |
-| 2339 | `renderHint` 读 `negative.ageDays`（`retrieve.ts:1205`）| **代码欠账（真行为缺陷）**：`hitOf` 不复制 `ageDays` ⇒ 过期前缀永不出现 | **2**（1 行复制 + 1 行接口） | **有，已实测** |
+| 2339 | `retrieveCandidates` / `retrieve` 读 `options.currentCommit`（`retrieve.ts:560` / `:704`）| 类型欠账（`currentCommit` 两处未声明） | **2** | 无 |
+| 2339 | `renderHint` 读 `document.updatedAt`（`retrieve.ts:944`）| 类型欠账（`hitOf` 已复制 `updatedAt`，接口没声明） | **1** | 无 |
+| 2339 | `renderHint` 读 `negative.ageDays`（`retrieve.ts:968`）| **代码欠账（真行为缺陷）**：`hitOf` 不复制 `ageDays` ⇒ 过期前缀永不出现 | **2**（1 行复制 + 1 行接口） | **有，已实测** |
 | 2300 | `index.ts:21,65` | 合并遗留（同文件重复 type import） | **2** | 无 |
 | 2353 | `extract.ts:474` | 类型欠账（`appendLayer` 已持久化 `domain`） | **1** | 无（数据已写盘） |
 | 2353 | `classifyScene` 的 `reasoningEffort`（`retrieve/scene.ts:94`）| 类型欠账（宿主认该字段；filter 用展开绕过了检查） | **1** | 无 |
