@@ -215,6 +215,45 @@ jobs:
           } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
           exit $status
 
+      # ── THE DOCUMENT COUNT GATE, NOW ACTUALLY RUN ────────────────────────────────────────────────
+      #
+      # `check-readme-counts` existed here and was never run on a push, so the repository shipped with
+      # SIX stale claims that a green CI said nothing about — measured on 2026-11-16, before this step:
+      #
+      #   FAIL L106  README 声明测试数 495 / 495，实测 516
+      #   FAIL L537  README 声明测试数 495 / 495，实测 516
+      #   FAIL ARCHITECTURE L135/136/137/140  有数字但既无「现状」也无时点限定
+      #
+      # All six are fixed in this commit and the step below is what keeps them fixed. It is the same
+      # failure mode this repo already wrote down for other repos: "A gate nobody runs is a comment."
+      #
+      # ⚠️ It runs AFTER `npm test` on purpose. The guard measures the pass count itself (in its own
+      # child process, so `npm run check` runs the suite twice — that is a known, accepted cost, NOT a
+      # reason to weaken the guard). If the suite were red the guard would report that instead of a
+      # stale number, so the behavioural break must surface first, with a test name to read.
+      - name: Documentation counts match the code
+        run: node scripts/check-readme-counts.mjs
+
+      # ── THE TYPE BUDGET, WHICH THIS REPO'S CI NEVER RAN AT ALL ──────────────────────────────────
+      #
+      # Measured 2026-11-16: `npm run check` called `node scripts/type-budget.mjs` BARE, and ci.yml
+      # did not mention it. Two consequences, and the second is the dangerous one:
+      #
+      #   1. this repository's type budget was never enforced on a push;
+      #   2. the bare call exits **2** on a machine without `typescript`, so `npm run check` would be
+      #      red there — and that is invisible HERE, because `typescript` resolves from
+      #      `D:\持久层能力架构\node_modules`, one directory above this repo.
+      #
+      # "Green only on this machine" is the same disease as "red only on CI", and this project already
+      # paid for it once: `check-cycles` shipped a hard-coded `D:/…` that passed locally and failed on
+      # every push (#118). The fix is the same in both directions — make the CI-only branch reachable
+      # from here, which `run-gate.mjs --simulate-missing-compiler` does (it is exercised by a test).
+      #
+      # `run-gate.mjs` is byte-identical in all four repositories and checks its own copies by hashing
+      # its siblings — one RESOURCE rule, four repositories, one implementation.
+      - name: Incremental type budget (RESOURCE-aware: no compiler on the runner)
+        run: node scripts/run-gate.mjs scripts/type-budget.mjs
+
       - name: Concurrency test (spawns 8 real processes — run SEPARATELY, and it is NOT skipped)
         # ── WHY THIS IS ITS OWN STEP, AND WHY THAT IS NOT A SKIP ────────────────────────────────────
         #
