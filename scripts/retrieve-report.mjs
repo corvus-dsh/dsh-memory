@@ -93,6 +93,24 @@ const byName = new Map(decls.map((d) => [d.name, d]))
 const valueOut = new Map(decls.map((d) => [d.name, new Set()]))
 
 /**
+ * ── 来自别的模块的名字：簇分析要知道「这一段依赖了谁」──────────────────────────────────────────
+ *
+ * `valueOut` 只记**本文件内**的声明（簇、SCC、拓扑层都只需要它）。
+ * 但「族发现」问的是另一个问题：这一簇**自足吗** —— 它有没有把依赖伸到别处去？
+ * 那需要知道某段代码用了哪些 import 进来的名字，所以单开一张表。
+ */
+const importSpecOf = new Map()
+for (const stmt of sf.statements) {
+  if (!ts.isImportDeclaration(stmt) || stmt.importClause === undefined) continue
+  const spec = stmt.moduleSpecifier.text
+  const bindings = stmt.importClause.namedBindings
+  if (bindings && ts.isNamedImports(bindings)) {
+    for (const el of bindings.elements) importSpecOf.set((el.name ?? el.propertyName).text, spec)
+  }
+}
+const externalOut = new Map(decls.map((d) => [d.name, new Set()]))
+
+/**
  * 类型位置判定。逐个 child 判断而不是「整棵子树」：同一行里可能既有值引用又有类型引用
  * （`function f(x: Foo): Bar { return make() }`）。
  */
@@ -112,6 +130,9 @@ const visit = (node, owner, inType) => {
   if (ts.isIdentifier(node) && !inType) {
     const target = byName.get(node.text)
     if (target !== undefined && target.name !== owner.name) valueOut.get(owner.name).add(target.name)
+    else if (target === undefined && importSpecOf.has(node.text)) {
+      externalOut.get(owner.name).add(`${node.text} (import ${importSpecOf.get(node.text)})`)
+    }
   }
   ts.forEachChild(node, (child) => visit(child, owner, inType || isTypeField(node, child)))
 }
@@ -197,6 +218,76 @@ const layerDetail = [...layers.entries()].sort((a, b) => a[0] - b[0]).map(([l, n
 }))
 
 /**
+ * ── 族发现：给定一组层，问「这里面有没有可搬的族」────────────────────────────────────────────────
+ *
+ * 前五步能整片搬走，是因为那些声明**聚成一团且闭包自足**。第六步之后剩下的 25 个声明是不是
+ * 也这样？这个问题的答案不该由一次会话里的临时脚本给出（那份脚本还留在 `_scratch/` 里，
+ * 随时会被删掉，文档就变成了不可复算的断言）。所以做成工具的一部分：
+ *
+ *   node scripts/retrieve-report.mjs --clusters              # 默认：L0 以外的所有层
+ *   node scripts/retrieve-report.mjs --clusters --layers 1,2,3
+ *
+ * 三个数缺一不可（只看其中一个都会得出相反结论）：
+ *   · **簇的规模**：19 个声明 / 369 行 和 2 个声明 / 5 行，是完全不同的问题；
+ *   · **段外值依赖**：一簇再大，只要它的依赖全在簇内，它就**能**整片搬走；
+ *     依赖伸到簇外（哪怕只有一处），搬走就会把 import 反向拉回来；
+ *   · **小簇合计**：如果「除了最大簇全是 1–2 个声明」，那就没有中等规模的族 ——
+ *     搬它们只会换来「模块数 +1、行数 −5、依赖图 +1 边」。
+ */
+const clusterLayers = (() => {
+  const i = process.argv.indexOf('--layers')
+  if (i >= 0 && process.argv[i + 1] !== undefined) {
+    return process.argv[i + 1].split(',').map((s) => Number(s.trim())).filter((n) => Number.isInteger(n))
+  }
+  return layerDetail.filter((l) => l.layer >= 1).map((l) => l.layer)
+})()
+
+const clusterAnalysis = (() => {
+  const candidate = new Set(layerDetail.filter((l) => clusterLayers.includes(l.layer)).flatMap((l) => l.members))
+  const up = new Map([...candidate].map((n) => [n, n]))
+  const root = (x) => { while (up.get(x) !== x) { up.set(x, up.get(up.get(x))); x = up.get(x) } return x }
+  for (const a of candidate) {
+    for (const b of valueOut.get(a) ?? []) {
+      if (!candidate.has(b)) continue
+      const ra = root(a); const rb = root(b)
+      if (ra !== rb) up.set(ra, rb)
+    }
+  }
+  const buckets = new Map()
+  for (const n of candidate) {
+    const r = root(n)
+    if (!buckets.has(r)) buckets.set(r, [])
+    buckets.get(r).push(n)
+  }
+  const clusters = [...buckets.values()].map((members) => {
+    members.sort()
+    const external = new Set()
+    for (const m of members) {
+      for (const e of externalOut.get(m) ?? []) external.add(e)
+      for (const t of valueOut.get(m) ?? []) if (!candidate.has(t)) external.add(`${t}（同文件，不在候选集）`)
+    }
+    return {
+      declarations: members.length,
+      lines: members.reduce((s, n) => s + byName.get(n).lines, 0),
+      externalCount: external.size,
+      external: [...external].sort(),
+      members,
+    }
+  }).sort((a, b) => b.declarations - a.declarations || a.members[0].localeCompare(b.members[0]))
+
+  const totalLines = [...candidate].reduce((s, n) => s + byName.get(n).lines, 0)
+  const rest = clusters.slice(1)
+  return {
+    layers: clusterLayers,
+    declarations: candidate.size,
+    lines: totalLines,
+    clusters,
+    smallClusters: rest.length,
+    smallLines: rest.reduce((s, c) => s + c.lines, 0),
+  }
+})()
+
+/**
  * ── 层账：整层搬完之后，文件还剩多少行 ────────────────────────────────────────────────────────────
  *
  * 这个数**必须由脚本算**，不能写进文档：文档里的「还剩 950 行」「最后剩 ~354 行」两版都是手算的，
@@ -240,6 +331,7 @@ const report = {
   declarations: decls.length,
   spanSum,
   layerAccount,
+  clusterDetail: clusterAnalysis,
   componentDetail: components.map((c) => ({
     declarations: c.members.length,
     lines: c.lines,
@@ -290,3 +382,34 @@ if (la.afterUpperLayers > 800) {
 }
 console.log(`    剩下的 ${la.afterL0} 行是 import / re-export / 文件头注释 / 空行 —— 它们不是声明，`)
 console.log('    没有任何一步「按层搬」能带走。')
+
+if (process.argv.includes('--clusters')) {
+  const ca = report.clusterDetail
+  const label = ca.layers.map((l) => `L${l}`).join('+')
+  console.log('')
+  console.log(`── 族发现：${label}（${ca.declarations} 声明 / ${ca.lines} 行）的连通簇 ──`)
+  console.log('  #  声明  行数  段外  成员')
+  ca.clusters.forEach((c, i) => {
+    const members = c.members.length <= 8 ? c.members.join(', ') : `${c.members.slice(0, 6).join(', ')}, …（共 ${c.members.length}）`
+    console.log(`  ${String(i + 1).padStart(2)} ${String(c.declarations).padStart(5)} ${String(c.lines).padStart(5)} ${String(c.externalCount).padStart(5)}  ${members}`)
+  })
+  console.log('')
+  console.log(`  小簇合计（除最大簇）：${ca.smallClusters} 个 / ${ca.smallLines} 行`)
+  for (const [i, c] of ca.clusters.entries()) {
+    if (c.externalCount === 0) continue
+    console.log(`  #${i + 1} 的段外值依赖 ${c.externalCount} 处：${c.external.join('; ')}`)
+  }
+  console.log('')
+  console.log('  ⇒ 读法（三个数一起看，只看一个会得出相反结论）：')
+  console.log('    簇的规模说明「能搬多大」；段外值依赖说明「搬了会不会把 import 反向拉回来」；')
+  console.log('    小簇合计说明「有没有中等规模的族」—— 若其余全是 1–2 个声明，那就没有。')
+  const top = ca.clusters[0]
+  if (top !== undefined && top.externalCount > 0 && top.lines * 2 > ca.lines) {
+    console.log(`    本例：最大簇 ${top.declarations} 声明 / ${top.lines} 行、段外 ${top.externalCount} 处，`)
+    console.log('    几乎就是整个候选集 —— 它是**主干**，不是可搬的族。搬它 = 本文件变纯壳。')
+  } else if (top !== undefined && top.externalCount === 0 && top.lines * 2 > ca.lines) {
+    console.log(`    本例：最大簇 ${top.declarations} 声明 / ${top.lines} 行、段外依赖 0 —— 这是一个闭合的族，可以整片搬走。`)
+  } else {
+    console.log('    本例：没有「大且闭合」的簇，也没有中等规模的簇 —— 不是可搬的族。')
+  }
+}

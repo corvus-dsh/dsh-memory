@@ -6,3 +6,8 @@ Thumbs.db
 .graft-prepared.json
 .txn/
 *.jsonl
+
+# 测试在半路失败时会留在仓根的工作目录（正常跑完会自己删）。它们不是产物，别进库。
+.canred-*
+.shallow-*
+.v210-*

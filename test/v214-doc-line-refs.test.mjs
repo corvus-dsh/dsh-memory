@@ -41,18 +41,45 @@ const REPO = join(HERE, '..')
 /**
  * 已被拆分的文件：它们的行号在文档里是**历史坐标**，不映射到当前文件。
  *
- * `max` 是当前文档里这类引用的**条数**。只能减，不能增（增了说明又有人手抄了一个旧行号）。
- * 每次真的减下来，就把 max 收紧到新值 —— 这是棘轮，不是自觉。
+ * `store.ts` 从 2479 行拆到 374 行，`docs/` 里的 `store.ts:2215` 是**写那份分析时的坐标**，
+ * 改写它们等于篡改历史记录。所以按「冻结集合」处理：
+ *
+ *   **逐条冻结，增删都红。**
+ *
+ * 只冻条数是不够的 —— 「删掉一条旧引用、同时新增一条旧引用」在计数上不变，
+ * 而那正是「又有人手抄了一个旧行号」的形状。所以下面这张表把 26 条**逐字**列出来：
+ * 少一条说明有人清理了（好事，但要同步这张表）；多一条说明又抄了一个（红）。
  */
-export const SPLIT_FILES = new Map([
-  ['src/store.ts', {
-    max: 26,
-    reason:
-      'store.ts 从 2479 行拆到 374 行（第0步 / B / A3 / A1 / A2）。docs/ 里的 '
-      + '`store.ts:2215` 之类的引用是**写那份分析时的坐标**，改写它们等于篡改历史记录。'
-      + '因此按「冻结条数 + 写明理由」处理：只许减不许增。新写的引用请用符号名。',
-  }],
-])
+export const SPLIT_TARGETS = new Set(['src/store.ts'])
+
+export const FROZEN_STORE_REFS = [
+  'docs/A1-plan-and-handoff.md|src/store.ts:563',
+  'docs/A1-plan-and-handoff.md|store.ts:2215',
+  'docs/A1-plan-and-handoff.md|store.ts:545',
+  'docs/A1-plan-and-handoff.md|store.ts:550',
+  'docs/A1-plan-and-handoff.md|store.ts:563',
+  'docs/memory-known-defects.md|store.ts:1293',
+  'docs/memory-known-defects.md|store.ts:1305',
+  'docs/memory-known-defects.md|store.ts:1493',
+  'docs/memory-known-defects.md|store.ts:1548',
+  'docs/memory-known-defects.md|store.ts:1615',
+  'docs/memory-known-defects.md|store.ts:1964',
+  'docs/memory-known-defects.md|store.ts:2062-2088',
+  'docs/memory-known-defects.md|store.ts:2093-2102',
+  'docs/memory-known-defects.md|store.ts:2148',
+  'docs/memory-known-defects.md|store.ts:2215',
+  'docs/memory-known-defects.md|store.ts:2215',
+  'docs/memory-type-defects.md|store.ts:1615',
+  'docs/memory-type-defects.md|store.ts:1615',
+  'docs/memory-type-defects.md|store.ts:1615',
+  'docs/memory-type-defects.md|store.ts:2093-2102',
+  'docs/memory-type-defects.md|store.ts:2148',
+  'docs/memory-type-defects.md|store.ts:2148',
+  'docs/memory-type-defects.md|store.ts:2148',
+  'docs/memory-type-defects.md|store.ts:2215',
+  'docs/memory-type-defects.md|store.ts:2215',
+  'docs/memory-type-defects.md|store.ts:2215',
+]
 
 // ── 判据（纯函数，好让 can-red 喂假数据）──────────────────────────────────────────────────────
 
@@ -91,16 +118,26 @@ export const danglingRefs = (refs, lineCountOf) => {
   return out
 }
 
-/** 按目标文件分桶：被拆分文件里超出 `max` 的部分要单独报。 */
-export const splitFileOverBudget = (dangling, splitFiles) => {
-  const used = new Map()
-  for (const d of dangling) used.set(d.target, (used.get(d.target) ?? 0) + 1)
-  const over = []
-  for (const [target, entry] of splitFiles) {
-    const n = used.get(target) ?? 0
-    if (n > entry.max) over.push({ target, max: entry.max, now: n })
+/** 一条悬空引用的稳定标识：`文档|原文`。 */
+export const refKey = (d) => `${d.doc}|${d.raw}`
+
+/**
+ * 与实际悬挂集合的比较：**增**（实际有、冻结里没有）与**减**（冻结里有、实际没有）分别报。
+ * 两边都要报，因为「清理掉一条却不更新表」和「新抄一条」一样会让这张表失去意义。
+ */
+export const frozenSetDiff = (actualKeys, frozenKeys) => {
+  const tally = (keys) => {
+    const m = new Map()
+    for (const k of keys) m.set(k, (m.get(k) ?? 0) + 1)
+    return m
   }
-  return over
+  const a = tally(actualKeys)
+  const f = tally(frozenKeys)
+  const extra = []
+  const missing = []
+  for (const [k, n] of a) { const frozen = f.get(k) ?? 0; for (let i = frozen; i < n; i++) extra.push(k) }
+  for (const [k, n] of f) { const now = a.get(k) ?? 0; for (let i = now; i < n; i++) missing.push(k) }
+  return { extra: extra.sort(), missing: missing.sort() }
 }
 
 // ── 文件系统 ────────────────────────────────────────────────────────────────────────────────────
@@ -144,8 +181,8 @@ const allDangling = () => {
 
 test('v214 ①: docs/ 里的行号引用不得超出目标文件当前行数（被拆分文件除外）', () => {
   const dangling = allDangling()
-  const exempt = dangling.filter((d) => SPLIT_FILES.has(d.target))
-  const bad = dangling.filter((d) => !SPLIT_FILES.has(d.target))
+  const exempt = dangling.filter((d) => SPLIT_TARGETS.has(d.target))
+  const bad = dangling.filter((d) => !SPLIT_TARGETS.has(d.target))
   const detail = bad.map((d) => `${d.doc}: ${d.raw}  → ${d.target} 现在只有 ${d.lines} 行`)
   assert.deepEqual(detail, [],
     '这些文档里的行号引用指向了文件尾之外 —— 读者照过去会看到不存在的位置。'
@@ -155,17 +192,15 @@ test('v214 ①: docs/ 里的行号引用不得超出目标文件当前行数（�
   assert.ok(exempt.length > 0 || bad.length === 0, 'sanity: 至少扫到了东西')
 })
 
-test('v214 ②: 被拆分文件（store.ts）的旧行号引用只许减不许增', (t) => {
-  const dangling = allDangling()
-  const over = splitFileOverBudget(dangling, SPLIT_FILES)
-  assert.deepEqual(over.map((o) => `${o.target}: 冻结 ${o.max}，现有 ${o.now}`), [],
-    '已登记为「被拆分文件」的旧行号引用增加了 —— 说明又有人手抄了一个过时行号。'
-    + '新增引用请用符号名；只有真的清理掉一条时，才把 SPLIT_FILES 的 max 收紧。')
-  // 减少时提示收紧（不判红，只是让棘轮能继续前进）
-  for (const [target, entry] of SPLIT_FILES) {
-    const now = dangling.filter((d) => d.target === target).length
-    if (now < entry.max) t.diagnostic(`${target}: 旧行号引用已降到 ${now}（冻结 ${entry.max}）— 可以把 max 收紧到 ${now}`)
-  }
+test('v214 ②: 被拆分文件（store.ts）的旧行号引用逐条冻结 —— 增删都红', () => {
+  const actual = allDangling().filter((d) => SPLIT_TARGETS.has(d.target)).map(refKey)
+  const { extra, missing } = frozenSetDiff(actual, FROZEN_STORE_REFS)
+  assert.deepEqual(extra, [],
+    '新增了指向**已拆分文件**的旧行号引用（又有人手抄了一个过时行号？）。'
+    + '新写的引用请用符号名；确实需要记历史坐标时，改这一张冻结表并写明理由：\n  ' + extra.join('\n  '))
+  assert.deepEqual(missing, [],
+    '冻结表里的旧行号引用**少了** —— 说明有人清理掉了（好事），'
+    + '但冻结表必须同步：把对应条目删掉，让这和事实一致：\n  ' + missing.join('\n  '))
 })
 
 test('v214 ③: 判据本身能在真实文档上读到东西（防「空数组恒绿」）', () => {
@@ -209,11 +244,14 @@ test('v214 ⑦ can-red: 解析不到的文件必须跳过，不能猜', () => {
   assert.deepEqual(danglingRefs(scanRefs('`nowhere.ts:99999`'), fake), [])
 })
 
-test('v214 ⑧ can-red: 被拆分文件的条数涨了必须红', () => {
-  const split = new Map([['src/store.ts', { max: 2, reason: 'x' }]])
-  const dangling = [
-    { target: 'src/store.ts' }, { target: 'src/store.ts' }, { target: 'src/store.ts' },
-  ]
-  assert.deepEqual(splitFileOverBudget(dangling, split).map((o) => o.now), [3])
-  assert.deepEqual(splitFileOverBudget(dangling.slice(0, 2), split), [], '等于上限不算超')
+test('v214 ⑧ can-red: 冻结表增一条或减一条都必须红', () => {
+  const frozen = ['a|X:1', 'b|Y:2']
+  assert.deepEqual(frozenSetDiff(['a|X:1', 'b|Y:2', 'c|Z:3'], frozen).extra, ['c|Z:3'], '多出来要报')
+  assert.deepEqual(frozenSetDiff(['a|X:1'], frozen).missing, ['b|Y:2'], '少了要报')
+  assert.deepEqual(frozenSetDiff(['a|X:1', 'b|Y:2'], frozen), { extra: [], missing: [] }, '一致时不报')
+  // 重复项也计次：「删一条旧的、加一条新的」在总数上相同，逐条冻结才抓得住
+  const dup = ['a|X:1', 'a|X:1']
+  const { extra, missing } = frozenSetDiff(['a|X:1', 'b|Y:2'], dup)
+  assert.deepEqual(extra, ['b|Y:2'])
+  assert.deepEqual(missing, ['a|X:1'])
 })
