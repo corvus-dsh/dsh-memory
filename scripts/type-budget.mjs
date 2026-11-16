@@ -102,8 +102,9 @@ const BASELINE = new Map([
   // 2026-11-16 B 组 D-3（`LlmLike.reasoningEffort`）修完后实测 6 条：`retrieve/scene.ts` 的 2353 随之消失。
   // 2026-11-16 B 组 D-5（`NegativeRecord.evidence` + 删掉 `planNegative(existing as never, …)`）修完后
   // 实测 5 条：`store/layer.ts` 的 `ExtractedNegative → NegativeRecord` 2345 消失，计数 2 → 1。
+  // 2026-11-16 C 组 D-6（`commitLedger` 形参 `Record<string, unknown>[]` → `object[]`）修完后
+  // 实测 4 条：`store/layer.ts` 的 `LayerRecord[]` 2345 消失，该文件的计数归零并从本表删除。
   ['retrieve.ts', 3],
-  ['store/layer.ts', 1],
   ['ledger-cache.ts', 1],
 ])
 
@@ -273,7 +274,6 @@ const BASELINE_IDENTITIES = new Map([
   ["retrieve.ts\u00002339\u0000Property 'currentCommit' does not exist on type '{ threshold?: number; now?: number; scene?: string; workspace?: string; taskTerms?: ReadonlySet<string>; taskAlignment?: boolean; taskFixIntent?: boolean; }'.", 1],
   ["retrieve.ts\u00002339\u0000Property 'currentCommit' does not exist on type 'CandidateOptions'.", 1],
   ["retrieve.ts\u00002339\u0000Property 'updatedAt' does not exist on type 'MemoryHit'.", 1],
-  ["store/layer.ts\u00002345\u0000Argument of type 'LayerRecord[]' is not assignable to parameter of type 'readonly Record<string, unknown>[]'.   Type 'LayerRecord' is not assignable to type 'Record<string, unknown>'.     Index signature for type 'string' is missing in type 'LayerRecord'.", 1],
 ])
 
 const argOf = (flag) => {
