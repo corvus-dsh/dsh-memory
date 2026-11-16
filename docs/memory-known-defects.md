@@ -82,10 +82,31 @@ GRAFT_CLOSURE_SRC     ← 它只是被转发给 closure.mjs 的值。
 
 ## 一、D-1　`ageDays` 没被复制进 `MemoryHit`
 
-### 是什么
+> ## ✅ 已于 2026-11-16 修复
+>
+> **修法**（三处，同一笔）：`MemoryHit` 加 `ageDays?: number`、`Document` 加 `hits?: number`、
+> `hitOf` 补两行条件展开复制。
+>
+> **门禁**：`test/v217-d1-agedays.test.mjs`（4 条，全部走真实路径）。
+> 其中 ③ 是「只修 ageDays 会红」的守卫 —— 实测把 `hits` 那行删掉后 ③ 确实变红。
+>
+> **连带账已清**：type-budget `retrieve.ts` 4 → 3（`ageDays` 那条 2339 消失，身份总数 12 → 11）；
+> v205 ceiling 1074 → 1078；v207 六数重测（trunk.lines 557→561、spanSum 720→724、tiers.B 163→167）。
+>
+> **原登记的两处不准确，一并订正如下。**
 
-`hitOf()` 从内部 `Document` 复制 18 个字段到对外的 `MemoryHit`，
-**唯独漏了 `ageDays`**。而 `renderHint()` 在 `:1927` 读 `negative.ageDays`。
+### 是什么（订正版）
+
+`hitOf()` 从内部 `Document` 复制字段到对外的 `MemoryHit`，**漏的不止 `ageDays` 一个**：
+
+| 漏的字段 | 后果 |
+|---|---|
+| `ageDays` | `renderHint` 读 `negative.ageDays` 得 `undefined` ⇒ **判不出「老」** ⇒ 前缀永不出现 |
+| **`hits`** | `isStaleNegative` 用 `Number(hits ?? 1)` ⇒ `undefined` 被当成 `1` ⇒ **所有老规则都被当成「从未复发」** |
+
+**原登记只写了 `ageDays`，漏了 `hits`。** 这个遗漏很关键，因为两个字段合在一起才构成完整判据
+（「老 **且** 从未复发」）。只修 `ageDays` 会让「复发过 5 次的活规则」被打上
+`[历史偶发错误，仅供参考]` —— 那是**主动说错一句话**，比不修更糟。
 
 ### 性质：**未完成功能**（不是类型欠账）
 
@@ -119,6 +140,7 @@ importance:
 类型欠账指"运行时对、声明缺"；这里运行时就是错的）。
 
 ### 实测（端到端，不是读代码推的）
+
 
 同一条 100 天前、`hits: 1` 的 negative，走 `retrieveCandidates → renderHint`：
 

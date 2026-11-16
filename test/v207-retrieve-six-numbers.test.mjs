@@ -123,14 +123,14 @@ const AVAILABLE = compilerAvailable()
 const DOCUMENTED = {
   components: 6,
   trunkDeclarations: 22,
-  trunkLines: 557,
+  trunkLines: 561,
   sccs: 32,
   nontrivialSccs: 0,
   layers: 4,
-  tiers: { D: 365, C: 106, B: 163, A: 86 },
+  tiers: { D: 365, C: 106, B: 167, A: 86 },
   tierCounts: { D: 3, C: 2, B: 7, A: 20 },
   declarations: 32,
-  spanSum: 720,
+  spanSum: 724,
 }
 
 test('v207 ①: 当前六数与内置基线逐项相等（基线来自实测，不是从文档反读）', (t) => {

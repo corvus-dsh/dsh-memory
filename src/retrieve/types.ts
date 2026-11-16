@@ -59,6 +59,11 @@ export interface MemoryHit {
   counterEvidence?: number[]
   /** v0.21: negatives only — how many times this failure has recurred (1 = once). */
   hits?: number
+  /**
+   * D-1: `Document.ageDays` 一直有，但 `hitOf()` 没复制它，`renderHint()` 只拿到 `undefined`，
+   * 过期前缀永不出现。与 `hits` 必须同时补 —— 只补这个会让复发过的老规则被当成往事。
+   */
+  ageDays?: number
   /** v0.6: scene tag and the composite pointer for "look this up" hints. */
   scene?: string
   /** v0.17: the project/system this memory is about; different domains never conflict. */
@@ -135,6 +140,8 @@ export interface Document {
   seq?: number
   tokens: Set<string>
   ageDays: number
+  /** D-1: 各层早就在条件对象里写它，只是本接口没声明 ⇒ 编译器看不见 ⇒ 复制那行没被写出来。 */
+  hits?: number
   importance: number
 }
 

@@ -96,7 +96,8 @@ const BASELINE = new Map([
   // 三处在 `git show HEAD:src/store.ts` 里逐字存在，只是换了文件 —— 也就是本清单的 D-4 / D-5。
   // **冻结的是身份，不是数字**：真正的判据是下面的 BASELINE_IDENTITIES 里那三条仍在，
   // 而不是"哪个文件背了它"。搬文件必然改文件名，把基线钉死在文件上会把每一步搬运都报成新债。
-  ['retrieve.ts', 4],
+  // 2026-11-16 D-1 修复后重冻结：`retrieve.ts` 4 → 3（`ageDays` 那条 2339 消失），总数 12 → 11。
+  ['retrieve.ts', 3],
   ['store/layer.ts', 3],
   ['index.ts', 2],
   ['extract.ts', 1],
@@ -259,7 +260,11 @@ const BASELINE_IDENTITIES = new Map([
   ["extract.ts\u00002353\u0000Object literal may only specify known properties, and 'domain' does not exist in type 'ExtractedExperience'.", 1],
   ["index.ts\u00002300\u0000Duplicate identifier 'EvidenceRef'.", 2],
   ["ledger-cache.ts\u00002339\u0000Property 'unref' does not exist on type 'number'.", 1],
-  ["retrieve.ts\u00002339\u0000Property 'ageDays' does not exist on type 'MemoryHit'.", 1],
+  // ⚠️ 2026-11-16 D-1 修复：这一行 `retrieve.ts 2339 'ageDays' does not exist on type 'MemoryHit'`
+  // **已删除** —— 那条正是 D-1：`MemoryHit` 缺 `ageDays` 声明。补上声明后诊断消失。
+  // 这是**修掉一条真缺陷**，不是「把它从表里抹掉」：`v217` 的四条断言与 type-check 的
+  // `GONE retrieve.ts [2339] Property 'ageDays'…` 两处独立证据都指向同一个消失。
+  // 身份总数 12 → 11，`retrieve.ts` 的 code 总数 4 → 3。
   ["retrieve.ts\u00002339\u0000Property 'currentCommit' does not exist on type '{ threshold?: number; now?: number; scene?: string; workspace?: string; taskTerms?: ReadonlySet<string>; taskAlignment?: boolean; taskFixIntent?: boolean; }'.", 1],
   ["retrieve.ts\u00002339\u0000Property 'currentCommit' does not exist on type 'CandidateOptions'.", 1],
   ["retrieve.ts\u00002339\u0000Property 'updatedAt' does not exist on type 'MemoryHit'.", 1],

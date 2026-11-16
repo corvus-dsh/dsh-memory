@@ -199,7 +199,24 @@ diffs.sort((p, q) => (q.after - q.before) - (p.after - p.before) || p.line.local
 const total = (m) => [...m.values()].reduce((s, n) => s + n, 0)
 console.log(`before : ${beforeRef}   code lines: ${total(a)}`)
 console.log(`after  : ${afterRef ?? 'working tree'}   code lines: ${total(b)}`)
-console.log(`bundle : ${before.length} -> ${after.length} bytes`)
+/**
+ * ── 这一行曾经打印 `undefined -> undefined bytes` ─────────────────────────────────────────────
+ *
+ * 两个错误叠在一起，实测于 2026-11-16：
+ *
+ *   ① `bundleAt()` 在本仓返回的是 `{ perFile, combined, files }`（因为 lib/ 下有多个产物），
+ *      不是字符串 —— 所以 `before.length` 是 `undefined`。这里一直是打印 `undefined`。
+ *      别的仓那份返回字符串，`length` 是**字符数**却标成 bytes（一个汉字 3 字节、1 个 code unit，
+ *      实测差 1060 vs 1572）。两者是同一个标签错误的两种表现。
+ *
+ *   ② 没有一处拿 `combined` 去算大小。
+ *
+ * 现在两个数都打，各自标对名字：**字节数是产物的真实大小**（发布包按字节算），
+ * 字符数是「删了多少内容」的更直观量。只打一个都会让读的人把另一个当它。
+ */
+const byteLen = (s) => Buffer.byteLength(s, 'utf8')
+console.log(`bundle : ${byteLen(before.combined)} B (${before.combined.length} chars) -> ${byteLen(after.combined)} B (${after.combined.length} chars)`)
+console.log(`files  : ${before.files.join(', ')} (${before.files.length})`)
 console.log('')
 
 if (diffs.length === 0) {

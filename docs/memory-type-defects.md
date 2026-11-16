@@ -23,8 +23,14 @@
 | 1 | `ledger-cache.ts:472` | `Property 'unref' does not exist on type 'number'` |
 | 2 | `retrieveCandidates` 读 `options.currentCommit`（`retrieve.ts:565`）| `Property 'currentCommit' does not exist on type 'CandidateOptions'` |
 | 3 | `retrieve` 读 `options.currentCommit`（`retrieve.ts:709`）| `Property 'currentCommit' does not exist on type '{ threshold?…}'` |
-| 4 | `renderHint` 读 `document.updatedAt`（`retrieve.ts:949`）| `Property 'updatedAt' does not exist on type 'MemoryHit'` |
-| 5 | `renderHint` 读 `negative.ageDays`（`retrieve.ts:973`）| `Property 'ageDays' does not exist on type 'MemoryHit'` |
+| 4 | `renderHint` 读 `document.updatedAt`（`retrieve.ts:953`）| `Property 'updatedAt' does not exist on type 'MemoryHit'` |
+| ~~5~~ | ~~`renderHint` 读 `negative.ageDays`~~ | ~~`Property 'ageDays' does not exist on type 'MemoryHit'`~~ **← 2026-11-16 已修（D-1），本条消失** |
+
+> **2026-11-16 更新**：第 5 条已随 D-1 修复消失（`MemoryHit` 补了 `ageDays?: number`）。
+> `retrieve.ts` 的 2339 从 **4 → 3**，全表 12 → 11 条。
+> 消失的证据不在本文档里，在 `node scripts/type-budget.mjs` 的输出：
+> `GONE retrieve.ts [2339] Property 'ageDays' does not exist on type 'MemoryHit'.`
+> 上表其余行号已按该命令的「2339 的当前位置」一节重录。
 
 > **记号说明（2026-11-16）**：本表原先只写行号（`:1420` / `:1614` / `:1903` / `:1927`），而 `retrieve.ts`
 > 每搬一步这些行号就集体漂移一次。现在一律以**声明名**定位；括号里的行号是**当前值**，

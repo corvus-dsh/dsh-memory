@@ -37,6 +37,7 @@ import {
   isStaleNegative,
   renderHint,
   retrieve,
+  retrieveCandidates,
 } from '../lib/retrieve.js'
 import { apply } from '../lib/index.js'
 
@@ -204,15 +205,66 @@ test('v0.21 P1: an old never-recurred negative is stale; a recurring one is not'
 })
 
 test('v0.21 P1: the stale negative is down-weighted AND labelled before the claim', () => {
-  const old = new Date(Date.now() - (NEGATIVE_STALE_DAYS + 10) * 86_400_000).toISOString()
-  const negative = {
-    id: 'neg-0',
-    title: 'pytest fixture 报错',
-    detail: '别用那个 fixture',
-    ageDays: NEGATIVE_STALE_DAYS + 10,
-    hits: 1,
+  /**
+   * ── 2026-11-16（D-1）：这条测试原本手工构造 hit，现在改走真实路径 ──────────────────────────────
+   *
+   * 原版是这样写的：
+   *
+   *     const negative = {
+   *       id: 'neg-0', title: 'pytest fixture 报错', detail: '别用那个 fixture',
+   *       ageDays: NEGATIVE_STALE_DAYS + 10, hits: 1, workspace: WORKSPACE,
+   *     }
+   *     const hint = renderHint({ negative, debug: {...} })
+   *
+   * 它断言的是对的（前缀会出现），但它喂给 `renderHint` 的 `{ ageDays, hits }`
+   * **正是真实路径永远不会产出的对象**：`hitOf()` 那时既没有复制 `ageDays` 也没有复制 `hits`。
+   *
+   * 于是这条测试测的是 `renderHint` 的局部逻辑，不是 `negativeDocumentOf → hitOf → renderHint`
+   * 这条链。**D-1 缺陷就在链的中间，而测试站在链的末端用手搭了一个中间值。**
+   *
+   * 这不只是「覆盖不到」——它是**主动掩盖**：一个手工构造的中间值让整条链看起来是通的。
+   * 下一个改 `hitOf` 的人看到这条绿测试，会以为「这部分已经测过了」。
+   *
+   * 所以现在：plant 一条真实的 negatives.jsonl → 走 `retrieveCandidates` → 拿**真实产出的
+   * negative hit** → 喂给 `renderHint`。同一个断言，但中间值不再是人手搭的。
+   *
+   * `isStaleNegative` 的纯函数用例仍在上面第 195-204 行，那些是对的 —— 它们测的就是纯函数。
+   */
+  const root = mkdtempSync(join(tmpdir(), 'dsh-v021-'))
+  const memory = join(root, 'memory')
+  const skills = join(root, 'skills')
+  mkdirSync(memory, { recursive: true })
+  mkdirSync(skills, { recursive: true })
+  writeFileSync(
+    join(memory, 'negatives.jsonl'),
+    `${JSON.stringify({
+      symptom: 'pytest fixture 报错',
+      cause: '复用了上个用例的状态',
+      avoid: '别用那个 fixture',
+      scope: 'project',
+      workspace: 'D:/workspace',
+      at: new Date(Date.now() - (NEGATIVE_STALE_DAYS + 10) * 86_400_000).toISOString(),
+      hits: 1,
+      provenance: 'user',
+    })}\n`,
+    'utf8',
+  )
+
+  /**
+   * query 必须与 symptom 有词面重叠，否则召回层（词法）根本不会把它捞上来。
+   * 这里直接复用 symptom 里的词 —— 不是为了「让测试好过」，
+   * 而是因为**这条测试要测的是 hit 的字段复制，不是召回质量**：
+   * 让召回失败来遮蔽被测行为，会把一条断言变成两条纠缠的断言。
+   */
+  const hits = retrieveCandidates(memory, skills, 'pytest fixture 报错 复用状态', {
+    threshold: 0.01,
     workspace: WORKSPACE,
-  }
+  })
+  const negative = hits.find((hit) => hit.kind === 'negative')
+  assert.ok(negative !== undefined,
+    `真实路径应当召回这条 negative。\n  召回到的 kind: ${JSON.stringify(hits.map((h) => h.kind))}\n`
+    + '若这里红，先确认 query 与 symptom 有词面重叠 —— 召回是词法的。')
+
   const hint = renderHint({
     negative,
     debug: { terms: 1, matched: 1 },
@@ -225,7 +277,6 @@ test('v0.21 P1: the stale negative is down-weighted AND labelled before the clai
     'a trailing note reads as a comment; a prefix changes how the sentence is read',
   )
   assert.ok(NEGATIVE_STALE_WEIGHT < 1)
-  void old
 })
 
 test('v0.21 P1: a fresh negative is rendered without the anecdote label', () => {
