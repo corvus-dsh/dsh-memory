@@ -327,6 +327,21 @@ interface LayerRecord {
   boundarySeq: number
   at: string
   hits: number
+  /**
+   * ── D-4（2026-11-16）：入参早就声明了它，落盘结构没有 ──────────────────────────────────────
+   *
+   * `appendLayer` 的 `entries` 形参（本文件 L364）一直有 `timestamp?: string`，
+   * 而这里 —— **同一条记录落盘后的结构** —— 没有声明。
+   * 下面的写入点（L414）把 `entry.timestamp ?? monotonicTimestamp()` 写进去，
+   * 也就是**磁盘上一直有这个字段，只是这个接口看不见它**。
+   *
+   * 语义与 `ExtractedFact.timestamp` 相同：v0.32 的「严格单调物理时标」，
+   * 用来给因果图的两端定全局顺序（`seq` 只在一个会话内有意义）。
+   *
+   * 可选的原因也一样：v0.31 之前的记录没有这个字段，
+   * **在迁移时补一个等于伪造观测证据** —— 读者必须把缺席读成「位置未知」，不是「位置 0」。
+   */
+  timestamp?: string
 }
 
 /** Accept both pointer shapes and attach the fallback session to a bare seq. */

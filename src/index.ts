@@ -18,7 +18,7 @@ import { readLedgers, describeLedgerSkips, describeMissingLedgerDir, SUPPORTED_L
 import { MEMORY_LAYOUT_FILES, MEMORY_LAYOUT_VERSION, writeLayoutManifest } from './layout.js'
 import { resolveModelTarget, segmentSession } from './segment.js'
 import { extractEpisode } from './extract.js'
-import type { EvidenceRef, ExtractionResult } from './extract.js'
+import type { EvidenceRef, ExtractionResult, MemoryProvenance } from './extract.js'
 import { findSkillCandidate } from './dedupe.js'
 import { retrieve, renderHint, retrieveWithFilter, collectScenes, extractTaskTerms, askAsksForFix, DEFAULT_RETRIEVAL_THRESHOLD, isolateHint, currentCommitOf } from './retrieve.js'
 import { applySkillArchive, listSkillSummaries, planSkillArchive, DEFAULT_SKILL_LIMIT } from './archive.js'
@@ -62,7 +62,7 @@ export {
   readSkillBody,
   writeSkill,
 } from './store.js'
-import type { EvidenceRef, MemoryProvenance } from './extract.js'
+// D-7: EvidenceRef 曾在此处被第二次导入（与 L21 重复，两条 2300），已合并到 L21。
 
 /**
  * v0.15: derive the trust tier from the EVIDENCE, never from the model's opinion

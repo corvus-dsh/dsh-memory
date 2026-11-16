@@ -98,7 +98,7 @@ const BASELINE = new Map([
   // 而不是"哪个文件背了它"。搬文件必然改文件名，把基线钉死在文件上会把每一步搬运都报成新债。
   // 2026-11-16 D-1 修复后重冻结：`retrieve.ts` 4 → 3（`ageDays` 那条 2339 消失），总数 12 → 11。
   ['retrieve.ts', 3],
-  ['store/layer.ts', 3],
+  ['store/layer.ts', 2],
   ['index.ts', 2],
   ['extract.ts', 1],
   ['ledger-cache.ts', 1],
@@ -239,6 +239,10 @@ const describeIdentity = (key) => {
  * 两张表必须同时下降，否则会出现「计数变了但身份表没变」这类自相矛盾。
  */
 const BASELINE_IDENTITIES = new Map([
+  // ── 2026-11-16 A 组（D-2/D-4/D-7）修复：以下三条身份被删除（每条对应一条 GONE 输出）──────
+  //   extract.ts     [2353] ExtractedExperience.domain  → 接口补 domain?: MemoryDomain
+  //   index.ts       [2300] Duplicate EvidenceRef       → 合并两处 import
+  //   store/layer.ts [2353] LayerRecord.timestamp       → 接口补 timestamp?: string
   // 身份多重集：按「文件 + code + message」冻结，防"一个文件修好一条、另一个文件坏掉一条"互相抵消。
   // 这里是 11 个**不同的身份**，合计 12 条 ——
   // 两个数不同是因为同一身份可能出现多次（如 index.ts 的 2300 'Duplicate identifier' 有 2 处，
@@ -257,8 +261,6 @@ const BASELINE_IDENTITIES = new Map([
   // `retrieve/scene.ts` —— **不是冻结一条新缺陷**，总数仍是 12。
   // 该缺陷本身仍然开着（它是一条真 bug：`reasoningEffort` 被传给一个不声明它的参数类型），
   // 按裁定不在搬运步骤里顺手改签名 —— 那会让这一步不再是纯位移。
-  ["extract.ts\u00002353\u0000Object literal may only specify known properties, and 'domain' does not exist in type 'ExtractedExperience'.", 1],
-  ["index.ts\u00002300\u0000Duplicate identifier 'EvidenceRef'.", 2],
   ["ledger-cache.ts\u00002339\u0000Property 'unref' does not exist on type 'number'.", 1],
   // ⚠️ 2026-11-16 D-1 修复：这一行 `retrieve.ts 2339 'ageDays' does not exist on type 'MemoryHit'`
   // **已删除** —— 那条正是 D-1：`MemoryHit` 缺 `ageDays` 声明。补上声明后诊断消失。
@@ -271,7 +273,6 @@ const BASELINE_IDENTITIES = new Map([
   ["retrieve/scene.ts\u00002353\u0000Object literal may only specify known properties, and 'reasoningEffort' does not exist in type '{ provider?: string; model?: string; system?: string; messages: { role: string; content: { type: \"text\"; text: string; }[]; }[]; maxTokens?: number; signal?: AbortSignal; }'.", 1],
   ["store/layer.ts\u00002345\u0000Argument of type 'ExtractedNegative' is not assignable to parameter of type 'NegativeRecord'.   Types of property 'evidence' are incompatible.     Type 'EvidenceRef[]' is not assignable to type 'number[]'.       Type 'EvidenceRef' is not assignable to type 'number'.", 1],
   ["store/layer.ts\u00002345\u0000Argument of type 'LayerRecord[]' is not assignable to parameter of type 'readonly Record<string, unknown>[]'.   Type 'LayerRecord' is not assignable to type 'Record<string, unknown>'.     Index signature for type 'string' is missing in type 'LayerRecord'.", 1],
-  ["store/layer.ts\u00002353\u0000Object literal may only specify known properties, and 'timestamp' does not exist in type 'LayerRecord'.", 1],
 ])
 
 const argOf = (flag) => {

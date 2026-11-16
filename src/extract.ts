@@ -61,7 +61,7 @@ export interface ExtractedFact {
   text: string
   /** The seq in the source log where it can be checked. Required. */
   seq: number
-  /** v0.6: the domain this observation belongs to. */
+  /** v0.6: the scene tag this observation belongs to (NOT the domain — see `domain?` below). */
   scene: MemoryScene
   /** v0.17: the project/system this is about. Absent/unknown = `general`. */
   domain?: MemoryDomain
@@ -89,8 +89,21 @@ export interface ExtractedExperience {
   text: string
   /** The seq of the trial it came from. Required. */
   seq: number
-  /** v0.6: the domain this lesson belongs to. */
+  /**
+   * v0.6: the scene tag this lesson belongs to.
+   *
+   * ── D-2（2026-11-16）：这句注释曾经写的是「the domain this lesson belongs to」──────
+   * 那是一句**错位注释**：它描述的位置是 `scene`，而 domain 是另一个字段。
+   * 这句注释与下面缺掉的 `domain?` 一起，是从 `ExtractedFact` 抄过来时抄漏一行造成的。
+   *
+   * 后果是 `extract.ts:474` 的生产者以为「有这个字段」，写了
+   * `domain: asDomain(item.domain)`，而接口没有声明它 ——
+   * 编译器只在**字面量直写**时报错（2353），条件展开处永远不报。
+   * 所以这个缺口从 v0.17 一直开到现在：**一条错位注释加上一行抄漏的声明。**
+   */
   scene: MemoryScene
+  /** v0.17: the project/system this is about. Absent/unknown = `general`. */
+  domain?: MemoryDomain
   /**
    * v0.32 — THE CAUSE AND THE EFFECT, as explicit pointers instead of prose.
    *
