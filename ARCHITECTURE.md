@@ -112,12 +112,12 @@
 |---|---|
 | 事实 | 这**五个**测试文件里，**四个**依赖 `scripts/closure.mjs`（TypeScript 编译器 API），**第五个不依赖**。本包 `package.json` 的 `dependencies` 与 `devDependencies` **都是空的**，CI 只跑 `npm install`（无依赖可装），所以 CI 上 `import('typescript')` 必然失败 ⇒ 前四个文件**整片 skip**。第五个（`v210`）是纯文本比较，**在 CI 上真跑**，只有它内部那条需要历史提交的 ⑦ 会 skip。 |
 | 谁受影响 | 因缺 typescript：`v201-closure-label-consistency`（2 条）、`v207-retrieve-six-numbers`（7 条）、`v208-v207-canred`（1 条）、`v212-retrieve-no-mutable-state`（2 条）= **12 条**。因缺 git 历史：`v210-classify-buckets` ⑦（1 条）。合计 **13 条**不在 CI 覆盖内。 |
-| **CI 到底覆盖了什么** | 现状：全套 **498 条**中 **485 条**在 CI 真跑；**上述 13 条不在其中**。（这两个绝对数会随测试增减漂移 —— 判据请看「13 条」这个差，而不是绝对数。CI 的 job summary 会自己打印本次的四个计数，见裁定⑦。） |
+| **CI 到底覆盖了什么** | **13 条不在其中，其余全跑。** 绝对数（总数 / 跑了几条）**写在本表里就会过时**，所以它不写在这里 —— CI 的 `Test` 步骤会把它自己打印进 job summary（裁定⑦）。判据只看「13 条」这个差。 |
 | **CI 不覆盖的是什么** | ① 「`retrieve.ts` 的六个数字（分量 / 主干 / SCC / 层 / 四档 / 声明和）」；② 「closure 两条路径的 mutable 标签一致」（`v201`）；③ 「`retrieve.ts` 的模块级可变绑定 = 0」（`v212`，第五步裁定②的机械断言）；④ 「按历史提交复算某一步的实测」（`v207 ①b` 要 `0381c6c`、`v210 ⑦` 要 `f9d1abf`）——这两个是**历史声明**，浅克隆下永远无法验证。 |
 | **CI 覆盖了什么（容易误判的一半）** | `v210` 的 ①–⑥ 在 CI 上**真跑**，包括三条 can-red（删一行真代码 / 删整个函数 / 只删注释）。所以「`--classify` 的判据本身还能咬住注入」这件事**在 CI 上是有覆盖的**；没覆盖的只是它对着**某一步历史树**复算出的那个具体数字（⑦）。 |
 | 为什么不预生成声明表快照 | 快照能把 CI 变绿，但它验证的是「今天的结果等于昨天的快照」——文件一改，快照就过时，而**过时的快照比没有覆盖更危险**：它会让 CI 显示绿色，同时六个数字早已漂移。测量工具必须量**当前**的树，不能量一份冻结的表。 |
 | 这条边界的正确读法 | 看到 CI 绿，**不能**推断「门禁全部通过」。必须知道：涉及 TypeScript 编译器的 12 条、以及两条历史复算，只在本地跑。这也是为什么每次搬运的门禁报告里，v207/v208/v212 的数字要**同时**给出「本地实测」与「CI 是否覆盖」。 |
-| 复查方式（可执行） | **不用再模拟了**：CI 的 `Test` 步骤现在把四个计数与 skip 明细写进 job summary（裁定⑦），跑完直接在 Actions 页面看。若要本地复核：模拟 CI 需要两个条件同时成立 —— 缺 typescript、且历史不可达。做法：把仓复制到工作区外的任意目录（副本里可以随意改），`rm -rf .git && git init && git add -A && git commit`（历史不可达），再往副本里放一个 `node_modules/typescript` 桩（`index.js` 里 `throw new Error('not installed')`，`package.json` 的 `exports` 指向它），然后 `node --test test/*.test.mjs`。2026-11-16 实测输出：**tests 498 / pass 485 / fail 0 / skipped 13**。逐文件：`v201` 2、`v207` 7、`v208` 1、`v212` 2、`v210` 1。 |
+| 复查方式（可执行） | **不用再模拟了**：CI 的 `Test` 步骤现在把四个计数与 skip 明细写进 job summary（裁定⑦），跑完直接在 Actions 页面看。若要本地复核：模拟 CI 需要两个条件同时成立 —— 缺 typescript、且历史不可达。做法：把仓复制到工作区外的任意目录（副本里可以随意改），`rm -rf .git && git init && git add -A && git commit`（历史不可达），再往副本里放一个 `node_modules/typescript` 桩（`index.js` 里 `throw new Error('not installed')`，`package.json` 的 `exports` 指向它），然后 `node --test test/*.test.mjs`。逐文件：`v201` 2、`v207` 7、`v208` 1、`v212` 2、`v210` 1（这五个数不随测试增减漂移，是判据）。2026-11-16 那一次实测是 `tests 498 / pass 485 / fail 0 / skipped 13` —— 这是**那一天的记录**，之后每加一条测试它就会变。 |
 
 > **订正（2026-11-16）**：本表上一版写「11 条」「四个文件全部依赖 closure」。
 > 实测证明 `v210` **不依赖** typescript（`--classify` 只做文本多重集比较），

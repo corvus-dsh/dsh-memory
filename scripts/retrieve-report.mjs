@@ -280,6 +280,13 @@ console.log(`  当前文件                                   ${String(la.fileLi
 console.log(`  搬完 ${la.upperLayers}（${la.upperLines} 行）${' '.repeat(Math.max(0, 18 - la.upperLayers.length))}${String(la.afterUpperLayers).padStart(4)} 行${la.afterUpperLayers > 800 ? '   ← 仍 > 800' : '   ← 已 ≤ 800'}`)
 console.log(`  再搬完 L0（${la.l0Lines} 行）${' '.repeat(Math.max(0, 18 - String(la.l0Lines).length))}${String(la.afterL0).padStart(4)} 行   ← 模块壳`)
 console.log('')
-console.log('  ⇒ 跨过 800 只能靠「动 L0」。搬完 L0 之后剩下的那一截是 import / re-export /')
-console.log('    文件头注释 / 空行 —— 它们不是声明，没有任何一步「按层搬」能带走。')
-console.log('    「下一步搬哪层」这个问法到不了 800，那是「要不要把本文件变成纯壳」的决定。')
+console.log('  ⇒ 结论（由数字决定，不是写死的判断）：')
+if (la.afterUpperLayers > 800) {
+  console.log(`    搬完 ${la.upperLayers} 仍有 ${la.afterUpperLayers} 行 > 800 —— 跨过 800 只能靠「动 L0」。`)
+} else {
+  console.log(`    搬完 ${la.upperLayers} 是 ${la.afterUpperLayers} 行，已经 ≤ 800 —— 「按层搬」到这里就够了。`)
+  console.log(`    但继续搬 L0（${la.l0Lines} 行）会把本文件压到 ${la.afterL0} 行，那是「要不要把它变成纯壳」的决定，`)
+  console.log('    不是搬运顺序问题：那一步需要另立一次「入口点归位」，并接受本文件变成 store.ts 那种壳。')
+}
+console.log(`    剩下的 ${la.afterL0} 行是 import / re-export / 文件头注释 / 空行 —— 它们不是声明，`)
+console.log('    没有任何一步「按层搬」能带走。')

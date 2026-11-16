@@ -22,7 +22,7 @@
 只用 `fs` + 正则，**CI 上真跑**。
 
 但仓里另有**五个**测试文件的部分断言依赖本机条件。**2026-11-16 用真实模拟重测**
-（`git init` 单提交使历史不可达 + `node_modules/typescript` 抛错的桩 + 全部 498 条）：
+（`git init` 单提交使历史不可达 + `node_modules/typescript` 抛错的桩 + 全套测试）：
 
 | 文件 | 条数 | CI | 为什么 |
 |---|---|---|---|
@@ -32,8 +32,8 @@
 | `test/v212-retrieve-no-mutable-state.test.mjs` | 2 | **skip** | 依赖 closure（读 `--declarations` 的 `mutable` 字段）|
 | `test/v210-classify-buckets.test.mjs` | **1**（共 7 条）| **skip 1 / 跑 6** | 它**不依赖** typescript（`--classify` 是纯文本多重集比较）。①–⑥ 在 CI 真跑，只有 ⑦ 因缺历史提交 `f9d1abf` 跳 |
 
-合计 **13 条**（12 条因缺 typescript，1 条因缺 git 历史）。实测 498 条中 **485 条在 CI 真跑**。
-CI 的 `Test` 步骤会把这四个计数与 skip 明细写进 job summary —— 不必下载日志、也不必本地模拟。
+合计 **13 条**（12 条因缺 typescript，1 条因缺 git 历史）。判据只看这个差；总数与跑了多少条
+**不写在这里**（写死就会过时），由 CI 的 `Test` 步骤把它自己打印进 job summary —— 不必下载日志、也不必本地模拟。
 
 > **订正（2026-11-16）**：上一版这里写「11 条」、并把 `v210` 记成「整文件 skip、内部的 3 条纯函数也不跑」。
 > 那是**错的**：`v210` 一行都不碰 typescript，它的 ①–⑥（含三条 can-red）在 CI 上全部真跑。
@@ -118,3 +118,4 @@ filter.ts -> retrieve.ts : type-only   （import type { MemoryHit }，运行时�
 | `src/retrieve/commit-cache.ts` | 工作区 commit 归属：按分钟缓存，失败回落到空串；commit 漂移判定的权重常量同处一模块。 | `COMMIT_DRIFT_WEIGHT`, `clearCommitCache`, `currentCommitOf`, `sameCommit` | — |
 | `src/retrieve/documents.ts` | 取数层：把 SKILL.md / negatives.jsonl / facts-experiences.jsonl / sqlite 索引行都转成检索用的 Document。L4 整层（8 声明）。 | `ERROR_IDENTIFIER`, `STOPWORDS`, `contentOf`, `layerDocuments`, `looksLikeIncidentLog`, `negativeDocuments`, `skillDocuments`, `tierDocumentOf` | edges.ts, ledger-cache.ts, retrieve.ts (type-only), retrieve/interning.ts, skill-cache.ts, sqlite-index.ts (type-only), store/skill.ts, workspace.ts |
 | `src/retrieve/scene.ts` | 场景分类闭环：`sceneCache` 状态 + 它的读写者 + 提示/正则 + LLM 与词法两条分类路径。搬完使 `retrieve.ts` 的模块级可变状态归零。 | `LEGACY_SCENE_HINTS`, `SCENE_PROMPT`, `SCENE_TAG`, `SceneCacheEntry`, `SceneOptions`, `classifyScene`, `clearSceneCache`, `inferScene`, `sceneCache`, `sceneCacheStats` | extract.ts (type-only) |
+| `src/retrieve/types.ts` | 契约类型族：检索层与调用方之间的**形状**约定（12 个纯类型声明）。没有一行会执行，所以在值依赖图上是孤立的 —— 第六步搬完使 `retrieve.ts` 里不再混有「只是形状」的行。 | `DocumentKind`, `MemoryHit`, `Document`, `Scored`, `WorkspaceGate`, `TaskAlignmentGate`, `DocumentCacheEntry`, `CandidateOptions`, `HybridRecallOptions`, `RetrieveResult`, `FilterTrace`, `FilterOptions`（共 12） | extract.ts (type-only), filter.ts (type-only) |

@@ -84,6 +84,7 @@ const SCANNED = [
   'retrieve/interning.ts',
   'retrieve/scene.ts',
   'retrieve/storage-tier.ts',
+  'retrieve/types.ts',
   'segment.ts',
   'skill-cache.ts',
   'sqlite-index.ts',
@@ -128,19 +129,22 @@ const EXEMPT = new Map([
       + '所以登记为天花板：尺寸可见、不可增长。',
   }],
   ['retrieve.ts', {
-    ceiling: 1294,
+    ceiling: 1074,
     reason:
       '检索层：词法召回、IDF×鲜活度×重要度打分、两阶段 LLM 过滤、提示渲染。它与 store.ts 曾共享大量'
-      + 'helper。2026-11-16 已完成五步搬运：'
+      + 'helper。2026-11-16 已完成六步搬运：'
       + '① 14 声明 → retrieve/interning.ts，② 6 声明 → retrieve/storage-tier.ts，'
       + '③ 5 声明 → retrieve/commit-cache.ts，④ 8 声明 → retrieve/documents.ts，'
-      + '⑤ 10 声明 → retrieve/scene.ts（2009 → 1763 → 1718 → 1673 → 1419 → 1294）。'
+      + '⑤ 10 声明 → retrieve/scene.ts，⑥ 12 个纯类型声明 → retrieve/types.ts'
+      + '（2009 → 1763 → 1718 → 1673 → 1419 → 1294 → 1074）。'
       + '第五步之后**模块级可变状态归零**（由 v212 机械断言）。'
+      + '第六步另外删掉 2 个零引用常量（CJK / LATIN）—— 那是**删除**，不是位移。'
       + '剩余主干 22 声明 / 557 行。'
-      + '层账（由 `node scripts/retrieve-report.mjs` 的「层账」一节算，不手抄）：1294 仍 > 800；'
-      + '搬完 L1+L2+L3 还剩 909；再搬完 L0（579）只剩 330 —— 那 330 行是 import / re-export / '
-      + '文件头注释 / 空行，不是可搬的声明。所以「要不要把 retrieve.ts 变成纯壳」是战略决定，'
-      + '不是「下一步搬哪层」能回答的（那一步另立「入口点归位」决定）。'
+      + '层账（由 `node scripts/retrieve-report.mjs` 的「层账」一节算，不手抄）：1074 行；'
+      + '搬完 L1+L2+L3 是 689 行，**已经 ≤ 800**；再搬 L0（335）只剩 354 —— '
+      + '那 354 行是 import / re-export / 文件头注释 / 空行，不是可搬的声明。'
+      + '所以「按层搬」到 L1+L2+L3 就够了；继续动 L0 是「要不要把它变成纯壳」的战略决定，'
+      + '需要另立一次「入口点归位」，并接受本文件变成 store.ts 那种壳。'
       + 'ceiling 随每次搬运收紧到新实测值 —— 这是棘轮，不是自觉'
       + '（由「ceiling 必须等于实测」那条断言强制）。'
       + 'D-1 仍落在这里的 hitOf，按裁定等重构完成后再修。',

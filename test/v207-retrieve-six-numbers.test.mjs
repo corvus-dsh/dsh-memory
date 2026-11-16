@@ -100,22 +100,37 @@ const AVAILABLE = compilerAvailable()
  *   第三步后          21 / 40·894  / 64 / 5 / 486·362·261·192 / 64·1301
  *   第四步后          22 / 30·647  / 56 / 4 / 365·317·208·175 / 56·1065
  *   第五步后          20 / 22·557  / 46 / 4 / 365·254·208·137 / 46·964
+ *   第六步后           6 / 22·557  / 32 / 4 / 365·106·163·86  / 32·720
  *
  * 分量 22 → 20：场景族从主干里离开后，主干从 30 缩到 22；
  * 而 `SceneOptions`/`SceneCacheEntry` 这两个纯类型声明随族走，
  * 它们在原图里各自只与 `classifyScene`/`sceneCache` 相连，整体离开。
+ *
+ * ── 2026-11-16：第六步搬运之后再次更新（契约类型族 → retrieve/types.ts）────────────────────────
+ *
+ * 搬走 12 个纯类型声明（DocumentKind / MemoryHit / Document / Scored / WorkspaceGate /
+ * TaskAlignmentGate / DocumentCacheEntry / CandidateOptions / HybridRecallOptions /
+ * RetrieveResult / FilterTrace / FilterOptions），并删掉 2 个零引用常量（CJK / LATIN）。
+ *
+ * **分量 20 → 6 是这一步最有信息量的数字**：那 12 个类型声明在值引用图里**不产生任何边**
+ * （它们只被类型引用，构建时擦除），所以它们原本是 12 个互不相连的孤立节点 ——
+ * 图里看起来像「20 个耦合的分量」，实际上主干之外的 14 个分量里有一大半是**从不出现在运行期**的类型。
+ * 搬走之后，剩下的 6 个分量全部是会被执行的代码。
+ *
+ * 主干不变（22 声明 / 557 行）：唯一的类型声明在主干里是 `MemoryHit` 的**使用方**，不是它自己。
+ * 层数不变（仍 4）：类型节点本来在各层都有，但都不承载值边，搬走不抽空任何一层。
  */
 const DOCUMENTED = {
-  components: 20,
+  components: 6,
   trunkDeclarations: 22,
   trunkLines: 557,
-  sccs: 46,
+  sccs: 32,
   nontrivialSccs: 0,
   layers: 4,
-  tiers: { D: 365, C: 254, B: 208, A: 137 },
-  tierCounts: { D: 3, C: 5, B: 9, A: 29 },
-  declarations: 46,
-  spanSum: 964,
+  tiers: { D: 365, C: 106, B: 163, A: 86 },
+  tierCounts: { D: 3, C: 2, B: 7, A: 20 },
+  declarations: 32,
+  spanSum: 720,
 }
 
 test('v207 ①: 当前六数与内置基线逐项相等（基线来自实测，不是从文档反读）', (t) => {
@@ -368,9 +383,12 @@ test('v207 ⑥: 成员按文件过滤 —— 不会静默取到别处的同名�
   const rows = JSON.parse(r.stdout.trim().split('\n').pop())
 
   /**
-   * `FilterOptions` 在整棵树里有两处模块级声明：`filter.ts:42` 与 `retrieve.ts:1644`。
-   * 第一版 `byName.set` 不过滤文件，于是 retrieve.ts 的 `FilterOptions` 被 filter.ts 的
+   * `FilterOptions` 在整棵树里有两处模块级声明：`filter.ts` 与 `retrieve/types.ts`。
+   * 第一版 `byName.set` 不过滤文件，于是 retrieve 侧的 `FilterOptions` 被 filter.ts 的
    * 同名项覆盖 —— 跨度从 49 行变成 16 行，自校验报差额 −33。这里钉住「按文件过滤」。
+   *
+   * 注：第六步把契约类型搬进 `retrieve/types.ts` 之后，第二个文件从 `retrieve.ts`
+   * 变成 `retrieve/types.ts` —— 被测的**性质**没变（跨文件模块级撞名），只是位置变了。
    *
    * 注：`provenanceOf` / `firstEvidence` 在 who-references 眼里也是"歧义"的，但那是因为它们
    * 还有**函数内局部**同名声明；`closure --declarations` 只收模块级，所以表里各只有一条。
@@ -380,12 +398,12 @@ test('v207 ⑥: 成员按文件过滤 —— 不会静默取到别处的同名�
   const files = new Set(duplicated.map((row) => row.file))
   assert.ok(files.size > 1,
     `前提：FilterOptions 应跨多个文件声明（实测 ${[...files].join(',') || '无'}）—— 这条测试才有意义`)
-  assert.ok(files.has('filter.ts') && files.has('retrieve.ts'),
-    `FilterOptions 应在 filter.ts 与 retrieve.ts 各有一条，实测在 ${[...files].join(',')}`)
+  assert.ok(files.has('filter.ts') && files.has('retrieve/types.ts'),
+    `FilterOptions 应在 filter.ts 与 retrieve/types.ts 各有一条，实测在 ${[...files].join(',')}`)
 
   // 两处行数不同 ⇒ 取错了会被数字抓到
   const sizes = new Map(duplicated.map((row) => [row.file, row.lines]))
-  assert.notEqual(sizes.get('filter.ts'), sizes.get('retrieve.ts'),
+  assert.notEqual(sizes.get('filter.ts'), sizes.get('retrieve/types.ts'),
     '两处的行数必须不同，否则「取错文件」这件事在数字上看不出来')
 
   // 每个 (file, name) 组合最多一条 —— 同一文件内的同名模块级声明会破坏 byName 的语义
