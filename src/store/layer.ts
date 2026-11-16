@@ -210,7 +210,7 @@ export function appendNegatives(memoryDir: string, negatives: ExtractedNegative[
     for (const negative of negatives) {
       if (scanThreat(`${negative.symptom} ${negative.cause} ${negative.avoid}`) !== undefined) continue
       // Gates ② (exact) and ④ (same symptom, different cause → link, never merge).
-      const plan = planNegative(existing as never, negative)
+      const plan = planNegative(existing, negative)
       if (plan.duplicate) {
         /**
          * ── THE `plan.conflicts.length === 0` GUARD WAS A BUG ─────────────────────────────────

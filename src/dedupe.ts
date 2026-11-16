@@ -18,6 +18,18 @@ import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 /**
+ * D-5（2026-11-16）：`NegativeRecord.evidence` 停在 v0.7 之前 —— 生产者早就在写复合指针了。
+ *
+ * `ExtractedNegative.evidence` 自 v0.7.1 起是 `EvidenceRef[]`，落盘后也一直是复合形状
+ * （`store/layer.ts` 的合并逻辑用 `keyOf` 同时认 `number | EvidenceRef`）；
+ * 只有这里的声明还停在 `number[]`。类型只约束「被读的那一侧」，而 `planNegative` 只读
+ * `symptom` / `cause`，所以这是一条零运行时风险的类型欠账。
+ *
+ * 用 `import type`：运行时擦除，dedupe.ts 仍不依赖 extract.ts 的任何值（无循环）。
+ */
+import type { EvidenceRef } from './extract.js'
+
+/**
  * NORMALISE FOR EXACT MATCH — and the two-digit rule that used to live here was a data-loss bug.
  *
  * WHAT CHANGED, AND WHY IT MATTERED
@@ -409,7 +421,8 @@ export interface NegativeRecord {
   symptom: string
   cause: string
   avoid: string
-  evidence: number[]
+  /** D-5: 磁盘上一直是 `number | EvidenceRef`（v0.7.1 起复合指针）；这里曾停在 `number[]`。 */
+  evidence: Array<number | EvidenceRef>
   conflictsWith?: number[]
 }
 
@@ -420,16 +433,30 @@ export interface NegativePlan {
   duplicate: boolean
 }
 
-/** Gate ②+④ for negative paths: exact duplicate vs. same-symptom-different-cause. */
-export function planNegative(existing: readonly NegativeRecord[], candidate: NegativeRecord): NegativePlan {
+/**
+ * Gate ②+④ for negative paths: exact duplicate vs. same-symptom-different-cause.
+ *
+ * ── D-5（2026-11-16）：第一个形参是「磁盘行」，不是 `NegativeRecord[]` ────────────────────────
+ *
+ * 磁盘读回来的是 `Record<string, unknown>[]`，而 `NegativeRecord` 是 interface、没有索引签名
+ * ⇒ 两者互不赋值。旧调用点只能写 `planNegative(existing as never, …)` —— `as never` 把
+ * 「行里到底有没有 symptom / cause」这条检查整个关掉了（比放宽签名更糟）。
+ * 这个函数只读这两个字段，所以这里如实声明「吃原始行」，并把两个字段显式 `String(...)`；
+ * 其余字段一概不碰。`NegativeRecord` 留在联合里，是为了 `planNegative(typedRows, …)`
+ * 这种调用不被同一形状的问题挡在门外。
+ */
+export function planNegative(
+  existing: ReadonlyArray<Record<string, unknown> | NegativeRecord>,
+  candidate: NegativeRecord,
+): NegativePlan {
   const symptom = normalizeForMatch(candidate.symptom)
   const cause = normalizeForMatch(candidate.cause)
   const conflicts: number[] = []
   let duplicate = false
   existing.forEach((record, index) => {
-    const sameSymptom = normalizeForMatch(record.symptom) === symptom
+    const sameSymptom = normalizeForMatch(String(record.symptom ?? '')) === symptom
     if (!sameSymptom) return
-    if (normalizeForMatch(record.cause) === cause) duplicate = true
+    if (normalizeForMatch(String(record.cause ?? '')) === cause) duplicate = true
     else conflicts.push(index)
   })
   return { conflicts, duplicate }

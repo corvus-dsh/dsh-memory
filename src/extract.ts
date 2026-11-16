@@ -627,6 +627,9 @@ export interface LlmLike {
     messages: Array<{ role: string; content: Array<{ type: 'text'; text: string }> }>
     maxTokens?: number
     signal?: AbortSignal
+    /** `string` on purpose: the host adapter's legal value set is unverified
+     * (docs/memory-known-defects.md §十三), and callers may omit it entirely. */
+    reasoningEffort?: string
   }): AsyncIterable<{ type?: string; text?: string; reason?: { kind?: string; failure?: { message?: string } } }>
 }
 

@@ -97,10 +97,13 @@ const BASELINE = new Map([
   // **冻结的是身份，不是数字**：真正的判据是下面的 BASELINE_IDENTITIES 里那三条仍在，
   // 而不是"哪个文件背了它"。搬文件必然改文件名，把基线钉死在文件上会把每一步搬运都报成新债。
   // 2026-11-16 D-1 修复后重冻结：`retrieve.ts` 4 → 3（`ageDays` 那条 2339 消失），总数 12 → 11。
+  // 2026-11-16 A 组（D-2/D-4/D-7）修完后实测 7 条：`extract.ts` 与 `index.ts` 的计数已归零，
+  // 本表按实测删掉这两行 —— 这是收紧，不是放手：今后这两个文件再出现任何一条都会红。
+  // 2026-11-16 B 组 D-3（`LlmLike.reasoningEffort`）修完后实测 6 条：`retrieve/scene.ts` 的 2353 随之消失。
+  // 2026-11-16 B 组 D-5（`NegativeRecord.evidence` + 删掉 `planNegative(existing as never, …)`）修完后
+  // 实测 5 条：`store/layer.ts` 的 `ExtractedNegative → NegativeRecord` 2345 消失，计数 2 → 1。
   ['retrieve.ts', 3],
-  ['store/layer.ts', 2],
-  ['index.ts', 2],
-  ['extract.ts', 1],
+  ['store/layer.ts', 1],
   ['ledger-cache.ts', 1],
 ])
 
@@ -270,8 +273,6 @@ const BASELINE_IDENTITIES = new Map([
   ["retrieve.ts\u00002339\u0000Property 'currentCommit' does not exist on type '{ threshold?: number; now?: number; scene?: string; workspace?: string; taskTerms?: ReadonlySet<string>; taskAlignment?: boolean; taskFixIntent?: boolean; }'.", 1],
   ["retrieve.ts\u00002339\u0000Property 'currentCommit' does not exist on type 'CandidateOptions'.", 1],
   ["retrieve.ts\u00002339\u0000Property 'updatedAt' does not exist on type 'MemoryHit'.", 1],
-  ["retrieve/scene.ts\u00002353\u0000Object literal may only specify known properties, and 'reasoningEffort' does not exist in type '{ provider?: string; model?: string; system?: string; messages: { role: string; content: { type: \"text\"; text: string; }[]; }[]; maxTokens?: number; signal?: AbortSignal; }'.", 1],
-  ["store/layer.ts\u00002345\u0000Argument of type 'ExtractedNegative' is not assignable to parameter of type 'NegativeRecord'.   Types of property 'evidence' are incompatible.     Type 'EvidenceRef[]' is not assignable to type 'number[]'.       Type 'EvidenceRef' is not assignable to type 'number'.", 1],
   ["store/layer.ts\u00002345\u0000Argument of type 'LayerRecord[]' is not assignable to parameter of type 'readonly Record<string, unknown>[]'.   Type 'LayerRecord' is not assignable to type 'Record<string, unknown>'.     Index signature for type 'string' is missing in type 'LayerRecord'.", 1],
 ])
 
