@@ -251,7 +251,12 @@ jobs:
       #
       # `run-gate.mjs` is byte-identical in all four repositories and checks its own copies by hashing
       # its siblings — one RESOURCE rule, four repositories, one implementation.
-      - name: Incremental type budget (RESOURCE-aware: no compiler on the runner)
+      # ⚠️ 引号是必需的，不是风格：值里的 `: `（冒号+空格）在 YAML 里是 mapping 指示符，
+      #    不加引号会让**整个 workflow 解析失败** —— run 会被创建但产出 0 个 job，
+      #    所有门禁一条都不跑，而本地 `npm run check` 全绿（本地从不解析 workflows）。
+      #    实测事故：run 44002473416（2026-11-17），CI 红了 6 个提交却没有任何 job 日志可看。
+      #    守护判据：`test/v220-workflow-yaml-safe.test.mjs`（四仓逐字节相同）。
+      - name: "Incremental type budget (RESOURCE-aware: no compiler on the runner)"
         run: node scripts/run-gate.mjs scripts/type-budget.mjs
 
       - name: Concurrency test (spawns 8 real processes — run SEPARATELY, and it is NOT skipped)
