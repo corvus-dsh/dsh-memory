@@ -1,4 +1,4 @@
-# D9 的形态 ⑧–⑳：门禁失效的十三种形状（附 ⑭ 取证方法论）
+# D9 的形态 ⑧–㉑：门禁失效的十四种形状（附 ⑭ 取证方法论）
 
 > **D9** 是「门禁不是装饰」这条纪律的反例册：凡是**该红没红、该拦没拦、红了却读不出原因**的，
 > 都登记在这里。①–⑦ 在项目报告里；本文件收 2026-11-17 这一天真实发生的五种，
@@ -334,10 +334,48 @@ process.env.GITHUB_HEAD_COMMIT_MESSAGE      ← 同上
 **判据**：任何失败消息里的「请做 X」，都要有一次在**开发者实际会跑的那个命令**里从红到绿的记录。
 做不到的话，那不是建议，是免责声明。
 
+## ㉑ 覆盖分支 ≠ 覆盖默认分支：主路径上的绕道
+
+**实测**（2026-11-17，graft B1-5 收尾）：
+
+`buildInjectionPlan` 里把两条轨道接进抽取分支：
+
+```js
+constraintsOverride !== undefined
+  ? selectConstraints(override.map(…), budget)                     ← 直通，不过两个 store
+  : extractConstraintsDetailed(events, budget, { workspace, rejections, manual })
+```
+
+看起来只是优化（「调用方已经有规则了」），实际上 **`constraintsOverride` 是主路径**：
+`graft_slice_and_inject` 在 L6862 先算 `fastConstraints = extractConstraints(raw.events)`，
+再把它当 override 传进来（v5.2 为了不阻塞关键路径，把 LLM 抽取挪到后台）。
+
+所以真实的切片**从来没有读过否决记录和主动声明**。`graft_constraint` 是一个写文件、
+而没有人读那个文件的工具。
+
+实测（`probe-v226`）：reject 一条规则 → 落盘成功（store 1 条，`rejectionCount: 1`）→
+再切片 ⇒ `plan.constraints` **仍然包含被否决的句子**。
+
+**这一条的教训比 ⑲ 更深**：⑲ 是「注释说接了、其实没接」；㉑ 是「接了，但接在了不是默认走的那一支」。
+后者的测试会全绿 —— 因为测试通常直接调纯函数或走 `extractConstraintsDetailed` 那一支，
+而生产走的是另一支。
+
+**判据**：
+1. 一个 `a ? X : Y` 的两支，若 X 是新接的行为、Y 是旧行为，必须**逐一确认哪一支是生产默认**。
+   `grep` 调用方，看有没有一个参数让 X 恒不成立。
+2. 端到端测试必须走**工具层入口**（`graft_slice_and_inject`），不是走内部函数。
+   v226 就是为了这个而存在：它的断言打在渲染后的 system prompt 字符串上。
+3. 证红要分别做：摘过滤 ⇒ ① 红；摘主动轨 ⇒ ②③ 红。
+
+**本仓处置**：`constraintsOverride` 保留（它是合法的性能决定），但**两支都汇到同一个池**，
+再统一过 `applyManualConstraints` → `filterRejectedConstraints` → `selectConstraints`。
+未来若有第三个分支，它有一个显眼的「该去哪儿」，而不是一个显眼的「可以忘」。
+
 ---
 
 ## 一句话
 
 **B0 的目的是「让门禁真的会咬人」。它咬的第一个，是它自己的安装者。**
-这不是失败，这是 B0 生效了；⑨⑩⑪⑫⑬⑮⑯⑰⑱⑲⑳ 是它生效时留下的牙印
-（⑭ 是取证时学到的手法，⑮ 是「自称相同」这句话本身的代价，⑲⑳ 是「接缝」与「建议」各自的代价）。
+这不是失败，这是 B0 生效了；⑨⑩⑪⑫⑬⑮⑯⑰⑱⑲⑳㉑ 是它生效时留下的牙印
+（⑭ 是取证时学到的手法，⑮ 是「自称相同」这句话本身的代价，⑲⑳ 是「接缝」与「建议」的代价，
+㉑ 是「接在非默认分支上」的代价）。
