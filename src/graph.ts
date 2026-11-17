@@ -1,28 +1,19 @@
 /**
  * DYNAMIC TASK GRAPH — the durable shape of "what this task is, right now".
  *
- * ── WHY A GRAPH AND NOT A TODO LIST ───────────────────────────────────────────────────────────
+ * A flat todo list answers "what is next" and nothing else. This layer needs two more questions: WHICH
+ * PHASE is this (a `testing` phase and a `coding` phase call for different knowledge, and the phase
+ * belongs to the NODE), and WHAT DID WE LEARN HERE (the bidirectional anchor: a node points at knowledge
+ * via `knowledgePointers`, and the knowledge records which nodes used it, written by `recordKnowledgeRefs`).
  *
- * `todo_write` is flat, unordered and rewritten wholesale; it answers "what is next" and nothing else.
- * This layer needs two questions a flat list cannot express: WHICH PHASE is this (a `testing` phase and
- * a `coding` phase call for different knowledge, and the phase belongs to the NODE), and WHAT DID WE
- * LEARN HERE (the bidirectional anchor: a node points at knowledge via `knowledgePointers`, and the
- * knowledge records which nodes used it, written by `recordKnowledgeRefs`).
+ * TWO INVARIANTS. `start` is fixed: exactly one, always present, never removed — a graph without it is a
+ * different task, not an edited one. The goal can be LOCKED: a stated objective must not be quietly
+ * rewritten by the same model working on it (that is how "fix the crash" becomes "delete the crashing
+ * test"). The lock covers the DESTINATION, not the journey — see `graph-v3.ts` for the two field sets.
  *
- * ── THE TWO INVARIANTS THE USER NAMED ─────────────────────────────────────────────────────────
- *
- *   START IS FIXED. Exactly one `start` node, always present, never removed — a graph without it is a
- *     different task, not an edited one.
- *   THE GOAL CAN BE LOCKED. A stated objective must not be quietly rewritten by the same model working
- *     on it (that is how "fix the crash" becomes "delete the crashing test"). While `goalLockedAt` is
- *     set, `update`/`deprecate` on that node is refused; the only way out is an explicit `unlock` with
- *     a recorded justification. Paths stay open: nodes are added, changed and abandoned freely.
- *
- * ── STORAGE ───────────────────────────────────────────────────────────────────────────────────
- *
- * One JSON document, `<memoryDir>/task-graph.json`, written atomically under a lease. A single document
- * rather than a ledger because a graph is MUTATED in place by definition; the audit trail is one
- * `history` entry per accepted mutation.
+ * STORAGE. One JSON document, `<memoryDir>/task-graph.json`, written atomically under a lease. A single
+ * document rather than a ledger because a graph is MUTATED in place; the audit trail is one `history`
+ * entry per accepted mutation.
  */
 
 import { existsSync, readFileSync } from 'node:fs'
@@ -33,24 +24,21 @@ import { withFileLock } from './lock.js'
 import { normalizeNodeTypes, normalizeVocabList, recordKnowledgeRefs } from './knowledge.js'
 import type { KnowledgeEntry, KnowledgeQueryResult, KnowledgeRef } from './knowledge.js'
 /**
- * ── THE v3 FIELD SURFACE LIVES IN ITS OWN MODULE (B2-T1) ────────────────────────────────────────
+ * THE v3 FIELD SURFACE LIVES IN ITS OWN MODULE.
  *
- * `graph.ts` owns the GRAPH: nodes, edges, cycles, the goal lock, history. `graph-v3.ts` owns ONE
- * thing: how a v3 field is judged. Both directions call into it, so a written field and a re-read
- * field cannot disagree about what a valid value is.
- *
- * It is a separate file because this one is governed by a hard 800-line cap
- * (`test/v205-module-size-cap.test.mjs`) and a registered ceiling may only go DOWN. The first attempt
- * inlined all of it here and took the file from 681 to 1,351 lines — the cap then refused it, which is
- * the cap doing its job. Splitting along a real seam beats raising a ceiling, because a file nobody
- * can read is a file nobody reviews.
+ * `graph.ts` owns the GRAPH (nodes, edges, cycles, the goal lock, history); `graph-v3.ts` owns how a v3
+ * field is JUDGED. Both directions call into it, so a written field and a re-read field cannot disagree
+ * about what a valid value is. It is a separate file because this one has a hard 800-line cap and a
+ * registered ceiling may only go DOWN — splitting along a real seam beats raising a ceiling.
  */
 import {
   applyV3Patch,
+  classifyGoalUpdate,
   asAuthor,
   asHarvestedAt,
   asPersistentConstraints,
   carryUnknownKeys,
+  goalLockedReason,
   mergePersistentConstraints,
   noteGraphWarning,
   pickV3,
@@ -93,7 +81,6 @@ export interface GraphNode {
   /** What this phase must accomplish. Free text, written for the next reader. */
   requirements: string[]
   status: NodeStatus
-  /** Ids that must finish first; validated (no self-edge, no dangling id, no cycle). */
   dependsOn: string[]
   /** Global knowledge entries this node produced or relies on. The forward half of the anchor. */
   knowledgePointers: string[]
@@ -104,7 +91,6 @@ export interface GraphNode {
   createdAt: string
   updatedAt: string
 
-  // v3 (B2-T1): optional on every node; see graph-v3.ts for meaning, asNode for judging.
   origin?: { kind: 'planned' | 'inserted'; reason: string; by: Author }
   lastChange?: { by: Author; revision: number }
   objective?: string
@@ -128,10 +114,7 @@ export interface GraphHistoryEntry {
   reason: string
   /** Field names that actually changed, so a reader does not have to diff two snapshots. */
   changed: string[]
-  /**
-   * Who made the change. Entries written before B2-T1 have none: they do not take part in
-   * author-filtered views, and the reader says so rather than pretending they were authored.
-   */
+  /** Who made the change. Pre-B2-T1 entries have none and are reported as such, never invented. */
   author?: Author
 }
 
@@ -143,10 +126,7 @@ export interface TaskGraph {
   /** The stated objective of the whole graph. Immutable while `goalLockedAt` is set. */
   goal: string
   goalLockedAt: string
-  /**
-   * Project-level constraints. They do NOT disappear when a node closes (that is what
-   * `ephemeralConstraints` are for); they end only when `retiredAt` is set.
-   */
+  /** Project-level constraints: outlive every node, end only when `retiredAt` is set. */
   persistentConstraints: PersistentConstraint[]
   nodes: GraphNode[]
   /** Newest last. Capped: this is an audit trail, not the state. */
@@ -557,18 +537,35 @@ export function updateGraph(memoryDir: string, input: GraphUpdateInput): GraphUp
     const current = graph.nodes[index]
 
     /**
-     * THE GOAL LOCK, ENFORCED HERE AND NOWHERE ELSE.
+     * ── THE LOCK PROTECTS THE DESTINATION, NOT THE JOURNEY ────────────────────────────────────────
      *
-     * A locked goal refuses `update` and `deprecate` on the goal node AND any change to the
-     * top-level `goal` text. `activate`/`complete` are still allowed deliberately: working on the
-     * goal is what the lock is protecting, not reporting progress on it.
+     * The old guard refused EVERY `update` on the goal node, while the comment above it claimed the
+     * opposite ("not reporting progress on it"). Measured 2026-11-17: after `lock-goal`, the five
+     * journey fields could not be written, and the restore tool had to unlock → write → re-lock.
+     *
+     * The classification lives in `graph-v3.ts` with both field sets — one definition of what the lock
+     * covers, and an unlisted field is REFUSED so a future field cannot silently bypass it.
      */
-    const touchesGoal = targetId === GOAL_NODE_ID || (input.node !== undefined && typeof input.node.requirements !== 'undefined' && targetId === GOAL_NODE_ID)
-    if (graph.goalLockedAt.length > 0 && touchesGoal && (op === 'update' || op === 'deprecate')) {
-      return fail(
-        'GOAL_LOCKED',
-        `最终目标已在 ${graph.goalLockedAt} 锁定，${op} 被拒绝。路径可以调整，终点不能改；确需修改请先 unlock-goal 并说明理由。`,
-      )
+    if (graph.goalLockedAt.length > 0 && targetId === GOAL_NODE_ID && (op === 'update' || op === 'deprecate')) {
+      if (op === 'deprecate') {
+        return fail(
+          'GOAL_LOCKED',
+          `最终目标已在 ${graph.goalLockedAt} 锁定，deprecate 被拒绝：废弃终点等于换一个目标。` +
+            '确需修改请先 unlock-goal 并说明理由。',
+        )
+      }
+      const touched = Object.entries(input.node ?? {})
+        .filter(([, value]) => value !== undefined)
+        .map(([key]) => key)
+      /**
+       * The classification lives in `graph-v3.ts` with both field sets, so there is one definition of
+       * what the lock covers rather than a rule here and a list there (⑪).
+       */
+      const verdict = classifyGoalUpdate(touched)
+      if (verdict.allowed === false) {
+        return fail('GOAL_LOCKED', goalLockedReason(graph.goalLockedAt, verdict))
+      }
+      // Every touched field is a journey field: the update proceeds.
     }
     if (current.fixed === true && op === 'deprecate' && targetId !== GOAL_NODE_ID) {
       return fail('RESERVED', `${targetId} 是固定节点，不能废弃`)
