@@ -375,6 +375,8 @@ export interface GraphUpdateInput {
   constraint?: unknown
   /** For `relax`: which top-level constraint to retire. */
   constraintId?: string
+  /** WHO is editing the graph (graph-level, not a node field). `node.author` also accepted. */
+  author?: unknown
   /** For `lock-goal`: the objective that becomes immutable. Empty keeps the current one. */
   goal?: string
   /** Required for `unlock-goal` and recorded on every entry. */
@@ -501,7 +503,7 @@ export function updateGraph(memoryDir: string, input: GraphUpdateInput): GraphUp
      */
     if (op === 'constrain' || op === 'relax') {
       if (reason.length === 0) return fail('MISSING_REASON', `${op} 必须写明理由（reason），它会进审计历史`)
-      const author = asAuthor(input.node?.author, () => at)
+      const author = asAuthor(input.author ?? input.node?.author, () => at)
       if (author === undefined) {
         return fail('MISSING_AUTHOR', 'constrain/relax 需要 author（谁、第几代、第几次尝试）：约束是项目级事实，没有归属就没有审计链。')
       }
@@ -544,7 +546,6 @@ export function updateGraph(memoryDir: string, input: GraphUpdateInput): GraphUp
         return fail('NODE_EXISTS', `节点 ${targetId} 已存在；改它请用 op: update`)
       }
       const suppliedV3: Record<string, unknown> = { ...(input.node ?? {}) }
-      /* Only v3 fields are spread — see `pickV3` for why a wholesale spread breaks the id. */
       const node = asNode(
         {
           id: targetId,
@@ -563,8 +564,7 @@ export function updateGraph(memoryDir: string, input: GraphUpdateInput): GraphUp
         at,
       )
       if (node === undefined) return fail('NODE_NOT_FOUND', `节点 ${targetId} 的 id 不合法`)
-      /** A supplied field that did not survive is a REFUSAL on the write side — see `vanishedFields`. */
-      const missing = vanishedFields(suppliedV3, node)
+        const missing = vanishedFields(suppliedV3, node)
       if (missing.length > 0) return fail('INVALID_FIELD', `节点 ${targetId}：${VANISHED_FIELDS_HINT}（涉及 ${missing.join(', ')}）`)
       // Dependencies must already exist: a dangling edge is a node nobody declared a reason for.
       const dangling = node.dependsOn.filter((parent) => !graph.nodes.some((other) => other.id === parent))
@@ -684,7 +684,7 @@ export function updateGraph(memoryDir: string, input: GraphUpdateInput): GraphUp
     const merged = mergePersistentConstraints(persistentConstraints, input.persistentConstraints, () => at)
     if (merged.ok === false) return fail('INVALID_FIELD', merged.reason)
     persistentConstraints = merged.list
-    const author = asAuthor(input.node?.author, () => at)
+    const author = asAuthor(input.author ?? input.node?.author, () => at)
     const next = finish({
       ...graph,
       persistentConstraints,

@@ -366,6 +366,25 @@ function seedGoalJourney(memoryDir, dataFile, write) {
   console.log('')
   console.log(`goal 现在有 ${got.length} 个 v3 字段：${got.join(', ')}`)
   console.log(`goal 文本逐字未变 ✅   goalLockedAt = ${after.goalLockedAt || '(未锁)'}`)
+  /**
+   * ── SAY THAT THE LOCK WAS BROKEN, DO NOT JUST SHOW THE NEW TIMESTAMP ────────────────────────────
+   *
+   * `goalLockedAt` means "when THIS lock was established". Unlock → write → re-lock therefore writes a
+   * NEW timestamp, and that is correct: keeping the old one would claim the lock never lapsed while it
+   * demonstrably did.
+   *
+   * But a new timestamp shown without saying so reads as "nothing happened here" — a reader comparing
+   * the file before and after would see a different value and have to guess why. The script caused the
+   * break, so the script reports it, in the same output, without being asked.
+   */
+  if (lockedBefore.length > 0 && after.goalLockedAt !== lockedBefore) {
+    console.log('')
+    console.log(`⚠ 锁被短暂解除过一次（这是解锁-重锁的必然结果，不是意外）：`)
+    console.log(`    解锁前 goalLockedAt = ${lockedBefore}`)
+    console.log(`    重锁后 goalLockedAt = ${after.goalLockedAt}`)
+    console.log('    goalLockedAt 的语义是「这次锁是什么时候建立的」。保留旧值等于否认锁曾中断 —— 所以它变了。')
+    console.log('    goal 文本本身逐字未变（上面已断言）。')
+  }
 }
 
 /**

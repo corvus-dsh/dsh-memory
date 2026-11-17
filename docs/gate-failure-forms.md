@@ -587,6 +587,46 @@ node: { id, title, nodeType, requirements, status, dependsOn, knowledgePointers 
 **本次落地**：13 个 v3 字段逐个声明（不是 `additionalProperties: true`，那会失去校验），
 新增 v230 ⑪–⑬ 三条测试，其中 can-red 是移除 `log_pointers` 的转发 ⇒ ⑫⑬ 立刻红。
 
+**㉙ 的第二形态：参数不只会「漏」，还会「放错层」。**
+
+**实测**（2026-11-17，同一批）：`author` 被加进了 `V3_FORWARD`（**节点字段**表），
+于是 `...forwarded` 把它展开进 `node`，而顶层 `input.author` **永远是 undefined**。
+`constrain` / `relax` 从顶层读它（它答的是「谁在改图」，不是任何节点的属性）
+⇒ **每一个按 schema 写的调用都 `MISSING_AUTHOR`**。
+
+**它为什么躲过了全绿的测试套件**：能用的形状是 `node: { author }`（因为 `updateGraph`
+同时接受 `input.node?.author`），而测试先写了那个形状。
+于是**功能通过一个没写进 schema 的形状工作，通过写进 schema 的形状失败**——
+针对能用的那个写测试，会一直绿。
+
+**判据补充**：参数也有「层」的问题。检查清单要加一句：
+```
+(d) 这个参数属于图的顶层，还是属于某个节点？写进 schema 的哪一层，就必须从哪一层读。
+```
+**并且**：验证这条路径的测试必须**走工具层**（`tools.get(...).execute(...)`），
+不许从 `updateGraph` 直接调 —— 直调会绕过工具层，工具层的缺陷在那一层看不见。
+
+**本次落地**：顶层是规范位置，`node.author` 作为兼容路径保留（既有调用者不被静默破坏，
+两者都给时顶层胜出）；`test/v231` 六条全部走工具层，can-red 是去掉顶层转发 ⇒ ②③⑤ 立刻红。
+
+## 修改一条长期约束的唯一方式：`relax` 旧的 + `constrain` 新的
+
+一条约束被**原地修改**，它的历史就断了 —— 后代读到的是一条「从 2026-11-17 起就是这样」的规则，
+而它实际上换过内容。所以 `constrain` **拒绝已存在的 id**（`CONSTRAINT_EXISTS`）。
+
+正确写法是把替代关系写在 `note` 里：
+
+```
+memory_graph_update { op: 'constrain',
+  constraint: { id: 'pc-7', text: '…新规则…',
+                note: '替代 pc-3（pc-3 已 relax：理由…）' },
+  author: {…}, reason: '…' }
+memory_graph_update { op: 'relax', constraintId: 'pc-3', author: {…}, reason: '…' }
+```
+
+两条都能读到：旧的带 `retiredAt`/`retiredWhy`，新的带 `note` 指向它。
+**「退休不是删除」+「新增不是覆盖」合起来，才使约束的历史可读。**
+
 ## ㉚ 三个文件之间的「挪来挪去」不减少总行数
 
 **实测**（2026-11-17）：`graph.ts` 因新增 `constrain`/`relax` 涨到 919 行、超过 800 上限。

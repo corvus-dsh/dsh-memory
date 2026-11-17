@@ -21,7 +21,24 @@
  * agree only until one was edited (⑪).
  */
 
-/** The v3 fields: tool-side name → storage-side name. Only keys the caller sent are forwarded. */
+/**
+ * The v3 fields: tool-side name → storage-side name. Only keys the caller sent are forwarded.
+ *
+ * ── `author` IS NOT IN THIS TABLE, AND PUTTING IT HERE WAS A REAL BUG (measured 2026-11-17) ──────
+ *
+ * The first version listed `['author', 'author']`, so `...forwarded` spread it into the `node` object
+ * and the top-level `input.author` was ALWAYS `undefined`. `constrain` / `relax` read the author from
+ * the top level (it is "who is editing the graph", not a node field), so they failed with
+ * `MISSING_AUTHOR` on every call made the documented way.
+ *
+ * What made it hard to see: the shape that DID work — `node: { author }` — was the one the tests used,
+ * and the storage layer accepts it because `updateGraph` reads `input.node?.author`. So the feature
+ * worked through an undocumented shape and failed through the documented one. ㉙ in a new form:
+ * **the parameter can be in the wrong LAYER, not just missing from the whitelist.**
+ *
+ * Both shapes are now accepted, with the TOP LEVEL being canonical: a caller that follows the schema
+ * gets the right behaviour, and one that followed the earlier (wrong) examples is not silently broken.
+ */
 const V3_FORWARD: ReadonlyArray<readonly [tool: string, storage: string]> = [
   ['origin', 'origin'],
   ['last_change', 'lastChange'],
@@ -36,7 +53,6 @@ const V3_FORWARD: ReadonlyArray<readonly [tool: string, storage: string]> = [
   ['evidence', 'evidence'],
   ['log_pointers', 'logPointers'],
   ['ephemeral_constraints', 'ephemeralConstraints'],
-  ['author', 'author'],
 ]
 
 export interface GraphToolDeps {
@@ -94,6 +110,22 @@ export function graphUpdateTool(deps: GraphToolDeps): Record<string, unknown> {
         goal: { type: 'string', description: 'For lock-goal: the objective that becomes immutable.' },
         reason: { type: 'string', description: 'Required for unlock-goal/relax; recorded on every accepted edit.' },
         /**
+         * ── `author` IS A GRAPH-LEVEL ARGUMENT (fixed 2026-11-17) ──────────────────────────────────
+         *
+         * It answers "WHO is editing the graph", which is not a property of any node — the same actor
+         * edits many nodes in one session. Declaring it only under `node` (as the first version did)
+         * meant `constrain`/`relax`, which read it from the top level, refused every documented call.
+         *
+         * It stays accepted under `node` as well, because the earlier schema invited that shape and
+         * code already written against it must not silently stop working. The top level is canonical.
+         */
+        author: {
+          type: 'object',
+          description:
+            '{ kind, sessionId, generation, attempt, agentName?, role?, at } —— attempt 必填。' +
+            '这是「谁在改图」，是图级参数；constrain / relax 必须提供。',
+        },
+        /**
          * The v3 fields are declared ONE BY ONE rather than opening `additionalProperties`. Snake_case on
          * the way in (`log_pointers`, `ephemeral_constraints`) matches the existing `depends_on` /
          * `knowledge_pointers` convention; the mapping below translates to camelCase.
@@ -129,7 +161,9 @@ export function graphUpdateTool(deps: GraphToolDeps): Record<string, unknown> {
             },
             author: {
               type: 'object',
-              description: '{ kind, sessionId, generation, attempt, agentName?, role?, at } —— attempt 必填',
+              description:
+                '{ kind, sessionId, generation, attempt, … } —— 兼容路径。规范位置是顶层 `author`（图级参数）；' +
+                '放在这里仍然被接受，但新调用请用顶层。',
             },
           },
           additionalProperties: false,
@@ -177,11 +211,28 @@ export function graphUpdateTool(deps: GraphToolDeps): Record<string, unknown> {
           dependsOn: node.depends_on ?? node.dependsOn,
           knowledgePointers: node.knowledge_pointers ?? node.knowledgePointers,
           ...forwarded,
+          /**
+           * The LEGACY location, preserved on purpose: the storage layer reads `input.node?.author`, and
+           * code written against the first schema puts it here. It is forwarded explicitly rather than
+           * through `V3_FORWARD` so it is visible that this is a compatibility path, not a node field.
+           */
+          ...(node.author === undefined ? {} : { author: node.author }),
         },
         goal: typeof args.goal === 'string' ? args.goal : undefined,
         reason: typeof args.reason === 'string' ? args.reason : undefined,
         constraint: args.constraint ?? undefined,
         constraintId: typeof args.constraintId === 'string' ? args.constraintId : undefined,
+        /**
+         * ── THE CANONICAL AUTHOR, AT THE TOP LEVEL ─────────────────────────────────────────────────
+         *
+         * `constrain`/`relax` read `input.author` (a graph-level fact), so this key has to exist where
+         * they look. The first version forwarded `author` inside `node` only, which made those two ops
+         * fail with `MISSING_AUTHOR` on every correctly-shaped call.
+         *
+         * `node.author` is accepted as a fallback so the wrong-but-shipped shape keeps working; the
+         * canonical one wins when both are present.
+         */
+        author: args.author ?? node.author ?? undefined,
         knowledgeDir: deps.knowledgeDir,
       } as never) as GraphToolResult
       /**

@@ -144,7 +144,7 @@ test('v230 ⑭: constrain 加一条带 author 的约束；relax 退休而不删�
     const added = await call('memory_graph_update', {
       op: 'constrain',
       constraint: { id: 'pc-t1', text: '不 force push、不 publish', note: '阶段 3 前有效' },
-      node: { author: AUTHOR },
+      author: AUTHOR,
       reason: 'v230 声明约束',
     })
     assert.equal(added.ok, true, `constrain 必须成功：${JSON.stringify(added).slice(0, 300)}`)
@@ -160,7 +160,7 @@ test('v230 ⑭: constrain 加一条带 author 的约束；relax 退休而不删�
     const duplicate = await call('memory_graph_update', {
       op: 'constrain',
       constraint: { id: 'pc-t1', text: '改一个说法' },
-      node: { author: AUTHOR },
+      author: AUTHOR,
       reason: 'v230 重复 id',
     })
     assert.equal(duplicate.ok, false)
@@ -169,7 +169,7 @@ test('v230 ⑭: constrain 加一条带 author 的约束；relax 退休而不删�
     const relaxed = await call('memory_graph_update', {
       op: 'relax',
       constraintId: 'pc-t1',
-      node: { author: AUTHOR },
+      author: AUTHOR,
       reason: '阶段 3 发版时解除',
     })
     assert.equal(relaxed.ok, true, `relax 必须成功：${JSON.stringify(relaxed).slice(0, 300)}`)
