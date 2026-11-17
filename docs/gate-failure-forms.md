@@ -1,4 +1,4 @@
-# D9 的形态 ⑧–⑬：门禁失效的六种形状（附 ⑭ 取证方法论）
+# D9 的形态 ⑧–⑮：门禁失效的七种形状（附 ⑭ 取证方法论）
 
 > **D9** 是「门禁不是装饰」这条纪律的反例册：凡是**该红没红、该拦没拦、红了却读不出原因**的，
 > 都登记在这里。①–⑦ 在项目报告里；本文件收 2026-11-17 这一天真实发生的五种，
@@ -167,9 +167,43 @@ FAIL check-readme-counts.mjs 四份副本已分叉：dsh-paradise (939b8bc46634 
 **构造环境的三条纪律**（本轮实践）：先备份 → 做替换 → 跑判据 → **还原并校验 SHA-256 逐字节一致** →
 把「还原一致 = True」写进报告。构造是为了**取证**，不是为了**改变状态**。
 
+**附：构造出来的环境 ≠ CI 环境。** 本次实测：模拟浅克隆时漏了兄弟仓（`dsh-paradise`），
+多出 1 条与 CI 无关的失败（`bridge: the layer decoding really happens`）；补上兄弟仓后它消失了。
+判据：受控实验的结论必须能区分「**被检对象的缺陷**」与「**模拟环境的缺陷**」，
+否则实验本身会成为新的假证据。
+
+---
+
+## ⑮ 「同源文件」靠约定，不靠判据 —— 于是它必然分化
+
+**形状**：`test/run-gate-resource.test.mjs` 的头部写着
+「THE SAME FILE IN FOUR REPOSITORIES, ON PURPOSE」，实测却是 **2 种版本**：
+`dsh-memory` 239 行（有确定性回退）/ 其余三仓 177 行。**没有任何判据比较过它。**
+
+**后果**（2026-11-17，observer CI run 44014143688）：observer 的 `Test` 步 **2 秒红**，
+唯一失败 = `run-gate: a REAL failure still exits 1 (the wrapper is not a blanket pass)`。
+根因：177 行版在**浅克隆**（CI 的 checkout 是 `depth=1`）里取 `<sha>~1` 作为 before ref，
+而 `~1` 在 `depth=1` 里不存在 ⇒ instrument `exit 2` ⇒ `run-gate` 翻成 `0` ⇒
+`assert.equal(code, 1)` 失败。memory 的 239 行走同一条路径，但有「不可测 ⇒ 回退到确定性
+cycle fixture」，所以绿 —— **同一个判据，两个仓给出相反结论。**
+
+**对照**：同一批文件里 `run-gate.mjs` 有 `--check-copies` 自校验，`check-readme-counts.mjs`
+有 FACT 5，唯独这个测试文件没有。它不是「忘了写判据」，而是「没人意识到它需要判据」。
+
+**判据**：任何自称「四仓相同」的文件，必须在**同一提交**里带一条比较它四份哈希的判据；
+否则「相同」只是一句注释。已落地：FACT 5 扩为 `IDENTICAL_ACROSS_REPOS` 清单
+（`scripts/check-readme-counts.mjs`、`test/run-gate-resource.test.mjs`），输出点名义上是
+**哪个文件**分叉、哪个仓、两个哈希前缀。
+
+**附：CLONE DEPTH 是隐藏的判据输入。** 依赖 `git log -N` / `~1` / `HEAD~1` 的判据，在
+`depth=1` 下行为不同。凡使用 git 历史的判据，必须（a）检测 `~1` 是否存在
+（b）不存在时回退，或**明确说「没测」** —— 不许把「测不了」写成「测了，结果是相同」
+（本轮实测：旧版 `why` 的分类把 instrument 的 `cannot measure … not PURE` 归进了 `was PURE`）。
+
 ---
 
 ## 一句话
 
 **B0 的目的是「让门禁真的会咬人」。它咬的第一个，是它自己的安装者。**
-这不是失败，这是 B0 生效了；⑨⑩⑪⑫⑬ 是它生效时留下的牙印（⑭ 是取证时学到的手法）。
+这不是失败，这是 B0 生效了；⑨⑩⑪⑫⑬⑮ 是它生效时留下的牙印
+（⑭ 是取证时学到的手法，⑮ 是「自称相同」这句话本身的代价）。

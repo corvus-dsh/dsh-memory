@@ -199,14 +199,24 @@ test('run-gate: a REAL failure still exits 1 (the wrapper is not a blanket pass)
       return
     }
     /**
-     * The wrapper maps the instrument's exit 2 to 0 (RESOURCE), so a 0 here means either
-     * PURE (a legitimate "nothing changed") or VACUOUS/unmeasurable. Name which, then use the
-     * deterministic fixture: a pair that is PURE cannot prove the wrapper maps FAIL → 1.
+     * The wrapper maps the instrument's exit 2 to 0 (RESOURCE), so a 0 here means one of THREE
+     * things — PURE (a legitimate "nothing changed"), VACUOUS, or NOT MEASURABLE. Name which, then
+     * use the deterministic fixture: a pair that is PURE cannot prove the wrapper maps FAIL → 1.
+     *
+     * `run-gate` collapses the instrument's 2 into 0, so the exit code alone no longer tells
+     * "byte-identical" from "could not measure". Reading the instrument's own words is what keeps
+     * the three apart — measured 2026-11-17: a shallow clone (CI clones depth=1) makes `~1`
+     * unresolvable, the instrument printed `cannot measure: … (a resource condition, not PURE)`,
+     * and the old two-branch version reported that as "was PURE" — i.e. it said "we measured it
+     * and it was identical" when in fact nothing was measured. That is the silent-misattribution
+     * failure this repository keeps writing down.
      */
     const why = code === 0
       ? (/(?:^|\n)VACUOUS/u.test(out)
-          ? `real history pair (${beforeRef} → ${afterRef}) was VACUOUS`
-          : `real history pair (${beforeRef} → ${afterRef}) was PURE, so it proves nothing about FAIL → exit 1`)
+          ? `real history pair (${beforeRef} → ${afterRef}) was VACUOUS — nothing compared`
+          : /cannot measure|resource condition, not PURE|invalid object name|unknown revision|does not exist/u.test(out)
+            ? `real history pair (${beforeRef} → ${afterRef}) COULD NOT BE MEASURED (the instrument reported a RESOURCE condition: e.g. \`~1\` absent in a shallow clone)`
+            : `real history pair (${beforeRef} → ${afterRef}) was PURE, so it proves nothing about FAIL → exit 1`)
       : `history pair (${beforeRef} → ${afterRef}) could not be measured (exit ${code})`
     usedCycle(why)
     return
