@@ -3,34 +3,26 @@
  *
  * ── WHY A GRAPH AND NOT A TODO LIST ───────────────────────────────────────────────────────────
  *
- * `todo_write` is a rendering of intent: flat, unordered, rewritten wholesale. It answers "what is
- * next" and nothing else. The persistence layer needs two questions a flat list cannot express:
- *
- *   1. WHICH PHASE is this? A `testing` phase and a `coding` phase call for different knowledge,
- *      and the phase is a property of the NODE, not of the sentence describing it.
- *   2. WHAT DID WE LEARN HERE, and where was it used? That is the bidirectional anchor: a node
- *      points at knowledge (`knowledgePointers`), and the knowledge records which nodes used it
- *      (`knowledge-refs.jsonl`, written by `recordKnowledgeRefs`).
+ * `todo_write` is flat, unordered and rewritten wholesale; it answers "what is next" and nothing else.
+ * This layer needs two questions a flat list cannot express: WHICH PHASE is this (a `testing` phase and
+ * a `coding` phase call for different knowledge, and the phase belongs to the NODE), and WHAT DID WE
+ * LEARN HERE (the bidirectional anchor: a node points at knowledge via `knowledgePointers`, and the
+ * knowledge records which nodes used it, written by `recordKnowledgeRefs`).
  *
  * ── THE TWO INVARIANTS THE USER NAMED ─────────────────────────────────────────────────────────
  *
- *   START IS FIXED.   Exactly one `start` node, always present, never removed. It is the identity
- *                     of the graph: a graph without it is a different task, not an edited one.
- *
- *   THE GOAL CAN BECOME IMMUTABLE. A long task whose objective is stated clearly must not have its
- *                     objective quietly rewritten by the same model that is working on it — that
- *                     is how "fix the crash" turns into "delete the crashing test". So the goal
- *                     node can be LOCKED (`goalLockedAt`). While locked, `update`/`deprecate` on
- *                     that node is refused with a reason, and the only way out is an explicit
- *                     `unlock` operation recorded with the caller's justification. Paths stay open
- *                     the whole time: nodes can be added, changed and abandoned freely.
+ *   START IS FIXED. Exactly one `start` node, always present, never removed — a graph without it is a
+ *     different task, not an edited one.
+ *   THE GOAL CAN BE LOCKED. A stated objective must not be quietly rewritten by the same model working
+ *     on it (that is how "fix the crash" becomes "delete the crashing test"). While `goalLockedAt` is
+ *     set, `update`/`deprecate` on that node is refused; the only way out is an explicit `unlock` with
+ *     a recorded justification. Paths stay open: nodes are added, changed and abandoned freely.
  *
  * ── STORAGE ───────────────────────────────────────────────────────────────────────────────────
  *
- * One JSON document, `<memoryDir>/task-graph.json`, written atomically under a lease. It is a
- * single document — not a ledger — because it is MUTATED in place by definition: a graph is the
- * current state, and an append-only history of every intermediate topology would be unreadable.
- * The audit trail is kept where it belongs: one `history` entry per accepted mutation.
+ * One JSON document, `<memoryDir>/task-graph.json`, written atomically under a lease. A single document
+ * rather than a ledger because a graph is MUTATED in place by definition; the audit trail is one
+ * `history` entry per accepted mutation.
  */
 
 import { existsSync, readFileSync } from 'node:fs'
@@ -40,6 +32,50 @@ import { atomicWrite } from './store.js'
 import { withFileLock } from './lock.js'
 import { normalizeNodeTypes, normalizeVocabList, recordKnowledgeRefs } from './knowledge.js'
 import type { KnowledgeEntry, KnowledgeQueryResult, KnowledgeRef } from './knowledge.js'
+/**
+ * ── THE v3 FIELD SURFACE LIVES IN ITS OWN MODULE (B2-T1) ────────────────────────────────────────
+ *
+ * `graph.ts` owns the GRAPH: nodes, edges, cycles, the goal lock, history. `graph-v3.ts` owns ONE
+ * thing: how a v3 field is judged. Both directions call into it, so a written field and a re-read
+ * field cannot disagree about what a valid value is.
+ *
+ * It is a separate file because this one is governed by a hard 800-line cap
+ * (`test/v205-module-size-cap.test.mjs`) and a registered ceiling may only go DOWN. The first attempt
+ * inlined all of it here and took the file from 681 to 1,351 lines — the cap then refused it, which is
+ * the cap doing its job. Splitting along a real seam beats raising a ceiling, because a file nobody
+ * can read is a file nobody reviews.
+ */
+import {
+  applyV3Patch,
+  asAuthor,
+  asHarvestedAt,
+  asPersistentConstraints,
+  carryUnknownKeys,
+  mergePersistentConstraints,
+  noteGraphWarning,
+  pickV3,
+  resolveNodeV3,
+  unknownKeyWarning,
+  VANISHED_FIELDS_HINT,
+  vanishedFields,
+} from './graph-v3.js'
+export { drainGraphWarnings, unknownNodeKeys } from './graph-v3.js'
+import type {
+  Alternative,
+  Author,
+  EphemeralConstraint,
+  LogPointer,
+  PersistentConstraint,
+  PrunedDirection,
+} from './graph-v3.js'
+export type {
+  Alternative,
+  Author,
+  EphemeralConstraint,
+  LogPointer,
+  PersistentConstraint,
+  PrunedDirection,
+} from './graph-v3.js'
 
 /** The identity of the graph's fixed origin. Reserved: no operation may create or remove it. */
 export const START_NODE_ID = 'start'
@@ -57,23 +93,31 @@ export interface GraphNode {
   /** What this phase must accomplish. Free text, written for the next reader. */
   requirements: string[]
   status: NodeStatus
-  /** Ids of nodes that must finish first. Validated: no self-edge, no dangling id, no cycle. */
+  /** Ids that must finish first; validated (no self-edge, no dangling id, no cycle). */
   dependsOn: string[]
   /** Global knowledge entries this node produced or relies on. The forward half of the anchor. */
   knowledgePointers: string[]
   /** True only for the start and goal nodes; they are protected against structural removal. */
   fixed: boolean
-  /**
-   * THE WRITE HALF OF THE PHASE LOOP, MADE AUDITABLE.
-   *
-   * Empty = this phase finished without recording anything into the global knowledge base.
-   * `knowledge_harvest` stamps it when the model actually writes. Keeping it on the node (rather
-   * than in a side set) means "which phases taught us nothing" survives a restart and is visible
-   * in the same read the DAG view uses.
-   */
+  /** Empty = this phase recorded nothing; `knowledge_harvest` stamps it. See `asHarvestedAt`. */
   harvestedAt: string
   createdAt: string
   updatedAt: string
+
+  // v3 (B2-T1): optional on every node; see graph-v3.ts for meaning, asNode for judging.
+  origin?: { kind: 'planned' | 'inserted'; reason: string; by: Author }
+  lastChange?: { by: Author; revision: number }
+  objective?: string
+  subgoals?: Array<{ id: string; text: string; done: boolean; verifiedBy?: string }>
+  alternatives?: Alternative[]
+  pruned?: PrunedDirection[]
+  estimate?: { complexity: 1 | 2 | 3 | 4 | 5; note?: string }
+  actual?: { complexity: 1 | 2 | 3 | 4 | 5; note?: string; closedAt?: string }
+  progress?: number
+  standing?: string
+  evidence?: string[]
+  logPointers?: LogPointer[]
+  ephemeralConstraints?: EphemeralConstraint[]
 }
 
 export interface GraphHistoryEntry {
@@ -84,6 +128,11 @@ export interface GraphHistoryEntry {
   reason: string
   /** Field names that actually changed, so a reader does not have to diff two snapshots. */
   changed: string[]
+  /**
+   * Who made the change. Entries written before B2-T1 have none: they do not take part in
+   * author-filtered views, and the reader says so rather than pretending they were authored.
+   */
+  author?: Author
 }
 
 export type GraphOp = 'add' | 'update' | 'deprecate' | 'activate' | 'complete' | 'lock-goal' | 'unlock-goal'
@@ -93,8 +142,12 @@ export interface TaskGraph {
   id: string
   /** The stated objective of the whole graph. Immutable while `goalLockedAt` is set. */
   goal: string
-  /** Empty string = unlocked. A non-empty ISO timestamp = the goal node is protected. */
   goalLockedAt: string
+  /**
+   * Project-level constraints. They do NOT disappear when a node closes (that is what
+   * `ephemeralConstraints` are for); they end only when `retiredAt` is set.
+   */
+  persistentConstraints: PersistentConstraint[]
   nodes: GraphNode[]
   /** Newest last. Capped: this is an audit trail, not the state. */
   history: GraphHistoryEntry[]
@@ -132,34 +185,7 @@ function asStringList(value: unknown, max = 12): string[] {
 /** Node ids are kebab-case, same grammar as everything else that travels between files. */
 const NODE_ID = /^[a-z0-9][a-z0-9._-]{0,47}$/u
 
-/**
- * P1-5 (audit 2026-11-08) — `harvestedAt` IS A TIMESTAMP, AND AN UNPARSEABLE ONE MUST NOT COUNT.
- *
- * WHY THIS IS NOT PEDANTRY. `harvestedAt` answers exactly one question — "did this finished phase
- * record what it learned?" — and the pre-step reminder, the `complete` receipt and the `unharvested`
- * statistic all read it as a BOOLEAN (non-empty means "answered"). The file is a plain JSON document
- * an external writer, a hand edit, or a half-finished migration can touch. Before this check any
- * non-empty string counted, so `harvestedAt: "yes"` — or a stale `"pending"` — would silently silence
- * the reminder FOREVER for that node, and nothing would report it.
- *
- * THE DIRECTION OF THE FAILURE MATTERS. Treating a bad value as `''` means "not harvested yet", so
- * the worst outcome is ONE reminder too many rather than a phase whose lesson is silently lost. That
- * is the same asymmetry the rest of this store uses for unreadable ledgers (fail toward asking again).
- *
- * The accepted form is a full ISO-8601 instant, which is what `new Date().toISOString()` produces —
- * the only thing this plugin ever writes. A date without a time (`2026-11-08`) is refused on purpose:
- * it parses, but it cannot order two harvests that happened the same day, and every consumer here
- * compares instants.
- */
-function asHarvestedAt(value: unknown): string {
-  if (typeof value !== 'string') return ''
-  const text = value.trim()
-  if (text.length === 0) return ''
-  // Accept only the canonical instant shape this plugin writes, then confirm it is a real date.
-  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/u.test(text)) return ''
-  const parsed = Date.parse(text)
-  return Number.isFinite(parsed) ? text : ''
-}
+/** A harvest stamp is a real ISO instant or nothing — see `asHarvestedAt` in `graph-v3.ts`. */
 
 function asNodeId(value: unknown): string {
   const text = typeof value === 'string' ? value.trim().toLowerCase() : ''
@@ -173,7 +199,7 @@ function asNode(raw: unknown, at: string): GraphNode | undefined {
   const id = asNodeId(record.id)
   if (id.length === 0) return undefined
   const nodeType = normalizeVocabList([record.nodeType ?? record.node_type ?? record.type], 1)[0] ?? ''
-  return {
+  const node: GraphNode = {
     id,
     title: typeof record.title === 'string' && record.title.trim().length > 0 ? record.title.trim() : id,
     nodeType,
@@ -193,8 +219,14 @@ function asNode(raw: unknown, at: string): GraphNode | undefined {
     harvestedAt: asHarvestedAt(record.harvestedAt),
     createdAt: typeof record.createdAt === 'string' ? record.createdAt : at,
     updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : at,
+    // ── v3 fields: one table, shared with the write side (see `resolveNodeV3`) ──
+    ...resolveNodeV3(record, () => at),
   }
+  carryUnknownKeys(node, record)
+  return node
 }
+
+/** Keys a node carries that this build does not recognise. Reported once per read, never dropped. */
 
 /**
  * Cycle check. A DAG that contains a cycle cannot be scheduled, and the failure mode is silent
@@ -248,6 +280,7 @@ export function emptyGraph(id: string, at?: string): TaskGraph {
     history: [],
     createdAt: stamp,
     updatedAt: stamp,
+    persistentConstraints: [],
   }
 }
 
@@ -281,25 +314,38 @@ export function readGraph(memoryDir: string, id = 'default'): TaskGraph {
   for (const raw of Array.isArray(record.history) ? record.history : []) {
     if (raw === null || typeof raw !== 'object') continue
     const entry = raw as Record<string, unknown>
+    const author = asAuthor(entry.author, () => stamp)
     history.push({
       at: typeof entry.at === 'string' ? entry.at : '',
       op: (typeof entry.op === 'string' ? entry.op : 'update') as GraphOp,
       nodeId: typeof entry.nodeId === 'string' ? entry.nodeId : '',
       reason: typeof entry.reason === 'string' ? entry.reason : '',
       changed: asStringList(entry.changed, 16),
+      ...(author === undefined ? {} : { author }),
     })
   }
+  /**
+   * ── REPORT WHAT WAS KEPT BUT NOT UNDERSTOOD (B2-T1 §3.1) ─────────────────────────────────────
+   *
+   * The carrying itself happens in `carryUnknownKeys`; the REPORT happens here so a read produces one
+   * sentence rather than one per node. See `unknownKeyWarning` for why this is a warning and not a
+   * refusal.
+   */
+  const unknownWarning = unknownKeyWarning(Array.isArray(record.nodes) ? record.nodes : [], record)
+  if (unknownWarning !== undefined) noteGraphWarning(unknownWarning)
   return {
     version: 1,
     id: typeof record.id === 'string' && record.id.length > 0 ? record.id : id,
     goal: typeof record.goal === 'string' ? record.goal : '',
     goalLockedAt: typeof record.goalLockedAt === 'string' ? record.goalLockedAt : '',
+    persistentConstraints: asPersistentConstraints(record.persistentConstraints, () => stamp),
     nodes,
     history: history.slice(-MAX_HISTORY),
     createdAt: typeof record.createdAt === 'string' ? record.createdAt : stamp,
     updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : stamp,
   }
 }
+
 
 export interface GraphUpdateInput {
   graphId?: string
@@ -314,7 +360,28 @@ export interface GraphUpdateInput {
     status?: string
     dependsOn?: unknown
     knowledgePointers?: unknown
+    /**
+     * The v3 fields (B2-T1). Typed `unknown` on the way IN, like `requirements`: this is the boundary
+     * where an arbitrary payload from a model arrives, so each one is validated rather than trusted.
+     */
+    origin?: unknown
+    lastChange?: unknown
+    objective?: unknown
+    subgoals?: unknown
+    alternatives?: unknown
+    pruned?: unknown
+    estimate?: unknown
+    actual?: unknown
+    progress?: unknown
+    standing?: unknown
+    evidence?: unknown
+    logPointers?: unknown
+    ephemeralConstraints?: unknown
+    /** Who is making this change. Recorded on the history entry. */
+    author?: unknown
   }
+  /** Present ⇒ REPLACE (same normaliser). Absent ⇒ carry the existing list through untouched. */
+  persistentConstraints?: unknown
   /** For `lock-goal`: the objective that becomes immutable. Empty keeps the current one. */
   goal?: string
   /** Required for `unlock-goal` and recorded on every entry. */
@@ -327,7 +394,17 @@ export interface GraphUpdateInput {
 export interface GraphUpdateResult {
   ok: boolean
   /** Machine-readable refusal code; absent on success. */
-  code?: 'UNKNOWN_OP' | 'NODE_NOT_FOUND' | 'NODE_EXISTS' | 'RESERVED' | 'GOAL_LOCKED' | 'DANGLING_DEPENDENCY' | 'CYCLE' | 'MISSING_REASON'
+  code?:
+    | 'UNKNOWN_OP'
+    | 'NODE_NOT_FOUND'
+    | 'NODE_EXISTS'
+    | 'RESERVED'
+    | 'GOAL_LOCKED'
+    | 'DANGLING_DEPENDENCY'
+    | 'CYCLE'
+    | 'MISSING_REASON'
+    /** A supplied v3 field did not survive normalisation — see `vanishedFields`. */
+    | 'INVALID_FIELD'
   reason?: string
   graph: TaskGraph
   node?: GraphNode
@@ -350,10 +427,10 @@ function persist(memoryDir: string, graph: TaskGraph): TaskGraph {
 }
 
 /**
- * Apply one mutation to the graph. Every accepted mutation appends ONE history entry.
+ * Apply one mutation. Every accepted mutation appends ONE history entry.
  *
- * REFUSALS ARE RETURNED, NOT THROWN: a model calling `memory_graph_update` needs to READ why its
- * edit was refused and try again. A throw here would surface as a tool error with no detail.
+ * REFUSALS ARE RETURNED, NOT THROWN: a model calling `memory_graph_update` must READ why its edit was
+ * refused and try again; a throw would surface as a tool error with no detail.
  */
 export function updateGraph(memoryDir: string, input: GraphUpdateInput): GraphUpdateResult {
   const graphId = typeof input.graphId === 'string' && input.graphId.length > 0 ? input.graphId : 'default'
@@ -436,6 +513,11 @@ export function updateGraph(memoryDir: string, input: GraphUpdateInput): GraphUp
       if (graph.nodes.some((node) => node.id === targetId)) {
         return fail('NODE_EXISTS', `节点 ${targetId} 已存在；改它请用 op: update`)
       }
+      const suppliedV3: Record<string, unknown> = { ...(input.node ?? {}) }
+      /**
+       * Only the v3 fields are spread, NOT `input.node` wholesale — see `pickV3` for the failure that
+       * a wholesale spread produces (an id refusal about the wrong thing).
+       */
       const node = asNode(
         {
           id: targetId,
@@ -445,12 +527,18 @@ export function updateGraph(memoryDir: string, input: GraphUpdateInput): GraphUp
           status: input.node?.status ?? 'pending',
           dependsOn: input.node?.dependsOn,
           knowledgePointers: input.node?.knowledgePointers,
+          // v3 fields travel through the SAME normaliser the reader uses, so a written node and a
+          // re-read node cannot disagree about what a valid value is.
+          ...pickV3(input.node as Record<string, unknown> | undefined),
           createdAt: at,
           updatedAt: at,
         },
         at,
       )
       if (node === undefined) return fail('NODE_NOT_FOUND', `节点 ${targetId} 的 id 不合法`)
+      /** A supplied field that did not survive is a REFUSAL on the write side — see `vanishedFields`. */
+      const missing = vanishedFields(suppliedV3, node)
+      if (missing.length > 0) return fail('INVALID_FIELD', `节点 ${targetId}：${VANISHED_FIELDS_HINT}（涉及 ${missing.join(', ')}）`)
       // Dependencies must already exist: a dangling edge is a node nobody declared a reason for.
       const dangling = node.dependsOn.filter((parent) => !graph.nodes.some((other) => other.id === parent))
       if (dangling.length > 0) return fail('DANGLING_DEPENDENCY', `依赖的节点不存在：${dangling.join(', ')}`)
@@ -535,11 +623,43 @@ export function updateGraph(memoryDir: string, input: GraphUpdateInput): GraphUp
         if (pointers.join('\u0000') !== current.knowledgePointers.join('\u0000')) changed.push('knowledgePointers')
         nextNode.knowledgePointers = pointers
       }
+      /**
+       * ── THE v3 FIELDS, UPDATE SIDE (B2-T1) ────────────────────────────────────────────────────
+       *
+       * Same rule as `add`: run the merged payload through the READER's normaliser, then refuse if a
+       * supplied field vanished. A patch REPLACES the field it names; a field the patch does not mention
+       * keeps its current value (the spread above already did that).
+       */
+      const v3Patch = applyV3Patch({ ...patch } as Record<string, unknown>, current as unknown as Record<string, unknown>, () => at)
+      if (v3Patch.ok === false) return fail('INVALID_FIELD', `节点 ${targetId}：${v3Patch.reason}`)
+      for (const key of v3Patch.changed) changed.push(key)
+      Object.assign(nextNode, v3Patch.fields as Partial<GraphNode>)
       updated = nextNode
     }
 
     const nodes = graph.nodes.map((node) => (node.id === targetId ? updated : node))
-    const next = finish({ ...graph, nodes, history: [...graph.history, { at, op, nodeId: targetId, reason, changed }] })
+    /**
+     * ── `persistentConstraints` SURVIVES EVERY OP THAT DOES NOT MENTION IT ──────────────────────
+     *
+     * The failure this guards is the one already measured here: a whole-document rebuild that keeps
+     * only what the current op touches. A `complete` on a coding node has nothing to do with
+     * project-level constraints, so a rebuild that "recomputes" them silently empties the list — and
+     * the constraints stop travelling while every receipt still says ok.
+     *
+     * Present in the input ⇒ REPLACE the list (through the same normaliser, same refuse-if-vanished
+     * rule). Absent ⇒ carry the existing list through untouched.
+     */
+    let persistentConstraints = graph.persistentConstraints
+    const merged = mergePersistentConstraints(persistentConstraints, input.persistentConstraints, () => at)
+    if (merged.ok === false) return fail('INVALID_FIELD', merged.reason)
+    persistentConstraints = merged.list
+    const author = asAuthor(input.node?.author, () => at)
+    const next = finish({
+      ...graph,
+      persistentConstraints,
+      nodes,
+      history: [...graph.history, { at, op, nodeId: targetId, reason, changed, ...(author === undefined ? {} : { author }) }],
+    })
     const anchoredResult = finalizeAnchor(memoryDir, input, persist(memoryDir, next), targetId, at)
     /**
      * ── THE WRITE HALF: A FINISHED PHASE MUST SAY WHAT IT LEARNED ─────────────────────────────

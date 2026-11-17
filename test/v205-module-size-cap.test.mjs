@@ -68,6 +68,7 @@ const SCANNED = [
   'extract.ts',
   'filter.ts',
   'graph.ts',
+  'graph-v3.ts',
   'hybrid-search.ts',
   'index.ts',
   'indexed-store.ts',
