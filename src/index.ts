@@ -44,6 +44,7 @@ import {
   renderNodeBanner,
   updateGraph,
 } from './graph.js'
+import { graphUpdateTool } from './graph-tool.js'
 
 /**
  * v0.32 — THE STORE'S WRITE SURFACE, re-exported for the causal layer's tests and for any consumer that
@@ -1529,81 +1530,17 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
     },
   })
 
-  ctx.tools?.register({
-    name: 'memory_graph_update',
-    description:
-      'Edit the dynamic task DAG. op: add | update | deprecate | activate | complete | lock-goal | unlock-goal. ' +
-      'The START node is fixed and the GOAL node becomes immutable once locked (unlock-goal needs a reason). ' +
-      'Nodes may carry knowledge_pointers; every accepted edit also records the reverse link in the global knowledge base.',
-    parameters: {
-      type: 'object',
-      properties: {
-        op: { type: 'string', enum: ['add', 'update', 'deprecate', 'activate', 'complete', 'lock-goal', 'unlock-goal'] },
-        nodeId: { type: 'string' },
-        graphId: { type: 'string' },
-        goal: { type: 'string', description: 'For lock-goal: the objective that becomes immutable.' },
-        reason: { type: 'string', description: 'Required for unlock-goal; recorded on every accepted edit.' },
-        node: {
-          type: 'object',
-          properties: {
-            id: { type: 'string' },
-            title: { type: 'string' },
-            node_type: { type: 'string' },
-            requirements: { type: 'array', items: { type: 'string' } },
-            status: { type: 'string' },
-            depends_on: { type: 'array', items: { type: 'string' } },
-            knowledge_pointers: { type: 'array', items: { type: 'string' } },
-          },
-          additionalProperties: false,
-        },
-      },
-      required: ['op'],
-      additionalProperties: false,
-    },
-    output: textOutput(),
-    execute: async (args: Record<string, unknown> = {}) => {
-      const node = (args.node ?? {}) as Record<string, unknown>
-      const result = updateGraph(resolved.memoryDir, {
-        graphId: typeof args.graphId === 'string' ? args.graphId : undefined,
-        op: String(args.op ?? 'update') as never,
-        nodeId: typeof args.nodeId === 'string' ? args.nodeId : typeof node.id === 'string' ? node.id : undefined,
-        node: {
-          id: typeof node.id === 'string' ? node.id : undefined,
-          title: typeof node.title === 'string' ? node.title : undefined,
-          nodeType: typeof node.node_type === 'string' ? node.node_type : typeof node.nodeType === 'string' ? node.nodeType : undefined,
-          requirements: node.requirements,
-          status: typeof node.status === 'string' ? node.status : undefined,
-          dependsOn: node.depends_on ?? node.dependsOn,
-          knowledgePointers: node.knowledge_pointers ?? node.knowledgePointers,
-        },
-        goal: typeof args.goal === 'string' ? args.goal : undefined,
-        reason: typeof args.reason === 'string' ? args.reason : undefined,
-        // The reverse anchor is written here, by the tool, so a caller cannot forget it.
-        knowledgeDir: resolved.knowledgeDir,
-      })
-      /**
-       * A refusal is a normal result, not an error: the model must READ why and try again. When the
-       * edit gained pointers, the same call returns what those pointers resolve to, so the model
-       * does not have to make a second query to know what it just anchored.
-       */
-      if (!result.ok) return result
-      const pointers = result.node?.knowledgePointers ?? []
-      const knowledge =
-        pointers.length === 0
-          ? undefined
-          : queryKnowledge(resolved.knowledgeDir, { limit: Math.min(50, pointers.length) })
-      return { ...result, ...(knowledge === undefined ? {} : { knowledge }) }
-    },
-  })
+  /* The write half is defined in `graph-tool.ts`; this site supplies paths + delegates. */
+  ctx.tools?.register(
+    graphUpdateTool({
+      memoryDir: resolved.memoryDir,
+      knowledgeDir: resolved.knowledgeDir,
+      updateGraph: updateGraph as never,
+      queryKnowledge: queryKnowledge as never,
+      textOutput,
+    }) as never,
+  )
 
-  /**
-   * v0.22 P1: PROGRESSIVE DISCLOSURE — read a skill's procedure on demand.
-   *
-   * The pre-step hint carries only the trigger (`when_to_use`), because that is what
-   * decides whether a skill is about the current task. The BODY — steps, verification,
-   * pitfalls — is spent only when the model has decided it wants it, which is what
-   * keeps a recall from costing every turn ~2 KB it may never use.
-   */
   ctx.tools?.register({
     name: 'skill_read',
     description:

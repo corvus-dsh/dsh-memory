@@ -68,7 +68,10 @@ const SCANNED = [
   'extract.ts',
   'filter.ts',
   'graph.ts',
+  'graph-goal-lock.ts',
+  'graph-tool.ts',
   'graph-v3.ts',
+  'graph-view.ts',
   'hybrid-search.ts',
   'index.ts',
   'indexed-store.ts',
@@ -122,7 +125,7 @@ const HISTORICAL = new Set([
  */
 const EXEMPT = new Map([
   ['index.ts', {
-    ceiling: 2361,
+    ceiling: 2298,
     reason:
       'dsh-memory 的插件入口：applyInner 一个函数 1362 行（占 58%），加上工具注册、console 网络端、'
       + 'harvest 编排与 33 个导出。它是整个重构的**目标文件**，拆它需要先拆它依赖的 store/retrieve'

@@ -363,7 +363,7 @@ ACYCLIC — no VALUE dependency cycle          ← NOTE 段落消失
 
 从 observer 移植 `closure / families / who-references / move-gate`，并把两处**本仓专用默认值**改掉：
 
-- `families.mjs` 默认根：`apply` → **`applyInner`**（`index.ts:998-2359`，1,362 行，占 `index.ts` 58%）
+- `families.mjs` 默认根：`apply` → **`applyInner`**（`index.ts` 里的 `applyInner` 函数，占 `index.ts` 的过半篇幅；行号随每次改动漂移，故按符号名定位 —— 判据 v214 会拦住指向文件尾之外的硬编码行号）
 - `closure.mjs` 自校准样本：observer 的 `stepMonitor` 等 → 本仓的
   `scanThreat / planNegative / hitOf / renderHint / harvest`（5 个，跨度 14→278 行）
 

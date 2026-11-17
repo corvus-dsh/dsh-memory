@@ -53,6 +53,17 @@
  * the collaboration structure exactly where it matters: when a later reader asks "who decided this?",
  * "a subagent I asked to investigate" and "the reviewer that overruled me" must not read the same.
  */
+export {
+  GOAL_DESTINATION_FIELDS,
+  GOAL_JOURNEY_FIELDS,
+  classifyGoalUpdate,
+  goalLockedReason,
+  declareConstraint,
+  relaxConstraint,
+  retireEphemeral,
+} from './graph-goal-lock.js'
+
+/** AUTHOR AND THE v3 FIELD SHAPES ─────────────────────────────────────────────────────────────── */
 export interface Author {
   kind: 'user' | 'model' | 'subagent' | 'observer' | 'system'
   sessionId: string
@@ -429,72 +440,6 @@ export function asOrigin(raw: unknown, now: () => string): NodeV3Fields['origin'
   const by = asAuthor(r.by, now)
   if (kind === undefined || reason === '' || by === undefined) return undefined
   return { kind, reason, by }
-}
-
-/**
- * ── TWO SETS, BECAUSE A LOCK HAS TO SAY BOTH WHAT IT FORBIDS AND WHAT IT ALLOWS ─────────────────
- *
- * `GOAL_DESTINATION_FIELDS` — changing any of these changes WHAT "done" means:
- *   requirements   the completion criteria ("what counts as finished")
- *   title          the goal's name
- *   status         status moves go through complete/activate, never a generic update
- *   nodeType       the node's kind is its identity
- *   dependsOn      the dependency graph is part of how the destination is reached
- *
- * `GOAL_JOURNEY_FIELDS` — where the work IS. Reporting these is the reason the graph exists; refusing
- * them made "I am 60% done" indistinguishable from "redefine the goal", which is what the old guard did
- * while its own comment claimed the opposite.
- *
- * Both sets are tested. A lock that only names what it REFUSES will refuse things it should not.
- */
-export const GOAL_DESTINATION_FIELDS: ReadonlySet<string> = new Set([
-  'requirements', 'title', 'status', 'nodeType', 'dependsOn',
-])
-
-export const GOAL_JOURNEY_FIELDS: ReadonlySet<string> = new Set([
-  'progress', 'standing', 'objective', 'lastChange', 'origin',
-  'evidence', 'logPointers', 'estimate', 'actual',
-  'subgoals', 'alternatives', 'pruned', 'ephemeralConstraints',
-])
-
-/**
- * Classify what a locked goal's update is trying to touch.
- *
- * `allowed` is true only when EVERY touched field is a journey field. A batch that mixes a journey
- * field with a destination one is REFUSED as a whole — otherwise "let progress through" becomes a side
- * door for a destination edit, and a partial application would be worse than a refusal.
- *
- * A field in NEITHER list is refused. The tempting default ("allow — probably harmless") would make
- * every FUTURE field automatically exempt from the lock: add `requirementsRevision` next year and the
- * lock quietly stops covering part of the destination. A lock whose default is open is not a lock.
- */
-export function classifyGoalUpdate(
-  touched: readonly string[],
-): { allowed: true } | { allowed: false; code: 'DESTINATION' | 'UNKNOWN'; fields: string[] } {
-  const destination = touched.filter((key) => GOAL_DESTINATION_FIELDS.has(key))
-  if (destination.length > 0) return { allowed: false, code: 'DESTINATION', fields: destination }
-  const unknown = touched.filter((key) => !GOAL_JOURNEY_FIELDS.has(key))
-  if (unknown.length > 0) return { allowed: false, code: 'UNKNOWN', fields: unknown }
-  return { allowed: true }
-}
-
-/** Why an update on a locked goal was refused, in a sentence that names the offending fields. */
-export function goalLockedReason(
-  lockedAt: string,
-  verdict: { code: 'DESTINATION' | 'UNKNOWN'; fields: string[] },
-): string {
-  const journey = [...GOAL_JOURNEY_FIELDS].join(' / ')
-  if (verdict.code === 'DESTINATION') {
-    return (
-      `最终目标已在 ${lockedAt} 锁定。这些字段属于「终点」，改它们等于改目标：${verdict.fields.join(', ')}。` +
-      `进度与过程（${journey}）不在此限，可以随时更新。确需修改终点请先 unlock-goal 并说明理由。`
-    )
-  }
-  return (
-    `最终目标已锁定，而 ${verdict.fields.join(', ')} 不在「过程」白名单里。` +
-    '锁的默认方向是「不许改」——只有被明确列为 journey 的字段才放行，否则将来新增的字段会自动绕过锁。' +
-    `可选的过程字段：${journey}。`
-  )
 }
 
 /**
