@@ -40,7 +40,37 @@ const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const mod = await import(pathToFileURL(join(ROOT, 'lib', 'graph.js')).href)
 const v3 = await import(pathToFileURL(join(ROOT, 'lib', 'graph-v3.js')).href)
 
-const DATA_FILE = join(ROOT, 'scripts', 'data', 'B2-v3-data.json')
+/**
+ * ── NO BUILT-IN DATA (㉗ after the fact, and the user's ruling) ─────────────────────────────────
+ *
+ * The first version shipped `scripts/data/B2-v3-data.json` inside the package: `package.json`'s `files`
+ * contains `"scripts"` and there is no `.npmignore`, so 24KB of one project's node ids and session ids
+ * went out with every install. Measured with `npm pack --dry-run`.
+ *
+ * This tool is a MECHANISM, not a copy of one graph. The data is now supplied by the caller with
+ * `--data <path>`, and a missing `--data` is a usage error rather than a guess: defaulting to "the data
+ * file next to the script" is exactly how a general tool turns back into a project-specific one.
+ */
+const USAGE = `用法：
+  node scripts/restore-graph-v3.mjs --data <path>             # dry-run：只打印会补什么
+  node scripts/restore-graph-v3.mjs --data <path> --write     # 真正写入（先备份）
+  node scripts/restore-graph-v3.mjs --data <path> --verify    # 备份 + 在临时副本上证明「能修」
+
+  --data <path>      v3 数据文件（必填）。本工具不内置任何项目数据。
+  --memory-dir <p>   目标 store 目录。默认按 DSH_MEMORY_DIR → ~/.dsh/profiles/desktop/.dsh-memory 解析。
+  --write            真正写盘（默认是 dry-run）。
+  --verify           在临时副本上制造缺失再恢复，证明修复能力；不写活 store（除备份）。
+  --goal-journey     goal 节点专用的 journey 字段：解锁 → 写 → 重锁，并断言 goal 文本逐字未变。`
+
+/** `--data <path>` or `--data=<path>`. Returns undefined when the flag is absent. */
+function readDataArg(argv) {
+  const eq = argv.find((arg) => arg.startsWith('--data='))
+  if (eq !== undefined) return eq.slice('--data='.length)
+  const index = argv.indexOf('--data')
+  if (index < 0) return undefined
+  const value = argv[index + 1]
+  return typeof value === 'string' && !value.startsWith('--') ? value : undefined
+}
 const BACKUP_NAME = 'task-graph.v1-backup.json.bak'
 const ALL_V3 = v3.V3_NODE_KEYS
 const now = () => new Date().toISOString()
@@ -63,9 +93,23 @@ const fail = (message) => {
   process.exit(1)
 }
 
-function loadData(file = DATA_FILE) {
+/** A usage error is exit 2, not 1: "you called me wrong" and "the restore failed" are different. */
+const usageFail = (message) => {
+  console.error(`✖ ${message}`)
+  console.error('')
+  console.error(USAGE)
+  process.exit(2)
+}
+
+function loadData(file) {
+  if (typeof file !== 'string' || file.length === 0) usageFail('缺少 --data <path>（本工具不内置任何项目数据）')
   if (!existsSync(file)) fail(`找不到 v3 数据文件：${file}`)
-  const parsed = JSON.parse(readFileSync(file, 'utf8'))
+  let parsed
+  try {
+    parsed = JSON.parse(readFileSync(file, 'utf8'))
+  } catch (error) {
+    fail(`v3 数据文件不是合法 JSON：${String(error?.message ?? error)}`)
+  }
   if (parsed === null || typeof parsed !== 'object') fail('v3 数据文件不是对象')
   const nodes = parsed.nodes
   if (nodes === null || typeof nodes !== 'object' || Array.isArray(nodes)) fail('v3 数据文件缺 nodes 对象')
@@ -115,19 +159,18 @@ function planRestore(graph, data) {
   const fills = []
   const conflicts = []
   /**
-   * ── A LOCKED GOAL'S FIELDS ARE NOT "PENDING", THEY ARE UNWRITABLE ──────────────────────────────
+   * ── A LOCKED GOAL NO LONGER BLOCKS ITS OWN JOURNEY FIELDS (fixed 2026-11-17) ──────────────────
    *
-   * `updateGraph` refuses EVERY update to a locked goal node, so planning those five fields makes the
-   * tool non-idempotent in the worst way: the second run reports "5 fields to fill in" forever, and a
-   * reader concludes the restore did not finish. Measured on the live store — the second `--write`
-   * printed "补齐 5 个字段" while writing nothing.
+   * This exclusion existed because `updateGraph` refused EVERY update on a locked goal node, so the
+   * five journey fields (origin / lastChange / objective / progress / standing) were unwritable. The
+   * lock was then fixed to refuse DESTINATION fields and allow JOURNEY fields, which means these five
+   * are writable again — and keeping the exclusion would now be a second, stale definition of what the
+   * lock blocks (⑪ in miniature: two places deciding one rule, and the older one wins by being here).
    *
-   * They are therefore EXCLUDED from the plan entirely and reported once, separately, as blocked by the
-   * lock. "Cannot be written" and "has not been written yet" are different states, and only one of them
-   * has work left in it.
+   * So the plan no longer special-cases the goal at all. If somebody re-narrows the lock, the restore
+   * will FAIL LOUDLY with GOAL_LOCKED instead of quietly reporting "nothing to do" — which is the
+   * correct direction for that surprise to travel.
    */
-  const goalLocked = (graph.goalLockedAt ?? '').length > 0
-  const blocked = []
   for (const [nodeId, wanted] of Object.entries(data.nodes)) {
     const current = graph.nodes.find((node) => node.id === nodeId)
     if (current === undefined) continue
@@ -137,10 +180,6 @@ function planRestore(graph, data) {
       if (next === undefined) continue
       const existing = current[key]
       if (JSON.stringify(existing) === JSON.stringify(next)) continue
-      if (goalLocked && nodeId === mod.GOAL_NODE_ID) {
-        blocked.push({ nodeId, key })
-        continue
-      }
       if (existing !== undefined) {
         conflicts.push({ nodeId, key })
         continue
@@ -157,7 +196,7 @@ function planRestore(graph, data) {
     const found = pcExisting.find((other) => other.id === row.id)
     return found !== undefined && JSON.stringify(found) !== JSON.stringify(row)
   })
-  return { perField, fills, conflicts, blocked, pcWanted, pcMissing, pcDiffer }
+  return { perField, fills, conflicts, pcWanted, pcMissing, pcDiffer }
 }
 
 /**
@@ -199,13 +238,6 @@ const describe = (plan) => {
   if (plan.conflicts.length > 0) {
     lines.push(`  ⚠ 已存在但值不同（不会被覆盖，需人工决定）：${plan.conflicts.map((row) => `${row.nodeId}.${row.key}`).join(', ')}`)
   }
-  if (plan.blocked !== undefined && plan.blocked.length > 0) {
-    const fields = [...new Set(plan.blocked.map((row) => row.key))]
-    lines.push(
-      `  ⊘ goal 的目标已锁定（goalLockedAt 非空），这 ${fields.length} 个字段不可写、也不算待办：${fields.join(', ')}`,
-    )
-    lines.push('    这是 GOAL_LOCKED 在正常工作 —— 解锁才能写，而解锁不是本工具的权限。')
-  }
   if (plan.pcDiffer.length > 0) {
     lines.push(`  ⚠ 长期约束已存在但值不同（不会被覆盖）：${plan.pcDiffer.map((row) => row.id).join(', ')}`)
   }
@@ -246,7 +278,95 @@ function stripToV1(graph) {
 const v3CountOf = (graph) =>
   graph.nodes.reduce((sum, node) => sum + ALL_V3.filter((key) => node[key] !== undefined).length, 0)
 
-// ── modes ────────────────────────────────────────────────────────────────────────────────────────
+/**
+ * ── SEEDING THE GOAL'S JOURNEY FIELDS REQUIRES A LOCK CYCLE (user ruling, measured 2026-11-17) ──
+ *
+ * `updateGraph` refuses every `update` on a locked goal node, so while the goal is locked its five
+ * journey fields cannot be written at all. The user's ruling is explicit: unlock → write → re-lock,
+ * which is the honest sequence — the lock is momentarily lifted ON PURPOSE and put back, rather than
+ * the tool quietly editing a protected node.
+ *
+ * ── WHAT THIS MUST PROVE BEFORE AND AFTER ───────────────────────────────────────────────────────
+ *
+ * The risk of a lock cycle is not that the fields fail to write; it is that SOMETHING ELSE changes
+ * while the lock is off. So the goal TEXT is captured verbatim before the unlock and compared for
+ * exact equality after the re-lock. A single character of drift means the cycle was not neutral, and
+ * the run fails loudly rather than reporting success.
+ */
+function seedGoalJourney(memoryDir, dataFile, write) {
+  const data = loadData(dataFile)
+  const graph = mod.readGraph(memoryDir)
+  const goalWanted = data.nodes[mod.GOAL_NODE_ID]
+  if (goalWanted === undefined) {
+    console.log(`数据里没有 ${mod.GOAL_NODE_ID} 的字段，无需解锁。`)
+    return
+  }
+  const resolved = v3.resolveNodeV3(goalWanted, now)
+  const fields = Object.keys(resolved)
+  if (fields.length === 0) {
+    console.log('数据里 goal 的字段为空，无需解锁。')
+    return
+  }
+  const goalTextBefore = graph.goal
+  const lockedBefore = graph.goalLockedAt
+  console.log(`goal 有 ${fields.length} 个 journey 字段待写：${fields.join(', ')}`)
+  console.log(`goal 文本（解锁前，逐字）：${JSON.stringify(goalTextBefore)}`)
+  console.log(`goalLockedAt（解锁前）：${lockedBefore || '(未锁)'}`)
+  if (!write) {
+    console.log('')
+    console.log('（dry run：解锁 → 写 → 重锁 只有在 --write 时执行。）')
+    return
+  }
+
+  if (lockedBefore.length > 0) {
+    const unlocked = mod.updateGraph(memoryDir, {
+      op: 'unlock-goal',
+      reason: '恢复 v3 字段需要写入 goal 节点元数据（写后立即重锁）',
+    })
+    if (unlocked.ok !== true) fail(`解锁失败：${unlocked.code ?? '?'} ${unlocked.reason ?? ''}`)
+    console.log('  已解锁 goal')
+  }
+  try {
+    const written = mod.updateGraph(memoryDir, {
+      op: 'update',
+      nodeId: mod.GOAL_NODE_ID,
+      node: resolved,
+      reason: `restore-graph-v3：补 goal 的 ${fields.join(' / ')}`,
+    })
+    if (written.ok !== true) fail(`写 goal 失败：${written.code ?? '?'} ${written.reason ?? ''}`)
+    console.log(`  已写入 ${fields.length} 个字段`)
+  } finally {
+    /**
+     * The re-lock is in `finally` on purpose: if the write throws, leaving the goal UNLOCKED is far
+     * worse than leaving it locked with fields missing. A failure must not silently disarm the lock.
+     */
+    if (lockedBefore.length > 0) {
+      const relocked = mod.updateGraph(memoryDir, {
+        op: 'lock-goal',
+        goal: goalTextBefore,
+        reason: '恢复完成，重新锁定（目标文本未变）',
+      })
+      if (relocked.ok !== true) fail(`重新锁定失败：${relocked.code ?? '?'} ${relocked.reason ?? ''}`)
+      console.log('  已重新锁定 goal')
+    }
+  }
+
+  const after = mod.readGraph(memoryDir)
+  if (after.goal !== goalTextBefore) {
+    fail(
+      `goal 文本在解锁-重锁期间被改变了！\n  解锁前：${JSON.stringify(goalTextBefore)}\n  重锁后：${JSON.stringify(after.goal)}\n` +
+        '这不是恢复失败，是「锁被打开的窗口里发生了别的事」，必须人工核对。',
+    )
+  }
+  if (lockedBefore.length > 0 && after.goalLockedAt.length === 0) fail('重锁失败：goalLockedAt 为空')
+  const got = v3.V3_NODE_KEYS.filter((key) => {
+    const node = after.nodes.find((other) => other.id === mod.GOAL_NODE_ID)
+    return node !== undefined && node[key] !== undefined
+  })
+  console.log('')
+  console.log(`goal 现在有 ${got.length} 个 v3 字段：${got.join(', ')}`)
+  console.log(`goal 文本逐字未变 ✅   goalLockedAt = ${after.goalLockedAt || '(未锁)'}`)
+}
 
 /**
  * ── THE WRITE GOES THROUGH `updateGraph`, NOT A RAW FILE WRITE ────────────────────────────────
@@ -317,8 +437,10 @@ function writeV3(memoryDir, graph, plan) {
   }
 }
 
-function showPlan(memoryDir) {
-  const data = loadData()
+// ── modes ────────────────────────────────────────────────────────────────────────────────────────
+
+function showPlan(memoryDir, dataFile) {
+  const data = loadData(dataFile)
   const graph = mod.readGraph(memoryDir)
   const problems = checkIdSets(graph, data)
   console.log(`memoryDir = ${memoryDir}`)
@@ -336,8 +458,8 @@ function showPlan(memoryDir) {
   console.log('（dry run：什么都没写。真正写入请加 --write，先验证请加 --verify。）')
 }
 
-function writeRestore(memoryDir) {
-  const data = loadData()
+function writeRestore(memoryDir, dataFile) {
+  const data = loadData(dataFile)
   const graph = mod.readGraph(memoryDir)
   const problems = checkIdSets(graph, data)
   if (problems.length > 0) {
@@ -392,8 +514,8 @@ function writeRestore(memoryDir) {
  * object), restored, and re-read. If the restore code cannot repair a file it damaged itself, it
  * certainly cannot repair one it did not make.
  */
-function verifyRestore(memoryDir) {
-  const data = loadData()
+function verifyRestore(memoryDir, dataFile) {
+  const data = loadData(dataFile)
   const live = mod.readGraph(memoryDir)
   const problems = checkIdSets(live, data)
   if (problems.length > 0) {
@@ -429,11 +551,11 @@ function verifyRestore(memoryDir) {
 
     const plan = planRestore(broken, data)
     /**
-     * The expectation excludes what the GOAL LOCK legitimately blocks. `planRestore` already leaves those
-     * out of `fills`, so the count comes from the plan's own `blocked` list — one source, not a second
-     * derivation that could disagree with the writer.
+     * No exclusion: a locked goal now allows its journey fields, which is all this data ever sets on it.
+     * If the lock is ever re-narrowed, the restore will fail loudly with GOAL_LOCKED rather than quietly
+     * under-counting — "the write was refused" must never look like "there was nothing to write".
      */
-    const lockedFields = plan.blocked.length
+    const lockedFields = 0
     /**
      * The SAME `writeV3` the live path uses, against the temp copy. A verification that ran a different
      * writer would prove the wrong thing: it would show this script can repair a file by writing it
@@ -446,10 +568,6 @@ function verifyRestore(memoryDir) {
 
     const lockedNote = lockedFields > 0 ? `，扣掉 goal 锁拒绝的 ${lockedFields} 个` : ''
     console.log(`  恢复后：${after.nodes.length} 节点 / ${(after.persistentConstraints ?? []).length} 条长期约束 / ${afterCount} 处 v3 字段（目标 ${expected}${lockedNote}）`)
-    if (plan.blocked.length > 0) {
-      const fields = [...new Set(plan.blocked.map((row) => row.key))]
-      console.log(`  ⊘ goal 已锁定，这 ${fields.length} 个字段不可写也不算待办：${fields.join(', ')}`)
-    }
     if (afterCount !== expected) fail(`临时副本恢复不完整：${afterCount} != ${expected}`)
 
     /**
@@ -485,7 +603,20 @@ function verifyRestore(memoryDir) {
 // ── entry ───────────────────────────────────────────────────────────────────────────────────────
 
 const argv = process.argv.slice(2)
+if (argv.includes('--help') || argv.includes('-h')) {
+  console.log(USAGE)
+  process.exit(0)
+}
 const memoryDir = resolve(resolveMemoryDir())
-if (argv.includes('--verify')) verifyRestore(memoryDir)
-else if (argv.includes('--write')) writeRestore(memoryDir)
-else showPlan(memoryDir)
+const dataFile = readDataArg(argv)
+/** Checked BEFORE any mode runs, so a missing `--data` never reaches a half-finished restore. */
+if (dataFile === undefined) usageFail('缺少 --data <path>（本工具不内置任何项目数据）')
+/**
+ * `--goal-journey` is a separate mode, not an implicit part of `--write`: it is the ONE step that
+ * momentarily lifts a protection the user set. Making it a distinct flag means the lock cycle is always
+ * something a human asked for by name.
+ */
+if (argv.includes('--goal-journey')) seedGoalJourney(memoryDir, dataFile, argv.includes('--write'))
+else if (argv.includes('--verify')) verifyRestore(memoryDir, dataFile)
+else if (argv.includes('--write')) writeRestore(memoryDir, dataFile)
+else showPlan(memoryDir, dataFile)
