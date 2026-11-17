@@ -1,0 +1,887 @@
+{
+  "_note": "v3 fields only. v1 keys are NOT included: restore-graph-v3.mjs patches these onto existing nodes by id.",
+  "_generatedBy": "lead, 2026-11-17",
+  "persistentConstraints": [
+    {
+      "id": "pc-1",
+      "text": "绝对禁止用 user/message 的壳子去装 developer 的灵魂",
+      "by": {
+        "kind": "user",
+        "sessionId": "user-session",
+        "generation": 5,
+        "attempt": 1,
+        "role": "planner",
+        "at": "2026-11-16T14:41:03+08:00"
+      },
+      "effectiveFrom": "2026-11-10T00:00:00+08:00"
+    },
+    {
+      "id": "pc-2",
+      "text": "若 harvest 改走 session event，必须遵守红线 2/3（role:user + [系统提示] 前缀，绝不用 user 壳装 developer 指令）",
+      "by": {
+        "kind": "user",
+        "sessionId": "user-session",
+        "generation": 5,
+        "attempt": 1,
+        "role": "planner",
+        "at": "2026-11-16T14:41:03+08:00"
+      },
+      "effectiveFrom": "2026-11-10T00:00:00+08:00"
+    },
+    {
+      "id": "pc-3",
+      "text": "必须、禁止、绝对、不能、不得、不许、务必",
+      "by": {
+        "kind": "user",
+        "sessionId": "user-session",
+        "generation": 5,
+        "attempt": 1,
+        "role": "planner",
+        "at": "2026-11-16T14:41:03+08:00"
+      },
+      "effectiveFrom": "2026-11-10T00:00:00+08:00"
+    },
+    {
+      "id": "pc-4",
+      "text": "must / never / forbidden / required / cannot / do not",
+      "by": {
+        "kind": "user",
+        "sessionId": "user-session",
+        "generation": 5,
+        "attempt": 1,
+        "role": "planner",
+        "at": "2026-11-16T14:41:03+08:00"
+      },
+      "effectiveFrom": "2026-11-10T00:00:00+08:00"
+    },
+    {
+      "id": "pc-5",
+      "text": "绝对不能 import re，也不能以任何方式使用正则表达式（作用于离恨项目；四仓 Node/TS 不受此条约束）",
+      "by": {
+        "kind": "user",
+        "sessionId": "user-session",
+        "generation": 5,
+        "attempt": 1,
+        "role": "planner",
+        "at": "2026-11-16T14:41:03+08:00"
+      },
+      "effectiveFrom": "2026-11-10T00:00:00+08:00"
+    },
+    {
+      "id": "pc-6",
+      "text": "不 force push、不 publish、不碰 paradise 发布、不碰 desktop profile",
+      "by": {
+        "kind": "user",
+        "sessionId": "user-session",
+        "generation": 5,
+        "attempt": 1,
+        "role": "planner",
+        "at": "2026-11-16T14:41:03+08:00"
+      },
+      "effectiveFrom": "2026-11-10T00:00:00+08:00",
+      "note": "阶段 3 发版前需用户显式解除 publish 部分"
+    },
+    {
+      "id": "pc-7",
+      "text": "任何「实测」数字必须写明在哪个环境测的",
+      "by": {
+        "kind": "observer",
+        "sessionId": "auto-graft-mwinbc35-t813p5",
+        "generation": 5,
+        "attempt": 1,
+        "role": "auditor",
+        "at": "2026-11-17T18:10:00+08:00"
+      },
+      "effectiveFrom": "2026-11-17T10:16:00+08:00"
+    },
+    {
+      "id": "pc-8",
+      "text": "判据也会说谎 —— 执行者停下来报，比照做更有价值",
+      "by": {
+        "kind": "observer",
+        "sessionId": "auto-graft-mwinbc35-t813p5",
+        "generation": 5,
+        "attempt": 1,
+        "role": "auditor",
+        "at": "2026-11-17T18:10:00+08:00"
+      },
+      "effectiveFrom": "2026-11-16T19:50:00+08:00"
+    }
+  ],
+  "nodes": {
+    "goal": {
+      "origin": {
+        "kind": "planned",
+        "reason": "用户 2026-11-03 立项：四仓持久层能力架构",
+        "by": {
+          "kind": "user",
+          "sessionId": "user-session",
+          "generation": 5,
+          "attempt": 1,
+          "role": "planner",
+          "at": "2026-11-03T00:00:00+08:00"
+        }
+      },
+      "lastChange": {
+        "by": {
+          "kind": "observer",
+          "sessionId": "auto-graft-mwinbc35-t813p5",
+          "generation": 5,
+          "attempt": 1,
+          "role": "auditor",
+          "at": "2026-11-17T18:10:00+08:00"
+        },
+        "revision": 2
+      },
+      "objective": "把四个插件从「能跑」推进到「生产就绪」：功能完整、缺陷清零、架构可维护、真机可用",
+      "progress": 42,
+      "standing": "阶段 1 完成、B0 关闭、B1 关闭；B2 进行中（本图正在写盘）"
+    },
+    "phase-1-kg": {
+      "origin": {
+        "kind": "planned",
+        "reason": "用户要求阶段 1：审阅日志 + 四分法 + 知识图谱 + 架构纪律 + 拆解方案",
+        "by": {
+          "kind": "user",
+          "sessionId": "user-session",
+          "generation": 5,
+          "attempt": 1,
+          "role": "planner",
+          "at": "2026-11-16T14:41:03+08:00"
+        }
+      },
+      "lastChange": {
+        "by": {
+          "kind": "observer",
+          "sessionId": "auto-graft-mwinbc35-t813p5",
+          "generation": 5,
+          "attempt": 1,
+          "role": "auditor",
+          "at": "2026-11-17T18:10:00+08:00"
+        },
+        "revision": 1
+      },
+      "objective": "在动手前把四仓的真实状态摸清，并把「怎么拆、怎么验收」写成可执行的纪律",
+      "estimate": {
+        "complexity": 4,
+        "note": "11 份报告 + 四仓全量探测，是本项目最重的一次分析"
+      },
+      "actual": {
+        "complexity": 4,
+        "note": "",
+        "closedAt": "2026-11-16T14:41:00+08:00"
+      },
+      "progress": 100,
+      "standing": "11 份报告 + 实施计划 v2 定稿；数字已于 2026-11-17 按实测订正 43 处",
+      "evidence": [
+        "报告/00-总报告-四仓知识图谱与拆解方案.md",
+        "报告/06-实施计划-v2-定稿.md"
+      ],
+      "logPointers": [
+        {
+          "topic": "11 份报告的形成过程与文件清单",
+          "generation": 5,
+          "sessionId": "auto-graft-mwinbc35-t813p5",
+          "seq": 1940,
+          "what": "报告目录的完整清单（00–06 + A1–A4 + README）"
+        },
+        {
+          "topic": "功能四分法的四个桶",
+          "generation": 5,
+          "sessionId": "auto-graft-mwinbc35-t813p5",
+          "seq": 1903,
+          "what": "01-功能四分法.md 创建时的事件"
+        },
+        {
+          "topic": "四仓基线数字（导出数 / 行数 / apply 尺寸）",
+          "generation": 5,
+          "sessionId": "auto-graft-mwinbc35-t813p5",
+          "search": "182 导出",
+          "what": "四仓拓扑图，含 182 导出 / 11,495 行等原始基线（后被订正）"
+        }
+      ]
+    },
+    "phase-b0": {
+      "origin": {
+        "kind": "planned",
+        "reason": "阶段 2 第一批：拆巨石与新功能之前必须先有可靠的门禁",
+        "by": {
+          "kind": "observer",
+          "sessionId": "auto-graft-mwinbc35-t813p5",
+          "generation": 5,
+          "attempt": 1,
+          "role": "planner",
+          "at": "2026-11-16T14:41:00+08:00"
+        }
+      },
+      "lastChange": {
+        "by": {
+          "kind": "observer",
+          "sessionId": "auto-graft-mwinbc35-t813p5",
+          "generation": 5,
+          "attempt": 1,
+          "role": "auditor",
+          "at": "2026-11-17T18:10:00+08:00"
+        },
+        "revision": 3
+      },
+      "objective": "让四仓的门禁真的会咬人：一条命令跑完、能证红、覆盖各自 CI 的全部步骤",
+      "estimate": {
+        "complexity": 3,
+        "note": "预估一轮做完，实际做了六轮 CI"
+      },
+      "actual": {
+        "complexity": 4,
+        "note": "六轮 CI 失败全部是 B0 自己接进去的门禁第一次真跑暴露的既有缺陷；每轮都做了受控复现",
+        "closedAt": "2026-11-17T13:40:00+08:00"
+      },
+      "progress": 100,
+      "standing": "关闭。六轮 CI 失败全部定位并修复；四仓 ahead=0 dirty=0，CI 全绿无 skipped",
+      "evidence": [
+        "报告/B0-最终验收签署.md",
+        "报告/B0-关闭补充签署.md"
+      ],
+      "logPointers": [
+        {
+          "topic": "六轮 CI 失败的逐轮根因",
+          "generation": 5,
+          "sessionId": "auto-graft-mwinbc35-t813p5",
+          "search": "workflow 名回落成路径",
+          "what": "第 1 轮：ci.yml:254 的 name 值含 \": \" ⇒ YAML 解析失败 ⇒ 0 job"
+        },
+        {
+          "topic": "compaction 阈值 69.34% 的完整推算",
+          "generation": 5,
+          "sessionId": "auto-graft-mwinbc35-t813p5",
+          "search": "727,040",
+          "what": "min(W×0.8, W−O−65536) = 727,040 → 69.34%，低于 graft 的 70%/75%"
+        },
+        {
+          "topic": "B0 的分段计时（memory 203.9s / graft 196.9s 等）",
+          "generation": 5,
+          "sessionId": "auto-graft-mwinbc35-t813p5",
+          "search": "203.9",
+          "what": "四仓 check 的分段耗时表，含 check-readme-counts 的重复测试成本"
+        }
+      ],
+      "ephemeralConstraints": [
+        {
+          "id": "ec-b0-1",
+          "text": "B0 期间不许改 paradise 的 profile 配置（压缩修复的配置层步骤只写文档）",
+          "by": {
+            "kind": "observer",
+            "sessionId": "auto-graft-mwinbc35-t813p5",
+            "generation": 5,
+            "attempt": 1,
+            "role": "auditor",
+            "at": "2026-11-16T16:00:00+08:00"
+          },
+          "scope": "node",
+          "retiredAt": "2026-11-16T19:50:00+08:00",
+          "retiredWhy": "B0 关闭，配置层改动交给用户决定"
+        },
+        {
+          "id": "ec-b0-2",
+          "text": "四仓提交一笔一仓，不合并成一笔跨仓提交",
+          "by": {
+            "kind": "observer",
+            "sessionId": "auto-graft-mwinbc35-t813p5",
+            "generation": 5,
+            "attempt": 1,
+            "role": "auditor",
+            "at": "2026-11-16T19:30:00+08:00"
+          },
+          "scope": "node",
+          "retiredAt": "2026-11-16T19:50:00+08:00",
+          "retiredWhy": "B0 的四笔提交已完成"
+        }
+      ]
+    },
+    "phase-b1": {
+      "origin": {
+        "kind": "planned",
+        "reason": "B0 关闭后进 B1：旧 bug + 类型欠账 + 两项新功能",
+        "by": {
+          "kind": "observer",
+          "sessionId": "auto-graft-mwinbc35-t813p5",
+          "generation": 5,
+          "attempt": 1,
+          "role": "planner",
+          "at": "2026-11-17T13:40:00+08:00"
+        }
+      },
+      "lastChange": {
+        "by": {
+          "kind": "observer",
+          "sessionId": "auto-graft-mwinbc35-t813p5",
+          "generation": 5,
+          "attempt": 1,
+          "role": "auditor",
+          "at": "2026-11-17T18:10:00+08:00"
+        },
+        "revision": 4
+      },
+      "objective": "清掉唯一的真 bug（D-1）与全部类型欠账，并落地 Q1（信息标签化）与 F3（约束双轨）两项新功能",
+      "estimate": {
+        "complexity": 4,
+        "note": "五项，其中 F3 涉及工具+持久化+双门槛"
+      },
+      "actual": {
+        "complexity": 5,
+        "note": "F3 中途发现主线绕道 bug（㉑）：全部测试绿、CI 绿、功能完全哑。是 v226 端到端测试暴露的",
+        "closedAt": "2026-11-17T17:37:00+08:00"
+      },
+      "progress": 100,
+      "standing": "关闭。graft 91621b1 / memory b1163e1；CI 全绿",
+      "evidence": [
+        "报告/B5-纪律清单.md"
+      ],
+      "logPointers": [
+        {
+          "topic": "D-1 为什么两行必须同一笔修",
+          "generation": 5,
+          "sessionId": "auto-graft-mwinbc35-t813p5",
+          "search": "只修一半会主动说错一句话",
+          "what": "反向验证：删掉 hits 只留 ageDays ⇒ ②绿 + ③红（复发 5 次的活规则被打成往事）"
+        },
+        {
+          "topic": "F2 的 19 种 source.kind 实测分布",
+          "generation": 5,
+          "sessionId": "auto-graft-mwinbc35-t813p5",
+          "search": "5967",
+          "what": "227 个日志、5,967 条 user/message 的 kind 分布表"
+        },
+        {
+          "topic": "主线绕道 bug（㉑）：override 分支绕过两个 store",
+          "generation": 5,
+          "sessionId": "auto-graft-mwinbc35-t813p5",
+          "search": "constraintsOverride",
+          "what": "graft_slice_and_inject 先算 fastConstraints 当 override 传进来，真实切片从没读过否决记录"
+        }
+      ]
+    },
+    "phase-b2": {
+      "origin": {
+        "kind": "planned",
+        "reason": "Q2 裁定 B：模型开始任务前先建图；切片交接要能读到当前节点进度",
+        "by": {
+          "kind": "user",
+          "sessionId": "user-session",
+          "generation": 5,
+          "attempt": 1,
+          "role": "planner",
+          "at": "2026-11-16T14:41:03+08:00"
+        }
+      },
+      "lastChange": {
+        "by": {
+          "kind": "observer",
+          "sessionId": "auto-graft-mwinbc35-t813p5",
+          "generation": 5,
+          "attempt": 1,
+          "role": "auditor",
+          "at": "2026-11-17T18:10:00+08:00"
+        },
+        "revision": 3
+      },
+      "objective": "让每一代会话在切片后立刻知道总目标、自己在哪、下一步、以及去哪找细节，不再靠读 11 份报告",
+      "alternatives": [
+        {
+          "option": "把任务图放在 graft 的 store 里",
+          "rationale": "graft 已在管跨会话状态",
+          "verdict": "rejected",
+          "why": "任务图是项目级事实，而 graft 的 dataDir 跨 profile 共享（L4447 有 warning）。放 memory 才能按 workspace 隔离。",
+          "expectedP": 0.4,
+          "actualP": 0
+        },
+        {
+          "option": "放 memory 并复用已有 updateGraph",
+          "rationale": "已有无环校验、7 种 op、审计历史、200 条上限",
+          "verdict": "chosen"
+        }
+      ],
+      "pruned": [
+        {
+          "direction": "在 graft 侧另建一个并行任务图",
+          "why": "两份真相必然分叉（⑪ 的教训：同语义两份实现）",
+          "at": "2026-11-17T18:10:00+08:00",
+          "by": {
+            "kind": "observer",
+            "sessionId": "auto-graft-mwinbc35-t813p5",
+            "generation": 5,
+            "attempt": 1,
+            "role": "auditor",
+            "at": "2026-11-17T18:10:00+08:00"
+          }
+        },
+        {
+          "direction": "把 B4/B5 的子任务现在就拆成节点",
+          "why": "拆巨石要按 handler-inventory.mjs 的输出排期，现在拆就是编造",
+          "at": "2026-11-17T18:10:00+08:00",
+          "by": {
+            "kind": "observer",
+            "sessionId": "auto-graft-mwinbc35-t813p5",
+            "generation": 5,
+            "attempt": 1,
+            "role": "auditor",
+            "at": "2026-11-17T18:10:00+08:00"
+          }
+        },
+        {
+          "direction": "真跑蒙特卡洛随机模拟",
+          "why": "本项目的分支是离散且一次的（选了 A 就不能同时选 B），每一代只有一个样本。只取「预期 vs 实际」做校准，不算概率分布",
+          "at": "2026-11-17T18:10:00+08:00",
+          "by": {
+            "kind": "observer",
+            "sessionId": "auto-graft-mwinbc35-t813p5",
+            "generation": 5,
+            "attempt": 1,
+            "role": "auditor",
+            "at": "2026-11-17T18:10:00+08:00"
+          }
+        }
+      ],
+      "estimate": {
+        "complexity": 3,
+        "note": "三个子系统各一处改动 + 一条新 chunk，无算法难度"
+      },
+      "progress": 15,
+      "standing": "schema v3 已定稿（用户 5 点裁定全部落地）；本图正在写盘，T1 代码未开始",
+      "evidence": [
+        "报告/B2-任务图Schema设计-v3.md"
+      ],
+      "logPointers": [
+        {
+          "topic": "任务图 schema 从 v1 到 v3 的三次修订",
+          "generation": 5,
+          "sessionId": "auto-graft-mwinbc35-t813p5",
+          "search": "任务图Schema设计",
+          "what": "v1 被用户推翻（粒度太粗）、v2 按三点重做、v3 按五点定稿"
+        }
+      ]
+    },
+    "b2-t1": {
+      "origin": {
+        "kind": "planned",
+        "reason": "B2 的子任务：author 与推演字段落地（含旧节点兼容）",
+        "by": {
+          "kind": "observer",
+          "sessionId": "auto-graft-mwinbc35-t813p5",
+          "generation": 5,
+          "attempt": 1,
+          "role": "planner",
+          "at": "2026-11-17T18:00:00+08:00"
+        }
+      },
+      "lastChange": {
+        "by": {
+          "kind": "observer",
+          "sessionId": "auto-graft-mwinbc35-t813p5",
+          "generation": 5,
+          "attempt": 1,
+          "role": "planner",
+          "at": "2026-11-17T18:00:00+08:00"
+        },
+        "revision": 1
+      },
+      "objective": "让每个节点能回答「谁、哪一代、第几次尝试、为什么建、改过几次」",
+      "subgoals": [
+        {
+          "id": "b2-t1a",
+          "text": "graph.ts 加字段与写入点",
+          "done": false,
+          "verifiedBy": "test/v227-graph-author.test.mjs"
+        },
+        {
+          "id": "b2-t1b",
+          "text": "can-red：没有 author 的新节点必须被拒",
+          "done": false,
+          "verifiedBy": "test/v227-graph-author.test.mjs"
+        }
+      ],
+      "estimate": {
+        "complexity": 3
+      },
+      "progress": 0,
+      "evidence": []
+    },
+    "b2-t2": {
+      "origin": {
+        "kind": "planned",
+        "reason": "B2 的子任务：bootstrap op",
+        "by": {
+          "kind": "observer",
+          "sessionId": "auto-graft-mwinbc35-t813p5",
+          "generation": 5,
+          "attempt": 1,
+          "role": "planner",
+          "at": "2026-11-17T18:00:00+08:00"
+        }
+      },
+      "lastChange": {
+        "by": {
+          "kind": "observer",
+          "sessionId": "auto-graft-mwinbc35-t813p5",
+          "generation": 5,
+          "attempt": 1,
+          "role": "planner",
+          "at": "2026-11-17T18:00:00+08:00"
+        },
+        "revision": 1
+      },
+      "objective": "给模型一个「建图」的唯一入口，且强制带可追溯的作者信息",
+      "subgoals": [
+        {
+          "id": "b2-t2a",
+          "text": "bootstrap 校验与实现",
+          "done": false,
+          "verifiedBy": "test/v228-graph-bootstrap.test.mjs"
+        },
+        {
+          "id": "b2-t2b",
+          "text": "can-red：有环建图必须被拒",
+          "done": false,
+          "verifiedBy": "test/v228-graph-bootstrap.test.mjs"
+        }
+      ],
+      "estimate": {
+        "complexity": 3
+      },
+      "progress": 0,
+      "evidence": []
+    },
+    "b2-t3": {
+      "origin": {
+        "kind": "planned",
+        "reason": "B2 的子任务：task-position 交接段",
+        "by": {
+          "kind": "observer",
+          "sessionId": "auto-graft-mwinbc35-t813p5",
+          "generation": 5,
+          "attempt": 1,
+          "role": "planner",
+          "at": "2026-11-17T18:00:00+08:00"
+        }
+      },
+      "lastChange": {
+        "by": {
+          "kind": "observer",
+          "sessionId": "auto-graft-mwinbc35-t813p5",
+          "generation": 5,
+          "attempt": 1,
+          "role": "planner",
+          "at": "2026-11-17T18:00:00+08:00"
+        },
+        "revision": 1
+      },
+      "objective": "切片后新会话第一轮就知道「我在第几批第几步」",
+      "subgoals": [
+        {
+          "id": "b2-t3a",
+          "text": "渲染顺序与字符上限",
+          "done": false,
+          "verifiedBy": "test/v229-handoff-task-position.test.mjs"
+        },
+        {
+          "id": "b2-t3b",
+          "text": "六段内容与「本代×第N代」",
+          "done": false,
+          "verifiedBy": "test/v229-handoff-task-position.test.mjs"
+        }
+      ],
+      "estimate": {
+        "complexity": 3
+      },
+      "progress": 0,
+      "evidence": []
+    },
+    "b2-trigger": {
+      "origin": {
+        "kind": "planned",
+        "reason": "B2 的子任务：三处触发纪律",
+        "by": {
+          "kind": "observer",
+          "sessionId": "auto-graft-mwinbc35-t813p5",
+          "generation": 5,
+          "attempt": 1,
+          "role": "planner",
+          "at": "2026-11-17T18:00:00+08:00"
+        }
+      },
+      "lastChange": {
+        "by": {
+          "kind": "observer",
+          "sessionId": "auto-graft-mwinbc35-t813p5",
+          "generation": 5,
+          "attempt": 1,
+          "role": "planner",
+          "at": "2026-11-17T18:00:00+08:00"
+        },
+        "revision": 1
+      },
+      "objective": "不能只靠提示文本（TD-M12 的教训：提示语不算达成）",
+      "subgoals": [
+        {
+          "id": "b2-trigger-a",
+          "text": "三处触发各一条测试",
+          "done": false,
+          "verifiedBy": "test/v230-graph-triggers.test.mjs"
+        }
+      ],
+      "estimate": {
+        "complexity": 3
+      },
+      "progress": 0,
+      "evidence": []
+    },
+    "phase-b3": {
+      "origin": {
+        "kind": "planned",
+        "reason": "用户 8 项新功能中的 F4/F5/F6/F7",
+        "by": {
+          "kind": "user",
+          "sessionId": "user-session",
+          "generation": 5,
+          "attempt": 1,
+          "role": "planner",
+          "at": "2026-11-16T14:41:03+08:00"
+        }
+      },
+      "lastChange": {
+        "by": {
+          "kind": "observer",
+          "sessionId": "auto-graft-mwinbc35-t813p5",
+          "generation": 5,
+          "attempt": 1,
+          "role": "planner",
+          "at": "2026-11-17T18:00:00+08:00"
+        },
+        "revision": 1
+      },
+      "objective": "让切片后的工作真正连贯：目标、进度、约束、未收到的结果都不丢，且飞轮真的转起来",
+      "estimate": {
+        "complexity": 4
+      },
+      "progress": 0
+    },
+    "b3-f4": {
+      "origin": {
+        "kind": "planned",
+        "reason": "B2 的子任务：交接 7 段固定顺序",
+        "by": {
+          "kind": "observer",
+          "sessionId": "auto-graft-mwinbc35-t813p5",
+          "generation": 5,
+          "attempt": 1,
+          "role": "planner",
+          "at": "2026-11-17T18:00:00+08:00"
+        }
+      },
+      "lastChange": {
+        "by": {
+          "kind": "observer",
+          "sessionId": "auto-graft-mwinbc35-t813p5",
+          "generation": 5,
+          "attempt": 1,
+          "role": "planner",
+          "at": "2026-11-17T18:00:00+08:00"
+        },
+        "revision": 1
+      },
+      "objective": "让新会话按固定顺序读到总目标→进度→约束→近况→待办",
+      "subgoals": [],
+      "estimate": {
+        "complexity": 3
+      },
+      "progress": 0,
+      "evidence": []
+    },
+    "b3-f5": {
+      "origin": {
+        "kind": "planned",
+        "reason": "B2 的子任务：后台任务/子智能体转述",
+        "by": {
+          "kind": "observer",
+          "sessionId": "auto-graft-mwinbc35-t813p5",
+          "generation": 5,
+          "attempt": 1,
+          "role": "planner",
+          "at": "2026-11-17T18:00:00+08:00"
+        }
+      },
+      "lastChange": {
+        "by": {
+          "kind": "observer",
+          "sessionId": "auto-graft-mwinbc35-t813p5",
+          "generation": 5,
+          "attempt": 1,
+          "role": "planner",
+          "at": "2026-11-17T18:00:00+08:00"
+        },
+        "revision": 1
+      },
+      "objective": "切片后才完成的异步结果必须转述到新会话，且交接里标注「还未收到」",
+      "subgoals": [],
+      "estimate": {
+        "complexity": 3
+      },
+      "progress": 0,
+      "evidence": []
+    },
+    "b3-f6": {
+      "origin": {
+        "kind": "planned",
+        "reason": "B2 的子任务：技能飞轮",
+        "by": {
+          "kind": "observer",
+          "sessionId": "auto-graft-mwinbc35-t813p5",
+          "generation": 5,
+          "attempt": 1,
+          "role": "planner",
+          "at": "2026-11-17T18:00:00+08:00"
+        }
+      },
+      "lastChange": {
+        "by": {
+          "kind": "observer",
+          "sessionId": "auto-graft-mwinbc35-t813p5",
+          "generation": 5,
+          "attempt": 1,
+          "role": "planner",
+          "at": "2026-11-17T18:00:00+08:00"
+        },
+        "revision": 1
+      },
+      "objective": "节点完成即触发 harvest，模型能主动提交总结，stats 能看到飞轮计数",
+      "subgoals": [],
+      "estimate": {
+        "complexity": 3
+      },
+      "progress": 0,
+      "evidence": []
+    },
+    "b3-f7": {
+      "origin": {
+        "kind": "planned",
+        "reason": "B2 的子任务：observer 长期监督",
+        "by": {
+          "kind": "observer",
+          "sessionId": "auto-graft-mwinbc35-t813p5",
+          "generation": 5,
+          "attempt": 1,
+          "role": "planner",
+          "at": "2026-11-17T18:00:00+08:00"
+        }
+      },
+      "lastChange": {
+        "by": {
+          "kind": "observer",
+          "sessionId": "auto-graft-mwinbc35-t813p5",
+          "generation": 5,
+          "attempt": 1,
+          "role": "planner",
+          "at": "2026-11-17T18:00:00+08:00"
+        },
+        "revision": 1
+      },
+      "objective": "副脑能跨会话跨代数监督，不只盯一个短窗口",
+      "subgoals": [],
+      "estimate": {
+        "complexity": 3
+      },
+      "progress": 0,
+      "evidence": []
+    },
+    "phase-b4": {
+      "origin": {
+        "kind": "planned",
+        "reason": "阶段 2 的主战场：巨石拆解 + paradise 完善",
+        "by": {
+          "kind": "user",
+          "sessionId": "user-session",
+          "generation": 5,
+          "attempt": 1,
+          "role": "planner",
+          "at": "2026-11-16T14:41:03+08:00"
+        }
+      },
+      "lastChange": {
+        "by": {
+          "kind": "observer",
+          "sessionId": "auto-graft-mwinbc35-t813p5",
+          "generation": 5,
+          "attempt": 1,
+          "role": "planner",
+          "at": "2026-11-17T18:00:00+08:00"
+        },
+        "revision": 1
+      },
+      "objective": "拆掉三个 apply() 巨石，同时把 paradise 的四块完善做到可验收",
+      "estimate": {
+        "complexity": 5,
+        "note": "最长的一批，允许中途停"
+      },
+      "progress": 0
+    },
+    "phase-b5": {
+      "origin": {
+        "kind": "planned",
+        "reason": "阶段 2 收口",
+        "by": {
+          "kind": "user",
+          "sessionId": "user-session",
+          "generation": 5,
+          "attempt": 1,
+          "role": "planner",
+          "at": "2026-11-16T14:41:03+08:00"
+        }
+      },
+      "lastChange": {
+        "by": {
+          "kind": "observer",
+          "sessionId": "auto-graft-mwinbc35-t813p5",
+          "generation": 5,
+          "attempt": 1,
+          "role": "planner",
+          "at": "2026-11-17T18:00:00+08:00"
+        },
+        "revision": 1
+      },
+      "objective": "把欠债数字归零，并把这一代学到的纪律变成可执行的判据",
+      "estimate": {
+        "complexity": 4
+      },
+      "progress": 0
+    },
+    "phase-3-publish": {
+      "origin": {
+        "kind": "planned",
+        "reason": "用户阶段 3",
+        "by": {
+          "kind": "user",
+          "sessionId": "user-session",
+          "generation": 5,
+          "attempt": 1,
+          "role": "planner",
+          "at": "2026-11-16T14:41:03+08:00"
+        }
+      },
+      "lastChange": {
+        "by": {
+          "kind": "observer",
+          "sessionId": "auto-graft-mwinbc35-t813p5",
+          "generation": 5,
+          "attempt": 1,
+          "role": "planner",
+          "at": "2026-11-17T18:00:00+08:00"
+        },
+        "revision": 1
+      },
+      "objective": "把四仓发布出去，且不破坏任何已发布版本",
+      "estimate": {
+        "complexity": 2
+      },
+      "progress": 0
+    }
+  }
+}

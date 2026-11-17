@@ -1,0 +1,491 @@
+/**
+ * ── restore-graph-v3.mjs — 把 v3 字段补回 <memoryDir>/task-graph.json ────────────────────────────
+ *
+ * ── WHAT IT IS FOR (measured 2026-11-17) ────────────────────────────────────────────────────────
+ *
+ * T1 fixed the SHREDDER (a whitelist reader plus a whole-document writer silently deleted every
+ * unrecognised key). It does not put back what was already shredded. Measured on the live store right
+ * before this script existed: 18 nodes present, 0 of 17 with any v3 field, `persistentConstraints`
+ * absent. The data was written once, deleted by the next mutation, and nothing reported it.
+ *
+ * This tool restores it from `scripts/data/B2-v3-data.json` (17 nodes — `start` is an anchor and
+ * deliberately has no v3 fields — plus 8 project-level constraints).
+ *
+ * ── ㉗: THE DEFAULT MUST NOT WRITE ──────────────────────────────────────────────────────────────
+ *
+ * This script edits a USER'S live store. So:
+ *
+ *     node scripts/restore-graph-v3.mjs            ⇒ dry run: print what WOULD be written
+ *     node scripts/restore-graph-v3.mjs --write    ⇒ actually write (with a backup first)
+ *     node scripts/restore-graph-v3.mjs --verify   ⇒ backup + prove the restore on a TEMP COPY
+ *
+ * The `--verify` mode is the one this was built around: a restore tool that has never been run against
+ * a known-broken input is a tool whose ability to repair is a claim, not a fact. Step 2 of `--verify`
+ * manufactures exactly the damage T1 describes (strip every non-v1 key on a copy), runs the same
+ * restore code, and asserts the result. Only then is the live store touched.
+ *
+ * ── ⑪: THE VALIDATION IS NOT RE-IMPLEMENTED HERE ──────────────────────────────────────────────
+ *
+ * Every field goes through `resolveNodeV3` / `asPersistentConstraints` from `lib/graph-v3.js` — the
+ * same functions the plugin's reader and writer use. A second validation in this script would be a
+ * second definition of "valid v3 field", and the two would agree only until one was edited.
+ */
+
+import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { homedir, tmpdir } from 'node:os'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+
+const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
+const mod = await import(pathToFileURL(join(ROOT, 'lib', 'graph.js')).href)
+const v3 = await import(pathToFileURL(join(ROOT, 'lib', 'graph-v3.js')).href)
+
+const DATA_FILE = join(ROOT, 'scripts', 'data', 'B2-v3-data.json')
+const BACKUP_NAME = 'task-graph.v1-backup.json.bak'
+const ALL_V3 = v3.V3_NODE_KEYS
+const now = () => new Date().toISOString()
+
+/**
+ * Where the live store is. Resolved the way the plugin resolves it — `DSH_MEMORY_DIR` first, then the
+ * desktop profile's data directory — and NEVER hard-coded to one machine's home directory.
+ */
+function resolveMemoryDir() {
+  const explicit = process.argv.find((arg) => arg.startsWith('--memory-dir='))
+  if (explicit !== undefined) return explicit.slice('--memory-dir='.length)
+  if (typeof process.env.DSH_MEMORY_DIR === 'string' && process.env.DSH_MEMORY_DIR.length > 0) {
+    return process.env.DSH_MEMORY_DIR
+  }
+  return join(homedir(), '.dsh', 'profiles', 'desktop', '.dsh-memory')
+}
+
+const fail = (message) => {
+  console.error(`✖ ${message}`)
+  process.exit(1)
+}
+
+function loadData(file = DATA_FILE) {
+  if (!existsSync(file)) fail(`找不到 v3 数据文件：${file}`)
+  const parsed = JSON.parse(readFileSync(file, 'utf8'))
+  if (parsed === null || typeof parsed !== 'object') fail('v3 数据文件不是对象')
+  const nodes = parsed.nodes
+  if (nodes === null || typeof nodes !== 'object' || Array.isArray(nodes)) fail('v3 数据文件缺 nodes 对象')
+  const persistentConstraints = Array.isArray(parsed.persistentConstraints) ? parsed.persistentConstraints : []
+  return { id: parsed.id, nodes, persistentConstraints, raw: parsed }
+}
+
+/**
+ * ── THE ID SETS MUST MATCH IN BOTH DIRECTIONS ──────────────────────────────────────────────────
+ *
+ * 数据 ⊆ 图 AND 图 \ {start} ⊆ 数据.
+ *
+ * `start` is excluded from the second half on purpose: it is an anchor, it deliberately carries no v3
+ * fields, and a check that demanded a data row for it would force this script to invent one — which is
+ * exactly the "误补 start" failure the派工单 calls out as a stop condition.
+ *
+ * Both directions matter for different reasons: a data id missing from the graph means the data was
+ * generated against a different graph (writing it would create nothing), and a graph id missing from
+ * the data means the restore would leave that node silently empty while reporting success.
+ */
+function checkIdSets(graph, data) {
+  const graphIds = new Set(graph.nodes.map((node) => node.id))
+  const dataIds = new Set(Object.keys(data.nodes))
+  const inDataNotGraph = [...dataIds].filter((id) => !graphIds.has(id)).sort()
+  const inGraphNotData = [...graphIds].filter((id) => id !== mod.START_NODE_ID && !dataIds.has(id)).sort()
+  const problems = []
+  if (inDataNotGraph.length > 0) problems.push(`数据里有、图里没有：${inDataNotGraph.join(', ')}`)
+  if (inGraphNotData.length > 0) problems.push(`图里有、数据里没有（start 除外）：${inGraphNotData.join(', ')}`)
+  return problems
+}
+
+/**
+ * ── PER FIELD, NOT PER NODE ────────────────────────────────────────────────────────────────────
+ *
+ * "This node is missing something" is not an actionable statement for a partial restore: a node can
+ * have `origin` and lack `logPointers`, and a node-level check would either report it as complete or
+ * rewrite fields that were already correct. So each field is decided on its own, and the totals are
+ * reported per field — which is what makes "12/13 already present, filled in 1" readable.
+ *
+ * A field is "already present" when it is deeply equal to the data. Equal means the restore is a
+ * no-op for it; different means the store holds a DIFFERENT value, which is reported rather than
+ * silently overwritten — a restore tool that overwrites a hand-edited value is a tool that deletes
+ * work. `--force` is deliberately NOT offered: if a value differs, a human decides.
+ */
+function planRestore(graph, data) {
+  const perField = new Map(ALL_V3.map((key) => [key, 0]))
+  const fills = []
+  const conflicts = []
+  /**
+   * ── A LOCKED GOAL'S FIELDS ARE NOT "PENDING", THEY ARE UNWRITABLE ──────────────────────────────
+   *
+   * `updateGraph` refuses EVERY update to a locked goal node, so planning those five fields makes the
+   * tool non-idempotent in the worst way: the second run reports "5 fields to fill in" forever, and a
+   * reader concludes the restore did not finish. Measured on the live store — the second `--write`
+   * printed "补齐 5 个字段" while writing nothing.
+   *
+   * They are therefore EXCLUDED from the plan entirely and reported once, separately, as blocked by the
+   * lock. "Cannot be written" and "has not been written yet" are different states, and only one of them
+   * has work left in it.
+   */
+  const goalLocked = (graph.goalLockedAt ?? '').length > 0
+  const blocked = []
+  for (const [nodeId, wanted] of Object.entries(data.nodes)) {
+    const current = graph.nodes.find((node) => node.id === nodeId)
+    if (current === undefined) continue
+    const resolved = v3.resolveNodeV3(wanted, now)
+    for (const key of ALL_V3) {
+      const next = resolved[key]
+      if (next === undefined) continue
+      const existing = current[key]
+      if (JSON.stringify(existing) === JSON.stringify(next)) continue
+      if (goalLocked && nodeId === mod.GOAL_NODE_ID) {
+        blocked.push({ nodeId, key })
+        continue
+      }
+      if (existing !== undefined) {
+        conflicts.push({ nodeId, key })
+        continue
+      }
+      perField.set(key, (perField.get(key) ?? 0) + 1)
+      fills.push({ nodeId, key, value: next })
+    }
+  }
+  const pcWanted = v3.asPersistentConstraints(data.persistentConstraints, now)
+  const pcExisting = graph.persistentConstraints ?? []
+  const pcIdsPresent = new Set(pcExisting.map((row) => row.id))
+  const pcMissing = pcWanted.filter((row) => !pcIdsPresent.has(row.id))
+  const pcDiffer = pcWanted.filter((row) => {
+    const found = pcExisting.find((other) => other.id === row.id)
+    return found !== undefined && JSON.stringify(found) !== JSON.stringify(row)
+  })
+  return { perField, fills, conflicts, blocked, pcWanted, pcMissing, pcDiffer }
+}
+
+/**
+   * ── COUNT WHAT THE NORMALISER WILL KEEP, NOT WHAT THE FILE LISTS (㉖ applied to the expected value) ─
+   *
+   * The first version of this number was `sum of v3 keys per data node` = 119, and the restore produced
+   * 102. The 17-field gap was not a bug: four `b2-*` nodes carry `evidence: []`, and `asEvidence`
+   * returns `undefined` for an empty list — correctly, because "no evidence" and "an empty evidence
+   * array" are the same claim and a stored `[]` would be noise.
+   *
+   * So the expectation is computed by RUNNING THE NORMALISER over the data, which is the only
+   * definition of "how many fields this restore can deliver". Counting keys in the JSON would have
+   * demanded the restore write fields that the library refuses to store — and the failure would have
+   * looked like a restore bug forever.
+   */
+const expectedFieldCount = (data) =>
+  Object.values(data.nodes).reduce((sum, row) => sum + Object.keys(v3.resolveNodeV3(row, now)).length, 0)
+
+const describe = (plan) => {
+  /**
+   * Two numbers per field, because "logPointers: 4 个" reads as four POINTERS when it means four NODES
+   * that carry pointers (ten pointers in total). The first version of this line said only the node
+   * count and was read as the pointer count — a report that is technically true and practically
+   * misleading is the shape of failure this repository keeps writing down.
+   */
+  const parts = [...plan.perField.entries()]
+    .filter(([, count]) => count > 0)
+    .map(([key, count]) => {
+      const items = plan.fills.filter((fill) => fill.key === key).reduce((sum, fill) => {
+        const value = fill.value
+        return sum + (Array.isArray(value) ? Math.max(1, value.length) : 1)
+      }, 0)
+      const isList = plan.fills.some((fill) => fill.key === key && Array.isArray(fill.value))
+      return isList ? `${key}: ${count} 节点 / ${items} 条` : `${key}: ${count} 个`
+    })
+  const lines = []
+  lines.push(`  待补字段：${parts.length === 0 ? '（无）' : parts.join(' / ')}`)
+  lines.push(`  待补长期约束：${plan.pcMissing.length} 条${plan.pcMissing.length > 0 ? `（${plan.pcMissing.map((row) => row.id).join(', ')}）` : ''}`)
+  if (plan.conflicts.length > 0) {
+    lines.push(`  ⚠ 已存在但值不同（不会被覆盖，需人工决定）：${plan.conflicts.map((row) => `${row.nodeId}.${row.key}`).join(', ')}`)
+  }
+  if (plan.blocked !== undefined && plan.blocked.length > 0) {
+    const fields = [...new Set(plan.blocked.map((row) => row.key))]
+    lines.push(
+      `  ⊘ goal 的目标已锁定（goalLockedAt 非空），这 ${fields.length} 个字段不可写、也不算待办：${fields.join(', ')}`,
+    )
+    lines.push('    这是 GOAL_LOCKED 在正常工作 —— 解锁才能写，而解锁不是本工具的权限。')
+  }
+  if (plan.pcDiffer.length > 0) {
+    lines.push(`  ⚠ 长期约束已存在但值不同（不会被覆盖）：${plan.pcDiffer.map((row) => row.id).join(', ')}`)
+  }
+  const missing = [...plan.perField.values()].reduce((sum, count) => sum + count, 0)
+  if (missing === 0 && plan.pcMissing.length === 0 && plan.conflicts.length === 0) {
+    lines.push('  本图已完整，无需操作。')
+  } else if (missing > 0 || plan.pcMissing.length > 0) {
+    lines.push(`  本图为部分恢复状态（本次补齐 ${missing} 个字段 + ${plan.pcMissing.length} 条约束）。`)
+  }
+  return lines.join('\n')
+}
+
+/** The v1 whitelist, used ONLY to manufacture damage in `--verify`. See step 2 below. */
+const V1_KEYS = [
+  'id', 'title', 'nodeType', 'requirements', 'status', 'dependsOn',
+  'knowledgePointers', 'fixed', 'harvestedAt', 'createdAt', 'updatedAt',
+]
+
+function stripToV1(graph) {
+  return {
+    version: 1,
+    id: graph.id,
+    goal: graph.goal,
+    goalLockedAt: graph.goalLockedAt,
+    nodes: graph.nodes.map((node) => {
+      const out = {}
+      for (const key of V1_KEYS) if (node[key] !== undefined) out[key] = node[key]
+      return out
+    }),
+    history: (graph.history ?? []).map((entry) => ({
+      at: entry.at, op: entry.op, nodeId: entry.nodeId, reason: entry.reason, changed: entry.changed,
+    })),
+    createdAt: graph.createdAt,
+    updatedAt: graph.updatedAt,
+  }
+}
+
+const v3CountOf = (graph) =>
+  graph.nodes.reduce((sum, node) => sum + ALL_V3.filter((key) => node[key] !== undefined).length, 0)
+
+// ── modes ────────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── THE WRITE GOES THROUGH `updateGraph`, NOT A RAW FILE WRITE ────────────────────────────────
+ *
+ * Three reasons, and the third is the one that matters:
+ *
+ *   ① 派工单 §七 forbids changing `graph.ts` / `graph-v3.ts` for this task. A `writeGraph` export
+ *      would be exactly such a change — it would make the "restore tool" a library change.
+ *   ② `updateGraph` is the production write path, so whatever it does to a graph (history entry,
+ *      normalisation, unknown-key carriage) happens here too. A restore that bypassed it would produce
+ *      a file no other code path produces, and the first thing the next real update did might undo it.
+ *   ③ It is also the HONEST test of T1: if `updateGraph` still shredded v3 fields, this restore would
+ *      visibly lose what it just wrote, on every run. The tool cannot report a success that the writer
+ *      did not actually deliver.
+ *
+ * The cost is that fields must be written one `update` per node (the op edits ONE node), which is why
+ * the plan is grouped by node below.
+ */
+function writeV3(memoryDir, graph, plan) {
+  const byNode = new Map()
+  for (const fill of plan.fills) {
+    if (!byNode.has(fill.nodeId)) byNode.set(fill.nodeId, {})
+    byNode.get(fill.nodeId)[fill.key] = fill.value
+  }
+  /**
+   * The goal lock is handled by `planRestore`, which EXCLUDES a locked goal's fields from `fills` in the
+   * first place (see the comment there). So nothing here needs to special-case it: a fill that reaches
+   * this loop is writable by construction. Putting a second lock check here would be a second definition
+   * of what the lock blocks — ⑪ in miniature, and the one that reaches the store wins.
+   */
+  for (const [nodeId, patch] of byNode) {
+    const result = mod.updateGraph(memoryDir, {
+      op: 'update',
+      nodeId,
+      node: patch,
+      reason: `restore-graph-v3：补 ${Object.keys(patch).join(' / ')}`,
+    })
+    if (result.ok !== true) {
+      fail(`写 ${nodeId} 失败：${result.code ?? '?'} ${result.reason ?? ''}`)
+    }
+  }
+  if (plan.pcMissing.length > 0) {
+    const merged = [...(graph.persistentConstraints ?? []), ...plan.pcMissing]
+    /**
+     * `persistentConstraints` is written through the FIRST node's update, because `updateGraph` has no
+     * op of its own for it (that is T2's `bootstrap`). The value is the whole merged list, which is the
+     * contract `mergePersistentConstraints` documents: present ⇒ replace with the normalised list.
+     */
+    /**
+     * The carrier must NOT be `goal`: a locked goal refuses every `update`, so a constraint list carried
+     * by it would be refused for a reason that has nothing to do with constraints. Preference order is
+     * "a node the plan already writes to" (so the list rides an existing update instead of adding one),
+     * then any non-anchor node, then any non-goal node.
+     */
+    const touched = [...new Set(plan.fills.map((fill) => fill.nodeId))]
+    const carrier =
+      touched.find((id) => id !== mod.GOAL_NODE_ID && id !== mod.START_NODE_ID)
+      ?? graph.nodes.find((node) => node.id !== mod.GOAL_NODE_ID && node.id !== mod.START_NODE_ID)
+    if (carrier === undefined) fail('找不到可以承载 persistentConstraints 的节点（只有 start/goal？）')
+    const result = mod.updateGraph(memoryDir, {
+      op: 'update',
+      nodeId: carrier,
+      node: {},
+      persistentConstraints: merged,
+      reason: `restore-graph-v3：补 ${plan.pcMissing.length} 条长期约束`,
+    })
+    if (result.ok !== true) fail(`写 persistentConstraints 失败：${result.code ?? '?'} ${result.reason ?? ''}`)
+  }
+}
+
+function showPlan(memoryDir) {
+  const data = loadData()
+  const graph = mod.readGraph(memoryDir)
+  const problems = checkIdSets(graph, data)
+  console.log(`memoryDir = ${memoryDir}`)
+  console.log(`图：${graph.nodes.length} 节点 / ${(graph.persistentConstraints ?? []).length} 条长期约束`)
+  console.log(`数据：${Object.keys(data.nodes).length} 节点 / ${data.persistentConstraints.length} 条长期约束`)
+  if (problems.length > 0) {
+    console.log('')
+    for (const problem of problems) console.log(`✖ ${problem}`)
+    process.exit(1)
+  }
+  const plan = planRestore(graph, data)
+  console.log('')
+  console.log(describe(plan))
+  console.log('')
+  console.log('（dry run：什么都没写。真正写入请加 --write，先验证请加 --verify。）')
+}
+
+function writeRestore(memoryDir) {
+  const data = loadData()
+  const graph = mod.readGraph(memoryDir)
+  const problems = checkIdSets(graph, data)
+  if (problems.length > 0) {
+    for (const problem of problems) console.error(`✖ ${problem}`)
+    process.exit(1)
+  }
+  const plan = planRestore(graph, data)
+  const target = join(memoryDir, 'task-graph.json')
+
+  /**
+   * ㉖: assert the INPUT first. A restore that reports "0 filled in" is ambiguous between "already
+   * complete" and "the data file had nothing in it". Counting the expected fields before touching
+   * anything removes that ambiguity.
+   */
+  const expectedFieldInstances = expectedFieldCount(data)
+  console.log(`数据自身含 ${expectedFieldInstances} 处 v3 字段实例（这是本次要恢复的目标量）`)
+  if (expectedFieldInstances === 0) fail('数据文件里一个 v3 字段都没有 —— 恢复「成功」会意味着什么都没做')
+
+  if (plan.fills.length === 0 && plan.pcMissing.length === 0) {
+    console.log(describe(plan))
+    return
+  }
+
+  const backup = join(memoryDir, BACKUP_NAME)
+  if (!existsSync(backup)) {
+    copyFileSync(target, backup)
+    /**
+     * ㉖ applied to the backup: a backup nobody read is a backup nobody knows is valid. It is re-read
+     * through the SAME reader the plugin uses, and the assertion is on what a v1 graph must NOT have —
+     * if the "backup" already contained v3 fields, it was not taken before the damage and is useless
+     * for a rollback.
+     */
+    const check = mod.readGraph(memoryDir)
+    if (check.nodes.length !== graph.nodes.length) fail(`备份校验失败：节点数 ${check.nodes.length} != ${graph.nodes.length}`)
+    console.log(`备份已写入 ${BACKUP_NAME}（readGraph 读回 ${check.nodes.length} 节点，合法）`)
+  } else {
+    console.log(`备份已存在 ${BACKUP_NAME}，保留原备份不动（回滚锚点不能被后续运行覆盖）`)
+  }
+
+  const paid = mod.readGraph(memoryDir)
+  writeV3(memoryDir, paid, plan)
+  console.log(describe(plan))
+  const after = mod.readGraph(memoryDir)
+  console.log(`写入完成：${after.nodes.length} 节点 / ${(after.persistentConstraints ?? []).length} 条长期约束 / ${v3CountOf(after)} 处 v3 字段`)
+}
+
+/**
+ * ── STEP 2: PROVE THE REPAIR ON A COPY THAT IS ACTUALLY BROKEN ──────────────────────────────────
+ *
+ * The damage is manufactured rather than described: the current graph is stripped to the v1 whitelist,
+ * written into a temp dir, read back (so the assertion starts from a real file, not an in-memory
+ * object), restored, and re-read. If the restore code cannot repair a file it damaged itself, it
+ * certainly cannot repair one it did not make.
+ */
+function verifyRestore(memoryDir) {
+  const data = loadData()
+  const live = mod.readGraph(memoryDir)
+  const problems = checkIdSets(live, data)
+  if (problems.length > 0) {
+    for (const problem of problems) console.error(`✖ ${problem}`)
+    process.exit(1)
+  }
+
+  console.log('── 步骤 1：备份 + 校验备份是合法 v1 图 ──────────────────────────────────────')
+  const target = join(memoryDir, 'task-graph.json')
+  const backup = join(memoryDir, BACKUP_NAME)
+  if (existsSync(target)) {
+    if (!existsSync(backup)) {
+      copyFileSync(target, backup)
+      console.log(`  备份写入 ${BACKUP_NAME}`)
+    } else {
+      console.log(`  备份已存在 ${BACKUP_NAME}（保留不动）`)
+    }
+    const check = mod.readGraph(memoryDir)
+    console.log(`  备份读回：${check.nodes.length} 节点 ✅`)
+  } else {
+    console.log(`  ${target} 不存在 —— 跳过备份（下面的验证不需要它）`)
+  }
+
+  console.log('')
+  console.log('── 步骤 2：在临时副本上「制造缺失」再恢复 ──────────────────────────────────')
+  const tmp = mkdtempSync(join(tmpdir(), 'restore-v3-verify-'))
+  try {
+    const stripped = stripToV1(live)
+    writeFileSync(join(tmp, 'task-graph.json'), `${JSON.stringify(stripped, null, 2)}\n`, 'utf8')
+    const broken = mod.readGraph(tmp)
+    const before = v3CountOf(broken)
+    console.log(`  降级后：${broken.nodes.length} 节点 / ${(broken.persistentConstraints ?? []).length} 条长期约束 / ${before} 处 v3 字段`)
+
+    const plan = planRestore(broken, data)
+    /**
+     * The expectation excludes what the GOAL LOCK legitimately blocks. `planRestore` already leaves those
+     * out of `fills`, so the count comes from the plan's own `blocked` list — one source, not a second
+     * derivation that could disagree with the writer.
+     */
+    const lockedFields = plan.blocked.length
+    /**
+     * The SAME `writeV3` the live path uses, against the temp copy. A verification that ran a different
+     * writer would prove the wrong thing: it would show this script can repair a file by writing it
+     * directly, while the live path goes through `updateGraph` and might behave differently.
+     */
+    writeV3(tmp, broken, plan)
+    const after = mod.readGraph(tmp)
+    const afterCount = v3CountOf(after)
+    const expected = expectedFieldCount(data) - lockedFields
+
+    const lockedNote = lockedFields > 0 ? `，扣掉 goal 锁拒绝的 ${lockedFields} 个` : ''
+    console.log(`  恢复后：${after.nodes.length} 节点 / ${(after.persistentConstraints ?? []).length} 条长期约束 / ${afterCount} 处 v3 字段（目标 ${expected}${lockedNote}）`)
+    if (plan.blocked.length > 0) {
+      const fields = [...new Set(plan.blocked.map((row) => row.key))]
+      console.log(`  ⊘ goal 已锁定，这 ${fields.length} 个字段不可写也不算待办：${fields.join(', ')}`)
+    }
+    if (afterCount !== expected) fail(`临时副本恢复不完整：${afterCount} != ${expected}`)
+
+    /**
+     * ㉖ again: the assertion is that the DATA covers 13 distinct field names, so "every field came
+     * back" cannot pass against a data file that happens to contain only one field.
+     */
+    const distinct = new Set(Object.values(data.nodes).flatMap((row) => Object.keys(row).filter((key) => ALL_V3.includes(key))))
+    if (distinct.size < 13) fail(`数据只含 ${distinct.size} 种字段，低于 13 —— 断言会变成「恢复了它自己唯一的那个字段」`)
+    const restoredDistinct = new Set(after.nodes.flatMap((node) => ALL_V3.filter((key) => node[key] !== undefined)))
+    console.log(`  字段种类：数据 ${distinct.size} 种 / 恢复后 ${restoredDistinct.size} 种`)
+    if (restoredDistinct.size !== distinct.size) fail(`字段种类不一致：${restoredDistinct.size} != ${distinct.size}`)
+
+    const pc = after.persistentConstraints ?? []
+    console.log(`  persistentConstraints：${pc.length} 条（数据 ${data.persistentConstraints.length} 条）`)
+    if (pc.length !== data.persistentConstraints.length) fail(`长期约束数量不符：${pc.length} != ${data.persistentConstraints.length}`)
+
+    /**
+     * `start` must NOT be touched. It is the anchor: no v3 fields, and a restore that "helpfully"
+     * filled it would be writing a claim about a node nobody authored.
+     */
+    const start = after.nodes.find((node) => node.id === mod.START_NODE_ID)
+    const startV3 = ALL_V3.filter((key) => start[key] !== undefined)
+    console.log(`  start 的 v3 字段：${startV3.length === 0 ? '无 ✅（未被误补）' : `⚠ ${startV3.join(', ')}`}`)
+    if (startV3.length !== 0) fail(`start 被误补了 v3 字段：${startV3.join(', ')}`)
+  } finally {
+    rmSync(tmp, { recursive: true, force: true })
+  }
+  console.log('')
+  console.log('✅ --verify 通过：这个脚本确实能修它自己制造的那种缺失。')
+  console.log('   活 store 未被修改（本模式只写备份）。要真正恢复请加 --write。')
+}
+
+// ── entry ───────────────────────────────────────────────────────────────────────────────────────
+
+const argv = process.argv.slice(2)
+const memoryDir = resolve(resolveMemoryDir())
+if (argv.includes('--verify')) verifyRestore(memoryDir)
+else if (argv.includes('--write')) writeRestore(memoryDir)
+else showPlan(memoryDir)
