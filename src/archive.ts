@@ -28,6 +28,10 @@
 import { readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
+/** TD-M6：合并相似度只有一个出处。这里 import + re-export，公开面不变。 */
+import { MERGE_SIMILARITY } from './thresholds.js'
+export { MERGE_SIMILARITY }
+
 /**
  * TD-M1: the merge half lives in the store, because it owns evidence unions, the conflict index
  * and provenance. This module owns the POLICY (what to merge, what to archive); the store owns
@@ -145,9 +149,6 @@ export function whenSimilarity(left: string, right: string): number {
   const union = sizeOf(a) + sizeOf(b) - shared
   return union === 0 ? 0 : shared / union
 }
-
-/** Above this, two skills answer the same trigger and may be merged. */
-export const MERGE_SIMILARITY = 0.82
 
 /**
  * v0.21: decide what a maintenance pass would do, WITHOUT doing it.

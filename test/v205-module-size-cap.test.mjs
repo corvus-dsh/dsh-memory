@@ -95,6 +95,7 @@ const SCANNED = [
   'sqlite-index.ts',
   'storage-tier.ts',
   'store.ts',
+  'thresholds.ts',
   'suggest.ts',
   'threat.ts',
   'workspace.ts',
@@ -128,7 +129,10 @@ const HISTORICAL = new Set([
 const EXEMPT = new Map([
   ['index.ts', {
     /**
-     * ── 2026-11-18（B3 / F6）2298 → 2467：一次**有理由的增长**，不是棘轮的例外 ────────────────────
+     * ── 2026-11-18（B3 / F6）2298 → 2467，再（B3 收口 / TD-M6）2467 → 2478 ─────────────────────
+     *
+     * TD-M6 的 +11 行是：`DEFAULT_RETRIEVAL_FLOOR` 改为从 `thresholds.ts` 取值（一个 import
+     * 加一段解释「名字在、但下不去，于是被复制成两个字面量」的注释）。行为零变化。
      *
      * 新增的是 `memory_contribute` 工具（schema + 四条边界：nodeId 必须存在、author 是图级参数、
      * 只覆盖 skill/negative、被拒不许留半份数据）与 `memory_stats.flywheel` 的三个数。这两块都在
@@ -138,16 +142,17 @@ const EXEMPT = new Map([
      * 天花板的规则是「今天多大就是多大」，所以它必须跟着实测走；不允许的是**留虚高配额**（实测 1900
      * 却登记 2009）。这一条下次仍按实测收紧，不因为「这次是加功能」就放宽。
      */
-    ceiling: 2467,
+    ceiling: 2478,
     reason:
       'dsh-memory 的插件入口：applyInner 一个函数 1362 行（占 58%），加上工具注册、console 网络端、'
       + 'harvest 编排与 33 个导出。它是整个重构的**目标文件**，拆它需要先拆它依赖的 store/retrieve'
       + '（已完成 store 的 A1；retrieve 尚未开始）。在拆完之前把它排除在门禁之外等于开一个 2361 行的洞，'
       + '所以登记为天花板：尺寸可见、不可增长。'
-      + '（2026-11-18 B3/F6：2467，因 memory_contribute + flywheel 落进同一个闭包；理由见上方注释。）',
+      + '（2026-11-18 B3/F6：2467，因 memory_contribute + flywheel 落进同一个闭包；B3 收口/TD-M6：'
+      + '2478，`DEFAULT_RETRIEVAL_FLOOR` 改为从 thresholds.ts 取值；理由见上方注释。）',
   }],
   ['retrieve.ts', {
-    ceiling: 1078,
+    ceiling: 1085,
     reason:
       '检索层：词法召回、IDF×鲜活度×重要度打分、两阶段 LLM 过滤、提示渲染。它与 store.ts 曾共享大量'
       + 'helper。2026-11-16 已完成六步搬运：'
@@ -163,6 +168,9 @@ const EXEMPT = new Map([
       + '这 4 行是**功能修复**，不是膨胀 —— 它们把一条断掉的链接上（生产者算出年龄、消费者要年龄、'
       + '中间的复制函数没搬），由 `test/v217-d1-agedays.test.mjs` 的四条断言钉住。'
       + '棘轮按实测收紧到 1078：它仍然只能降，不能因为「这次是修复」就放松。'
+      + '**B3 收口 / TD-M6：1078 → 1085（+7）**：`FLOOR` / `THRESHOLD` / `TASK_TERM_LIMIT` / '
+      + '`FILTER_MAX_CANDIDATES` 改为从 `thresholds.ts` 导入并 re-export，三处字面量换成名字。'
+      + '行为零变化（`v246` 静态断言 + 既有的 v205/v207/v212 数字断言全部仍绿）。'
       + '层账（由 `node scripts/retrieve-report.mjs` 的「层账」一节算，不手抄）：旧值 1074 行时'
       + '搬完 L1+L2+L3 是 689 行，**已经 ≤ 800**；再搬 L0（335）只剩 354 —— '
       + '那 354 行是 import / re-export / 文件头注释 / 空行，不是可搬的声明。'

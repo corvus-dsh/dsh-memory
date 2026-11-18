@@ -85,19 +85,26 @@ import { getCachedSkillDocs, setCachedSkillDocs, skillDocsKey } from './skill-ca
 
 
 /**
+ * ── TD-M6: THE SIX NUMBERS COME FROM `thresholds.ts`, AND NOTHING HERE DECLARES THEM ──────────
+ *
+ * The import below is the ONLY source for the two that used to be literals (`FLOOR`, `THRESHOLD`)
+ * and for the two that were declared here (`TASK_TERM_LIMIT`, `FILTER_MAX_CANDIDATES`). The
+ * re-exports keep the public surface byte-identical: callers and tests import these names from
+ * `retrieve.js` today and must keep working.
+ */
+import { FLOOR, THRESHOLD, TASK_TERM_LIMIT, FILTER_MAX_CANDIDATES } from './thresholds.js'
+export { FLOOR, THRESHOLD, TASK_TERM_LIMIT, FILTER_MAX_CANDIDATES }
+/** `NEGATIVE_STALE_DAYS` was re-exported through `interning.js`; the re-export stays (below). */
+
+/**
  * v0.20: the task's distinctive terms, for the alignment gate.
  *
- * Built from the HUMAN ask — not from the whole conversation — because the whole
- * conversation contains the very error strings that make a stale incident log look
- * on-topic. That is the whole point of the gate: "报错" in the current turn must not
- * be allowed to argue for "when X errors" from three tasks ago.
- *
- * Stopwords are removed (they carry no task signal), and the result is capped: an
- * enormous ask must not dilute itself into "matches everything", which would make
- * the gate a no-op with extra steps.
+ * Built from the HUMAN ask — not from the whole conversation — because the whole conversation
+ * contains the very error strings that make a stale incident log look on-topic. That is the whole
+ * point of the gate: "报错" in the current turn must not be allowed to argue for "when X errors"
+ * from three tasks ago. Stopwords are removed, and the result is capped by `TASK_TERM_LIMIT`: an
+ * enormous ask must not dilute itself into "matches everything".
  */
-export const TASK_TERM_LIMIT = 60
-
 export function extractTaskTerms(text: string, limit = TASK_TERM_LIMIT): ReadonlySet<string> {
   if (typeof text !== 'string' || text.trim().length === 0) return new Set<string>()
   const out = new Set<string>()
@@ -551,7 +558,7 @@ export function retrieveCandidates(
   // the model is the judge. A generic ask ("write a script that connects to a
   // database") shares few words with a skill's trigger, yet is exactly what recall
   // must not miss.
-  const threshold = options.threshold ?? 0.2
+  const threshold = options.threshold ?? FLOOR
   const limit = Math.max(1, Math.min(20, options.limit ?? 4))
   // Sync path only: the legacy lexicon is the offline fallback, not the live gate.
   const scene = options.scene ?? inferScene(query)
@@ -652,23 +659,23 @@ export async function retrieveHybrid(
  * Five is the cap because the hint itself can only carry one primary skill plus two
  * alternatives plus one negative: everything past the fifth candidate could not be
  * rendered even if the judge kept it.
+ *
+ * ── TD-M6: THE VALUE MOVED TO `thresholds.ts`; THE NAME STAYS HERE AS A RE-EXPORT ───────────────
+ * (`FILTER_MAX_CANDIDATES = 5` is imported above and re-exported; there is no declaration here.)
  */
-export const FILTER_MAX_CANDIDATES = 5
 
 /**
- * v0.22 P1 — the strict lexical bar, used ONLY by the degradation path below.
+ * v0.22 P1 — the ALIAS of `THRESHOLD`, kept because this was the name the retriever's own
+ * fallback used and `index.ts` re-exports it. TD-M6's exit condition called the number `THRESHOLD`;
+ * the alias is a name for that number, not a second copy of it — `v246` asserts there is exactly
+ * one declaration of the value in `src/`.
  *
- * This constant lives here rather than in `index.ts` because the thing that needs it
- * is this module's fallback, and the import direction is one-way: `index.ts` imports
- * from `retrieve.js`, so reaching back for it would be a cycle. (It was a cycle in
- * effect for exactly one commit: the reference was unresolved, and the degradation
- * path threw `ReferenceError: DEFAULT_RETRIEVAL_THRESHOLD is not defined` — inside
- * the catch block, where it replaced the judge's timeout with a crash. The guard
- * that exists to keep a slow judge from costing the turn cost the turn.)
- *
- * `index.ts` re-exports this name, so the public surface is unchanged.
+ * The history matters here: this constant used to be declared HERE while the same `0.55` was also
+ * written as a literal ten lines below, and in an earlier version the name did not exist at all —
+ * the degradation path threw `ReferenceError: DEFAULT_RETRIEVAL_THRESHOLD is not defined` inside
+ * its own catch block, replacing the judge's timeout with a crash.
  */
-export const DEFAULT_RETRIEVAL_THRESHOLD = 0.55
+export const DEFAULT_RETRIEVAL_THRESHOLD = THRESHOLD
 
 /** Keep the BEST `limit` candidates, preserving order. */
 export function truncateCandidates<T extends { score: number }>(candidates: readonly T[], limit = FILTER_MAX_CANDIDATES): T[] {
@@ -694,7 +701,7 @@ export function retrieve(
   } = {},
 ): RetrieveResult {
   const now = options.now ?? Date.now()
-  const threshold = options.threshold ?? 0.55
+  const threshold = options.threshold ?? THRESHOLD
   // Sync path only: `classifyScene` is async, so an offline caller passes `scene`
   // explicitly; absent that, the legacy lexicon keeps the gate deterministic.
   const scene = options.scene ?? inferScene(query)
@@ -757,7 +764,7 @@ export async function retrieveWithFilter(
   query: string,
   options: FilterOptions = {},
 ): Promise<RetrieveResult> {
-  const floor = options.floor ?? options.threshold ?? 0.2
+  const floor = options.floor ?? options.threshold ?? FLOOR
   const now = options.now ?? Date.now()
   const gate: WorkspaceGate = { workspace: options.workspace }
   // v0.7.1: classify BEFORE scoring, because the scene is the gate. A failed

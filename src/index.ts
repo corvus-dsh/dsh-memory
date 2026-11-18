@@ -22,6 +22,8 @@ import type { EvidenceRef, ExtractionResult, MemoryProvenance } from './extract.
 import { findSkillCandidate } from './dedupe.js'
 import { retrieve, renderHint, retrieveWithFilter, collectScenes, extractTaskTerms, askAsksForFix, DEFAULT_RETRIEVAL_THRESHOLD, isolateHint, currentCommitOf } from './retrieve.js'
 import { applySkillArchive, listSkillSummaries, planSkillArchive, DEFAULT_SKILL_LIMIT } from './archive.js'
+/** TD-M6: the recall floor's value — imported from its ONE home, never declared here. */
+import { FLOOR } from './thresholds.js'
 import { currentWorkspaceOf, memoryAllowsWorkspace, workspaceOfSession } from './workspace.js'
 import { applySupersede, listSkillRecords, quarantineWorkspaceMemory, readSkillBody } from './store.js'
 import { installLedgerExitFlush, startLedgerFlushTimer } from './ledger-cache.js'
@@ -140,7 +142,16 @@ export const MEMORY_PROTOCOL = 'dsh-memory/1'
  * offline mode, where no model adjudicates and a weak lexical match must not be
  * trusted on its own.
  */
-export const DEFAULT_RETRIEVAL_FLOOR = 0.2
+/**
+ * ── TD-M6: THE FLOOR'S VALUE COMES FROM `thresholds.ts` ────────────────────────────────────────
+ *
+ * This declaration used to be the ONLY named copy — and `retrieve.ts`, one layer below, could not
+ * import it (that direction is a cycle), so it wrote the same `0.2` twice as a literal. A name
+ * that exists but is unreachable from its使用者 is how two copies are born.
+ *
+ * The name stays exported (public surface unchanged); the value now has one home.
+ */
+export const DEFAULT_RETRIEVAL_FLOOR = FLOOR
 // v0.22 P1: the strict bar moved to `retrieve.ts`, which is where the degradation path
 // needs it. It is re-exported here so every existing importer keeps working.
 export { DEFAULT_RETRIEVAL_THRESHOLD } from './retrieve.js'

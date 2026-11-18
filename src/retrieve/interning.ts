@@ -130,8 +130,14 @@ export function provenanceOf(value: unknown): MemoryProvenance {
  * Deliberately requires BOTH conditions: old AND never re-hit. An old negative that
  * keeps recurring is a real rule with a long history, and demoting it would be worse
  * than useless.
+ *
+ * ── TD-M6: THE NUMBER LIVES IN `thresholds.ts` ─────────────────────────────────────────────────
+ *
+ * The name is re-exported from here because `retrieve.ts` and the plugin entry import it through
+ * this module today. The VALUE has exactly one declaration.
  */
-export const NEGATIVE_STALE_DAYS = 30
+import { NEGATIVE_STALE_DAYS } from '../thresholds.js'
+export { NEGATIVE_STALE_DAYS }
 
 /** What an old, never-rehit negative keeps of its weight. */
 export const NEGATIVE_STALE_WEIGHT = 0.5

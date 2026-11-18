@@ -59,13 +59,17 @@
 | 修法 | 常量下沉到叶子模块 `retrieve.ts`（它才是使用者），`index.ts` 改为 `export { ... } from './retrieve.js'` 并显式再导入供自用；`test/v022-progressive-disclosure.test.mjs` 用「不包 assert.throws 直接 await」的方式钉住该分支，`ReferenceError` 会让它失败 |
 | 退出条件（已达成） | ①`DEFAULT_RETRIEVAL_THRESHOLD` 与使用点同模块；②降级分支有独立测试且不抛；③降级只降到 0.55（严格），绝不降到 0.20（网底） |
 
-### TD-M6 阈值常量的「单一出处」比 v0.21 更迫切（P2，升级自 TD-3）
+### TD-M6 阈值常量的「单一出处」比 v0.21 更迫切（P2，升级自 TD-3 —— **已关闭 2026-11-18**）
 
 | 项 | 内容 |
 |---|---|
 | 现状 | TD-M5 的根因不是笔误，而是同一批阈值常量分散在 `index.ts` / `retrieve.ts` / `archive.ts`，谁引用谁都要想「导入方向会不会成环」 |
 | 影响 | 每次新增引用点都是一次「会不会成环 / 会不会未定义」的判断；ESM 的循环导入在纯类型上不报错，只有在**运行到那一行**时才炸——正是 TD-M5 的形态 |
 | 退出条件 | 新建 `thresholds.ts`（零依赖叶子模块）承载 `FLOOR` / `THRESHOLD` / `MERGE_SIMILARITY` / `TASK_TERM_LIMIT` / `NEGATIVE_STALE_DAYS` / `FILTER_MAX_CANDIDATES`；所有模块只从它导入；加一条「`src/` 内无跨层反向常量导入」的静态检查测试 |
+| 关闭对账（2026-11-18） | ① `src/thresholds.ts`（48 行）承载六个常量，**import 数 = 0**（`v246 ①`）；② 只导出这六个（`v246 ②`）；③ 所有值 import 的来源必须是 `thresholds.js`（`v246 ③`，静态扫全树）；④ 六个值逐项没变（`v246 ④`）；⑤ 公开面未断：`retrieve.js` / `archive.js` / `retrieve/interning.js` / `index.js` 的旧名字仍在且等于新名字（`v246 ⑤`），`MERGE_SIMILARITY`、`TASK_TERM_LIMIT`、`FILTER_MAX_CANDIDATES`、`NEGATIVE_STALE_DAYS`、`DEFAULT_RETRIEVAL_THRESHOLD`、`DEFAULT_RETRIEVAL_FLOOR` 一个都没少 |
+| ⚠ 退出条件假设的东西当时**不存在** | 退出条件点名的 `FLOOR` 与 `THRESHOLD` 在代码里**从来没有出现过**。真实状态：`DEFAULT_RETRIEVAL_FLOOR = 0.2` 在 **`index.ts`**（上层），`retrieve.ts` 向下取不到它，于是同一个 `0.2` 在检索器里又被字面量写了**两遍**；`DEFAULT_RETRIEVAL_THRESHOLD = 0.55` 在 `retrieve.ts`，而同一文件十行之下**又写了一遍** `0.55`。所以这一笔实际是「**立名 + 搬移**」——把两个无名/错位的数先命名，再把四个已命名的搬走。这一点写在这里，因为「退出条件点名的名字不存在」本身是判据说谎的一种（与 TD-M18 同族） |
+| 形状与代价 | 一个 import + re-export 的壳：`retrieve.ts` 的 `declarations` 32 → 30、`sccs` 32 → 30、`trunk` 22/561 → 21/560（`v207` 基线按实测重记并写明四类变化）；`retrieve.ts` 1078 → 1085 行、`index.ts` 2467 → 2478 行（`v205` 天花板按实测收紧）。**行为零变化**：`v207`（六数）、`v205`（尺寸）、常量的既有断言全绿 |
+| 明确不做 | **不改任何上限的值**（只立名与搬移）。**不做 semantic 相关的合并**（TD-M2）。**没有扩大清单**：`0.2` 还以「置信度下限」的身份出现在 `clampConfidence` 等处，那是**另一个数**（值相同、语义不同），混进来会把两种阈值搅成一条 |
 
 ### TD-M7 负知识时效只看 `hits` 与年龄（P2）
 

@@ -121,16 +121,31 @@ const AVAILABLE = compilerAvailable()
  * 层数不变（仍 4）：类型节点本来在各层都有，但都不承载值边，搬走不抽空任何一层。
  */
 const DOCUMENTED = {
+  /**
+   * ── 2026-11-18（B3 收口 / TD-M6）：整组按实测重记 ───────────────────────────────────────────
+   *
+   * 这一笔把 `FLOOR` / `THRESHOLD` / `TASK_TERM_LIMIT` / `FILTER_MAX_CANDIDATES` 从本模块搬去
+   * `thresholds.ts`，于是四件事同时发生，且全都是**可解释的**：
+   *
+   *   · `declarations` 32 → 30：两个 `export const` 变成 import + re-export（re-export 不是声明）；
+   *   · `trunk.declarations` 22 → 21、`trunk.lines` 561 → 560、`spanSum` 724 → 722：同一条主干
+   *     少了两处声明体；
+   *   · `sccs` 32 → 30：与常量成环的那两个候选随常量下沉消失；
+   *   · `tiers.A` / `tierCounts.A` 86/20 → 84/18：A 层少的就是那两处声明。
+   *
+   * 这些数字是**读出来的**，不是推的（`node scripts/retrieve-report.mjs --json`）。
+   * 基线跟着实测走（与 v205 的棘轮同一条纪律），但只允许「变小或可解释地变」。
+   */
   components: 6,
-  trunkDeclarations: 22,
-  trunkLines: 561,
-  sccs: 32,
+  trunkDeclarations: 21,
+  trunkLines: 560,
+  sccs: 30,
   nontrivialSccs: 0,
   layers: 4,
-  tiers: { D: 365, C: 106, B: 167, A: 86 },
-  tierCounts: { D: 3, C: 2, B: 7, A: 20 },
-  declarations: 32,
-  spanSum: 724,
+  tiers: { D: 365, C: 106, B: 167, A: 84 },
+  tierCounts: { D: 3, C: 2, B: 7, A: 18 },
+  declarations: 30,
+  spanSum: 722,
 }
 
 test('v207 ①: 当前六数与内置基线逐项相等（基线来自实测，不是从文档反读）', (t) => {
