@@ -1,0 +1,219 @@
+/**
+ * SKILL MERGE — TD-M1's write half, split out of `store/lifecycle.ts` on 2026-11-18.
+ *
+ * WHY IT IS ITS OWN MODULE (㉕/㉚: 新模块按职责切): `lifecycle.ts` owns supersede / quarantine /
+ * audit / migration, and it stood at 743 lines against a hard 800-line cap. The merge is a coherent
+ * unit — "move everything an absorbed skill carried onto a keeper, losing nothing" — with its own
+ * failure modes, so it belongs beside the SKILL format rather than inside the lifecycle cluster.
+ *
+ * `applySkillArchive` used to REPORT merge candidates and apply only the archive half, so the first
+ * line of defence against an unbounded store never actually fired. This is that missing half, and
+ * its whole design is the risk paragraph in ARCHITECTURE.md's TD-M1: `evidence`, `conflicts_with`,
+ * `supersedes`, provenance and `last_used` all live on the absorbed skill, and every one of them is
+ * the asset this store exists to keep.
+ *
+ * ── THE FIVE THINGS IT MUST NOT LOSE (each has a test in `test/v244`) ──────────────────────────
+ *
+ *   1. EVIDENCE — the union, deduplicated by `sessionId@seq`. Two refs that are the SAME pointer
+ *      are one pointer: keeping a duplicate would inflate `evidence` while proving nothing. The
+ *      absorbed record's own count is reported in the audit line, so "N + M" stays checkable.
+ *   2. CONFLICT EDGES — the index is a graph fact about NAMES. An edge naming the absorbed skill
+ *      after it is gone is a dangling edge; every one is re-pointed at the keeper FIRST, then the
+ *      absorbed name is dropped from the index. (`removeEdgesFor` after `writeEdge`, never before.)
+ *   3. PROVENANCE — both tiers are kept: the keeper keeps its own in its file, the absorbed keeps
+ *      its own in ITS file, which is archived rather than deleted. Both are also written into the
+ *      audit line, because the pair is the interesting fact.
+ *   4. SUPERSESSION — the keeper's `supersedes` becomes the union of both lists plus the absorbed
+ *      NAME: after this write, the keeper really does replace it. A pre-existing `invalid_at` on
+ *      the absorbed skill is NOT copied forward (that would resurrect an ended rule's obituary
+ *      onto a live one) — and for the same reason an absorbed skill that is ALREADY invalid is
+ *      refused: merging a retired rule into a live one is resurrection, not compaction.
+ *   5. THE BODY — never re-rendered. `renderSkill` rebuilds the body from `steps` + `verify`, and
+ *      `parseSkillFile` does not read `## 已知坑` or any other human section; a merge routed
+ *      through the renderer would silently delete them. The frontmatter is therefore edited
+ *      SURGICALLY, in place, and the body is carried through byte-for-byte.
+ *
+ * ARCHIVED, NEVER DELETED. The absorbed skill gets `archived: true` + `merged_into: <keeper>` and
+ * its file (evidence block included) stays on disk. Retrieval already skips archived skills.
+ */
+
+import { readFileSync } from 'node:fs'
+
+import { getNeighbors, removeEdgesFor, writeEdge } from '../edges.js'
+import { invalidateSkillDocs } from '../skill-cache.js'
+import { appendMemoryAudit } from './lifecycle.js'
+import { atomicWrite } from './io.js'
+import { invalidateSkillShape, parseEvidenceField, readSkillValidity, skillPath } from './skill.js'
+
+export interface MergeResult {
+  ok: boolean
+  /** `merged` on success, `skipped:<reason>` otherwise. Named, never a boolean alone. */
+  status: string
+  keeper: string
+  absorbed: string
+  /** Size of the evidence union actually written. */
+  evidence: number
+  evidenceBefore: { keeper: number; absorbed: number; shared: number }
+  /** Edges that used to name the absorbed skill and now name the keeper. */
+  conflictsMoved: number
+  provenance: { keeper: string; absorbed: string }
+  supersedes: string[]
+  /** False only when the caller supplied no `memoryDir` (there is nowhere to write the line). */
+  audited: boolean
+}
+
+/** `sessionId@seq`, or `@seq` for a legacy ref with no session (which is still one identity). */
+function evidenceKey(ref: { sourceSessionId: string; seq: number }): string {
+  return `${ref.sourceSessionId}@${ref.seq}`
+}
+
+/**
+ * Rewrite ONE frontmatter line, or add it after `name:`.
+ *
+ * `[ \t]*` in no regex here, but note: the value is placed on its own line and never spans lines —
+ * the read side (`readSkillValidity`) had to be fixed for exactly that reason (an empty field used
+ * to swallow the next line).
+ */
+function rewriteFrontmatterLine(text: string, key: string, value: string): string {
+  const line = new RegExp(`^${key}:.*$`, 'mu')
+  if (line.test(text)) return text.replace(line, `${key}: ${value}`)
+  /** Insert after `name:` — the same anchor `archived:` uses, so both land in one predictable place. */
+  return text.replace(/^(name:.*)$/mu, `$1\n${key}: ${value}`)
+}
+
+export function mergeSkills(
+  skillsDir: string,
+  keeperName: string,
+  absorbedName: string,
+  options: { memoryDir?: string; at?: string } = {},
+): MergeResult {
+  const result: MergeResult = {
+    ok: false,
+    status: 'skipped:not-attempted',
+    keeper: keeperName,
+    absorbed: absorbedName,
+    evidence: 0,
+    evidenceBefore: { keeper: 0, absorbed: 0, shared: 0 },
+    conflictsMoved: 0,
+    provenance: { keeper: '', absorbed: '' },
+    supersedes: [],
+    audited: false,
+  }
+  if (keeperName.length === 0 || absorbedName.length === 0) {
+    return { ...result, status: 'skipped:empty name' }
+  }
+  if (keeperName === absorbedName) return { ...result, status: 'skipped:same skill' }
+  for (const name of [keeperName, absorbedName]) {
+    if (name.includes('/') || name.includes('\\') || name.includes('..')) {
+      return { ...result, status: `skipped:unsafe name ${name}` }
+    }
+  }
+  const keeperPath = skillPath(skillsDir, keeperName)
+  const absorbedPath = skillPath(skillsDir, absorbedName)
+  /** Read BOTH before writing anything: a half-read pair must not produce a half-write. */
+  let keeperText = ''
+  let absorbedText = ''
+  try {
+    keeperText = readFileSync(keeperPath, 'utf8')
+    absorbedText = readFileSync(absorbedPath, 'utf8')
+  } catch {
+    return { ...result, status: 'skipped:missing file' }
+  }
+  const keeperValidity = readSkillValidity(keeperText)
+  const absorbedValidity = readSkillValidity(absorbedText)
+  if (/^archived:\s*true\s*$/mu.test(keeperText)) {
+    return { ...result, status: 'skipped:keeper is archived' }
+  }
+  /**
+   * ALREADY ABSORBED is not a second merge. A stale plan replayed twice (the activation pass reads
+   * a fresh plan every time, but a caller need not) must not report "merged 1 pair" forever: the
+   * first merge is the fact, and the counter has to say what this call DID.
+   */
+  if (/^archived:\s*true\s*$/mu.test(absorbedText)) {
+    return { ...result, status: 'skipped:absorbed is archived' }
+  }
+  /**
+   * A RETIRED RULE IS NOT COMPACTED INTO A LIVE ONE. `invalid_at` means "we stopped believing
+   * this"; folding its text and evidence into an active keeper would make a live skill carry a
+   * dead rule's evidence. Refusing costs a merge and keeps the store honest.
+   */
+  if (absorbedValidity.invalidAt.length > 0) {
+    return { ...result, status: 'skipped:absorbed is invalidated' }
+  }
+
+  const field = (text: string, key: string): string =>
+    (text.match(new RegExp(`^${key}:[ \\t]*(.+)$`, 'mu'))?.[1] ?? '').trim()
+
+  const keeperEvidence = parseEvidenceField(field(keeperText, 'evidence'), '')
+  const absorbedEvidence = parseEvidenceField(field(absorbedText, 'evidence'), '')
+  const seen = new Set(keeperEvidence.map(evidenceKey))
+  const union = [...keeperEvidence]
+  for (const ref of absorbedEvidence) {
+    const key = evidenceKey(ref)
+    if (seen.has(key)) continue
+    seen.add(key)
+    union.push(ref)
+  }
+  result.evidence = union.length
+  result.evidenceBefore = {
+    keeper: keeperEvidence.length,
+    absorbed: absorbedEvidence.length,
+    shared: keeperEvidence.length + absorbedEvidence.length - union.length,
+  }
+
+  /** Edges first: an edge re-pointed at the keeper must exist before the absorbed name is dropped. */
+  const neighbours = getNeighbors(skillsDir, absorbedName).filter((name) => name !== keeperName)
+  for (const neighbour of neighbours) writeEdge(skillsDir, keeperName, neighbour)
+  removeEdgesFor(skillsDir, absorbedName)
+  result.conflictsMoved = neighbours.length
+
+  const supersedes = [
+    ...new Set([...keeperValidity.supersedes, ...absorbedValidity.supersedes, absorbedName]),
+  ].filter((name) => name.length > 0 && name !== keeperName)
+  result.supersedes = supersedes
+  result.provenance = { keeper: keeperValidity.provenance, absorbed: absorbedValidity.provenance }
+
+  /**
+   * SURGICAL EDIT — the body is carried through untouched. `evidence` and `supersedes` are the
+   * only two lines rewritten; `merged_from` records where the union came from, which is a fact
+   * the frontmatter can answer without opening the audit ledger.
+   */
+  const evidenceText = union
+    .map((ref) => (ref.sourceSessionId.length > 0 ? `${ref.sourceSessionId}@${ref.seq}` : String(ref.seq)))
+    .join(',')
+  let nextKeeper = rewriteFrontmatterLine(keeperText, 'evidence', evidenceText)
+  if (supersedes.length > 0) nextKeeper = rewriteFrontmatterLine(nextKeeper, 'supersedes', supersedes.join(','))
+  nextKeeper = rewriteFrontmatterLine(nextKeeper, 'merged_from', absorbedName)
+
+  let nextAbsorbed = rewriteFrontmatterLine(absorbedText, 'archived', 'true')
+  nextAbsorbed = rewriteFrontmatterLine(nextAbsorbed, 'merged_into', keeperName)
+
+  try {
+    atomicWrite(keeperPath, nextKeeper)
+    atomicWrite(absorbedPath, nextAbsorbed)
+  } catch (error) {
+    return { ...result, ok: false, status: `failed:${String((error as any)?.message ?? error)}` }
+  }
+  invalidateSkillShape(skillsDir, keeperName)
+  invalidateSkillShape(skillsDir, absorbedName)
+  invalidateSkillDocs(skillsDir)
+
+  if (options.memoryDir !== undefined && options.memoryDir.length > 0) {
+    appendMemoryAudit(options.memoryDir, {
+      at: options.at ?? new Date().toISOString(),
+      kind: 'merge',
+      winner: keeperName,
+      loser: absorbedName,
+      reason: 'evidence union + conflict edges migrated (TD-M1)',
+      detail:
+        `evidence ${result.evidenceBefore.keeper} + ${result.evidenceBefore.absorbed} = ${result.evidence}` +
+        `${result.evidenceBefore.shared > 0 ? ` (${result.evidenceBefore.shared} shared pointer(s) deduplicated)` : ''}; ` +
+        `edges re-pointed ${result.conflictsMoved}; provenance ${result.provenance.keeper}/${result.provenance.absorbed}; ` +
+        `supersedes ${result.supersedes.join(',') || '-'}`,
+      source: 'mergeSkills',
+    })
+    result.audited = true
+  }
+
+  return { ...result, ok: true, status: 'merged' }
+}

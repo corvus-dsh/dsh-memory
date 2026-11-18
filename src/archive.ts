@@ -28,6 +28,14 @@
 import { readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
+/**
+ * TD-M1: the merge half lives in the store, because it owns evidence unions, the conflict index
+ * and provenance. This module owns the POLICY (what to merge, what to archive); the store owns
+ * the WRITE. Importing one function from the store barrel keeps that boundary while making the
+ * plan actionable — and `store.js` does not import this file, so the direction stays acyclic.
+ */
+import { mergeSkills } from './store.js'
+
 /** Default threshold: past this many ACTIVE skills, one pass runs. */
 export const DEFAULT_SKILL_LIMIT = 100
 /** Fraction of the least-recently-used skills archived when merging cannot help. */
@@ -199,10 +207,38 @@ export function planSkillArchive(
 }
 
 /**
- * v0.21: apply a plan. Archiving writes `archived: true` into the frontmatter, which
- * `listSkillSummaries` and the retrieval gate both honour.
+ * v0.21: apply a plan — MERGE first, then archive.
+ *
+ * ── TD-M1: THE MERGE HALF NOW RUNS (2026-11-18) ───────────────────────────────────────────────
+ *
+ * Until this change the plan's `merges` were only REPORTED: the archive pass archived the
+ * least-recently-used skills while the near-duplicate pairs it had identified stayed on disk,
+ * which meant the first line of defence against an unbounded store never fired at all.
+ *
+ * ORDER IS THE POINT. Merging runs BEFORE archiving, and both read the plan computed on the
+ * pre-merge store: `plan.archive` was chosen from the SURVIVORS of merging (see
+ * `planSkillArchive`), so a keeper can never also be archived in the same pass. The counter
+ * returned here is the number of merges that actually landed, not the number proposed — a
+ * skipped pair (a missing file, an invalidated absorbed skill) must not be counted as done.
+ *
+ * `memoryDir` is optional so existing callers keep working; when present, each merge writes an
+ * audit line. A merge that cannot reach the audit ledger still merges — the audit is evidence,
+ * never a gate (same rule as `appendMemoryAudit`).
  */
-export function applySkillArchive(skillsDir: string, plan: ArchivePlan): { archived: string[]; merged: number } {
+export function applySkillArchive(
+  skillsDir: string,
+  plan: ArchivePlan,
+  options: { memoryDir?: string; at?: string } = {},
+): { archived: string[]; merged: number } {
+  let merged = 0
+  for (const pair of plan.merges) {
+    try {
+      const result = mergeSkills(skillsDir, pair.keptInto, pair.absorbed, options)
+      if (result.ok) merged += 1
+    } catch {
+      /** One bad pair must not stop the pass; the next activation retries it. */
+    }
+  }
   const archived: string[] = []
   for (const name of plan.archive) {
     const path = join(skillsDir, name, 'SKILL.md')
@@ -222,9 +258,7 @@ export function applySkillArchive(skillsDir: string, plan: ArchivePlan): { archi
       // A skill that cannot be written stays active; the next pass retries.
     }
   }
-  // Merging a file away is the STORE's job (it owns conflict links and evidence
-  // unions); this module only reports which pairs qualify.
-  return { archived, merged: plan.merges.length }
+  return { archived, merged }
 }
 
 /** Is this record archived, according to its own frontmatter? */

@@ -63,12 +63,26 @@ export interface SkillValidity {
 export const PROVENANCE_TIERS = new Set(['human', 'tool', 'inferred'])
 
 export function readSkillValidity(text: string): SkillValidity {
-  const provenanceText = (text.match(/^provenance:\s*(.+)$/mu)?.[1] ?? '').trim().toLowerCase()
+  /**
+   * ── TD-M1 (2026-11-18): `\s*` AFTER THE COLON CROSSED THE LINE BOUNDARY ──────────────────────
+   *
+   * These five reads used `^key:\s*(.+)$` with the `m` flag. `\s` matches `\n`, so an EMPTY field
+   * (`supersedes:` with nothing after it — what a hand-edited file looks like) let `\s*` eat the
+   * newline and `(.+)` captured the NEXT line's `key: value`. Measured while writing the merge
+   * tests: a keeper whose `supersedes:` was empty came back claiming it superseded
+   * `valid_at:,2026-01-01` — two fields of the following lines, laundered into a real supersession
+   * chain. A merge would then copy that invented chain onto the keeper.
+   *
+   * `[ \t]*` is the fix: a horizontal gap belongs to the field, a line break never does.
+   */
+  const read = (key: string): string =>
+    (text.match(new RegExp(`^${key}:[ \\t]*(.+)$`, 'mu'))?.[1] ?? '').trim()
+  const provenanceText = read('provenance').toLowerCase()
   return {
-    validAt: (text.match(/^valid_at:\s*(.+)$/mu)?.[1] ?? '').trim(),
-    invalidAt: (text.match(/^invalid_at:\s*(.+)$/mu)?.[1] ?? '').trim(),
-    supersededBy: (text.match(/^superseded_by:\s*(.+)$/mu)?.[1] ?? '').trim(),
-    supersedes: (text.match(/^supersedes:\s*(.+)$/mu)?.[1] ?? '')
+    validAt: read('valid_at'),
+    invalidAt: read('invalid_at'),
+    supersededBy: read('superseded_by'),
+    supersedes: read('supersedes')
       .split(/[,\s]+/u)
       .map((value) => value.trim())
       .filter((value) => value.length > 0),

@@ -29,7 +29,17 @@
 import { describe, it } from 'node:test'
 import { equal, deepEqual } from 'node:assert'
 
-/** 业务面：对外承诺的公开契约。实测值，见文件头。 */
+/**
+ * 业务面：对外承诺的公开契约。实测值，见文件头。
+ *
+ * ── 2026-11-18（B3-5 / TD-M1）：50 → 51，`mergeSkills` ─────────────────────────────────────────
+ *
+ * TD-M1 的退出条件原文写着「`store.mergeSkills(keeper, absorbed)` 落盘」，所以这个函数**必须**
+ * 出现在 `store.js` 的业务面上——不是「顺手多导出」，而是那条退出条件点名的地方。
+ *
+ * 为什么它算业务面而不是接缝：`applySkillArchive` 在**激活路径**上调用它，`lib/index.js` 的
+ * 归档 pass 靠它执行合并。有生产调用方的函数不是接缝。
+ */
 const EXPECTED_BUSINESS_NAMES = [
   'AUDIT_KEEP', 'AUDIT_ROTATE_BYTES', 'MAX_LAYER_RECORDS', 'MAX_NEGATIVES', 'NEGATIVE_ARCHIVE_FILE',
   'StoreWriteRejected', 'appendExperiences', 'appendFacts', 'appendMemoryAudit', 'appendNegatives',
@@ -37,14 +47,14 @@ const EXPECTED_BUSINESS_NAMES = [
   'clearSkillShapeCache', 'conflictStrength', 'defaultSkillsDir', 'environmentDivergence',
   'environmentTokensOf', 'findConflicts', 'invalidateSkillShape', 'isConflictingSkill', 'isProcessed',
   'isValidAt', 'linkConflictBack', 'listSkillRecords', 'markProcessed', 'markSkillValidated',
-  'memoryAuditPath', 'migrateBareEvidence', 'monotonicTimestamp', 'normalizeSkill', 'parseInstant',
+  'memoryAuditPath', 'mergeSkills', 'migrateBareEvidence', 'monotonicTimestamp', 'normalizeSkill', 'parseInstant',
   'parseSkillFile', 'planNegativeArchive', 'processedKey', 'quarantineWorkspaceMemory',
   'readProcessed', 'readSkillBody', 'readSkillValidity', 'readSkillWorkspace', 'rebuildConflictLinks',
   'recordCounterEvidence', 'rotateAuditIfNeeded', 'scanThreat', 'skillPath', 'stats',
   'touchSkillUsage', 'writeSkill',
 ]
 
-const EXPECTED_BUSINESS_COUNT = 50
+const EXPECTED_BUSINESS_COUNT = 51
 
 /**
  * 已登记接缝：名字 → 为什么必须从 `store.js` 导出。

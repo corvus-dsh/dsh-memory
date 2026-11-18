@@ -115,7 +115,12 @@ export function conflictFooter(conflicts: readonly SkillConflict[]): string[] {
  */
 export interface MemoryAuditEntry {
   at: string
-  kind: 'supersede' | 'supersede-refused'
+  /**
+   * `merge` is TD-M1's line: a compaction that moved evidence between two skills is as auditable
+   * as an invalidation — "which record absorbed which, and what came with it" has to be answerable
+   * from the ledger, not from a diff nobody kept.
+   */
+  kind: 'supersede' | 'supersede-refused' | 'merge'
   winner?: string
   loser?: string
   reason?: string

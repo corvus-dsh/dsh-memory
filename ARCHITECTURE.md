@@ -16,14 +16,16 @@
 | **规则（今后一律适用）** | **新增任何锁，等待策略一律用 `Atomics.wait`，不得自旋。** 同步签名与「不占 CPU」并不冲突——`Atomics.wait` 在主线程可用且是同步阻塞，这正是本仓需要的原语。 |
 | 防漂移 | 两处实现无共享依赖，**没有任何代码会因一方改动而报错**。所以 `test/v096-lock-sleep-parity.test.mjs` 直接读两个源文件：断言两边都含 `Atomics.wait`、都没有裸 `while (Date.now()`，且两边策略一致。另 `test/v096-lock-sleep-cpu.test.mjs` 用 `process.cpuUsage()` 断言等待期间 CPU 增量近零（**该测试在旧自旋实现下实测 exit 1、cpu/wall 96.7%，换成 Atomics 后 exit 0**）。 |
 
-### TD-M1 归档 pass 的「合并」只报告不执行（P2，非阻塞）
+### TD-M1 归档 pass 的「合并」只报告不执行（P2，非阻塞 —— **已关闭 2026-11-18**）
 
 | 项 | 内容 |
 |---|---|
-| 现状 | `src/archive.ts` 的 `planSkillArchive` 会在超过 `skillLimit`（默认 100）时给出两类计划：①`merges`（`when_to_use` 语义相似、同 scene 同 workspace 的技能对）②`archive`（最久未用的 10%）。`applySkillArchive` 只执行 ②，①仅作为报告返回 |
-| 影响 | 膨胀治理的第二道（归档）已生效，第一道（合并）尚未生效 |
-| 为什么现在不动 | 合并要动 `store.ts` 拥有的东西：`evidence` 并集、`conflicts_with` 互链、`supersedes` 链、provenance、`last_used`。任何一处做错都是**证据丢失**，而证据是这套记忆系统唯一的资产。归档是**无损可逆**的（文件仍在、`archived: true` 可改回），所以先做它 |
-| 退出条件 | `store.mergeSkills(keeper, absorbed)` 落盘：证据并集（条数 = 两边之和）、冲突链迁移、双方 provenance 保留、写审计行；`applySkillArchive` 改为先合并后归档；新增「合并后证据不丢」与「合并后冲突链完整」两条测试 |
+| 现状（关闭前） | `src/archive.ts` 的 `planSkillArchive` 会在超过 `skillLimit`（默认 100）时给出两类计划：①`merges`（`when_to_use` 语义相似、同 scene 同 workspace 的技能对）②`archive`（最久未用的 10%）。`applySkillArchive` 只执行 ②，①仅作为报告返回 |
+| 影响（关闭前） | 膨胀治理的第二道（归档）已生效，第一道（合并）尚未生效 |
+| 为什么当时不动 | 合并要动 `store.ts` 拥有的东西：`evidence` 并集、`conflicts_with` 互链、`supersedes` 链、provenance、`last_used`。任何一处做错都是**证据丢失**，而证据是这套记忆系统唯一的资产。归档是**无损可逆**的（文件仍在、`archived: true` 可改回），所以先做它 |
+| 退出条件（逐条对账，2026-11-18） | ①`store.mergeSkills(keeper, absorbed)` 落盘 ⇒ `store/lifecycle.ts: mergeSkills`，从 `store.js` 的业务面导出（50 → 51，登记见 `test/v202-store-surface-split.test.mjs` 的名单与理由）；②证据并集（条数 = 两边之和）⇒ `v244 ①`（不相交夹具，字面断言和）；同一指针出现两次按**并集**合并并如实报告去重条数 ⇒ `v244 ⑥`；③冲突链迁移 ⇒ 旧边先改指 keeper（`writeEdge`）再从索引删掉 absorbed 名字（`removeEdgesFor`），`v244 ②` 断言 keeper 继承两条旧边、索引里零悬空边、边总数不多不少；④双方 provenance 保留 ⇒ 各留各的文件（absorbed 只标 `archived`+`merged_into`，不删文件），两个 tier 也写进审计行，`v244 ③④`；⑤写审计行 ⇒ `kind: 'merge'`（`MemoryAuditEntry` 扩了一个成员），detail 里留「N + M = K / 边迁移数 / 双方 provenance / supersedes」这笔账；⑥`applySkillArchive` 改为先合并后归档 ⇒ 顺序可证（`plan.archive` 本来就是从合并幸存者里选的，所以 keeper 不可能同批被归档），返回的 `merged` 是**实际做到的数**而不是计划数，`v244 ⑤`；⑦两条指定测试 ⇒ `v244 ①`「合并后证据不丢」、`v244 ②`「合并后冲突链完整」 |
+| 关闭时顺带抓到的真缺陷 | `readSkillValidity` 用 `^key:\s*(.+)$` 配 `m`：**空**字段（`supersedes:` 后面什么都没有）会让 `\s*` 吃掉换行，`(.+)` 捕获**下一行**。实测后果：keeper 声称自己 supersede 了 `valid_at:,2026-01-01` —— 两行字段被洗成一条真实的替代链，而合并会把它原样抄过去。改为 `[ \t]*`（横向空白属于字段，换行永远不属于），`v244 ⑨` 钉住 |
+| 明确不做 | 不碰 `last_used` 的语义（合并后沿用 keeper 自己的；扁平化两个使用时间需要一个「最近一次被注入」的定义，而那是另一条待办）。不合并已 `invalid_at` 的技能（把一条「我们不再相信」的规则压进活着的 keeper = 复活，不是压缩），`v244 ⑦` |
 
 ### TD-M2 相似度是词法，不是语义（P2）
 

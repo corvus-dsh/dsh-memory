@@ -115,6 +115,7 @@ filter.ts -> retrieve.ts : type-only   （import type { MemoryHit }，运行时�
 | `src/lease-types.ts` | THE LEASE SHAPES, MIRRORED STRUCTURALLY — dsh-memory/src/lease-types.ts. | `LeaseAdapter`, `LeaseRecord` | — |
 | `src/store/skill.ts` | SKILL.md 的读与写：frontmatter 解析/渲染、shapeCache、冲突族。A1 的产物。 | `EnvironmentDivergence`, `SkillBody`, `SkillConflict`, `SkillRecord`, `clearSkillShapeCache`, `clampConfidence` …（共 41） | edges.ts, extract.ts (type-only), ledger-cache.ts, skill-cache.ts, store/clock.ts, store/io.ts, store/layer.ts, threat.ts, workspace.ts |
 | `src/store/lifecycle.ts` | 记忆的生命周期：审计轮转、supersede、隔离、反证、技能反馈、迁移。A2 的产物。 | `AUDIT_KEEP`, `AUDIT_ROTATE_BYTES`, `applySkillFeedback`, `applySupersede`, `memoryAuditPath`, `quarantineWorkspaceMemory` …（共 22） | dedupe.ts, edges.ts, store/io.ts, store/skill.ts, threat.ts, workspace.ts |
+| `src/store/merge.ts` | 技能合并的写半边：证据并集、冲突边迁移、provenance 双留、审计行。TD-M1。 | `MergeResult`, `mergeSkills` | edges.ts, skill-cache.ts, store/io.ts, store/lifecycle.ts, store/skill.ts |
 | `src/store/layer.ts` | JSONL 层写入（facts / experiences）：追加、上限、读回。A3 的产物。 | `appendExperiences`, `appendFacts`, `readLayerRecords` …（共 16） | store/io.ts, store/clock.ts |
 | `src/store/io.ts` | IO 原语：原子写、JSONL 读写、目录准备。B 的产物。 | `atomicWrite`, `ensureDir`, `readJsonl`, `readJsonlFresh`, `writeEdge`, `writeEdges` …（共 8） | — |
 | `src/store/clock.ts` | 单调时钟接缝：`monotonicTimestamp` 与它的测试重置钩子。第 0 步的产物。 | `monotonicTimestamp`, `resetMonotonicClockForTest` …（共 3） | — |

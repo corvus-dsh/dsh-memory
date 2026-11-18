@@ -2415,7 +2415,7 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
     const summaries = listSkillSummaries(resolved.skillsDir)
     const plan = planSkillArchive(summaries, resolved.skillLimit)
     if (!plan.underLimit) {
-      const applied = applySkillArchive(resolved.skillsDir, plan)
+      const applied = applySkillArchive(resolved.skillsDir, plan, { memoryDir: resolved.memoryDir })
       ctx.logger?.warn?.(
         `[dsh-memory] skill store over the limit (${plan.active}/${resolved.skillLimit} active): ` +
           `merged ${applied.merged} pair(s), archived ${applied.archived.length} least-recently-used skill(s). ` +
