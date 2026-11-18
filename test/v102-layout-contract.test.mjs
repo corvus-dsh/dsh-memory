@@ -49,7 +49,12 @@ const GRAFT_MANIFEST_LITERAL = {
 const MEMORY_MANIFEST_LITERAL = {
   layout: 1,
   producer: 'dsh-memory',
-  files: ['negatives.jsonl', 'facts.jsonl', 'experiences.jsonl', 'suggestions.jsonl'],
+  /**
+   * `task-graph.json` joined in v0.38 (B2-T3). Graft reads it to tell a sliced session where it sits
+   * in the plan; a rename on this side would degrade that read to "no graph" — a slice that quietly
+   * loses its own position. The list is "which files the other side reads", not "which are jsonl".
+   */
+  files: ['negatives.jsonl', 'facts.jsonl', 'experiences.jsonl', 'suggestions.jsonl', 'task-graph.json'],
 }
 
 const temp = (prefix) => mkdtempSync(join(tmpdir(), prefix))

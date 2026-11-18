@@ -59,8 +59,20 @@ export const MEMORY_LAYOUT_VERSION = 1
  * The files `dsh-graft-slice` reads out of this store. They are part of the layout because renaming
  * one is invisible to it: its reader degrades to `[]`, and "no memories recorded" reads exactly like
  * "the store moved".
+ *
+ * `task-graph.json` joined the list for the same reason, one layer up (v0.38, B2-T3). Graft reads the
+ * task graph to tell a sliced session WHERE it is in the plan, and a rename here would degrade that
+ * read to "no graph" — a slice that quietly loses its own position. The graph is a single JSON
+ * document rather than a `.jsonl` ledger, and the list is about "which files does the other side
+ * read", not about their format.
  */
-export const MEMORY_LAYOUT_FILES = ['negatives.jsonl', 'facts.jsonl', 'experiences.jsonl', 'suggestions.jsonl'] as const
+export const MEMORY_LAYOUT_FILES = [
+  'negatives.jsonl',
+  'facts.jsonl',
+  'experiences.jsonl',
+  'suggestions.jsonl',
+  'task-graph.json',
+] as const
 
 /** The layout version of the GRAFT LEDGER directory this build reads. */
 export const GRAFT_LEDGER_LAYOUT_VERSION = 1
