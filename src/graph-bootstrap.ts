@@ -1,0 +1,548 @@
+/**
+ * ── PLANNING FROM ZERO: VALIDATION AND CONSTRUCTION FOR `bootstrap` ─────────────────────────────
+ *
+ * This module owns PLANNING FROM ZERO. `graph.ts` owns the GRAPH (reading, writing, dispatching ops);
+ * `graph-v3.ts` owns how a v3 FIELD is judged; `graph-goal-lock.ts` owns LIFECYCLE. None of those is a
+ * synonym for "turn a batch specification into a validated node list".
+ *
+ * Everything here is a PURE FUNCTION over plain data: no file reads, no writes, no clock. That is what
+ * makes atomicity possible to reason about — the whole plan is validated in memory, and `graph.ts`
+ * performs exactly ONE `persist` after this module says the plan is sound. A validator that also wrote
+ * would put the write in the middle of the checks, which is the failure this op exists to prevent.
+ *
+ * ── WHY A NEW OP INSTEAD OF N `add` CALLS (measured) ────────────────────────────────────────────
+ *
+ * `add` refuses a `dependsOn` that does not exist yet, so a graph has to be built in strict
+ * topological order, one call at a time, with no atomicity: a failure at node 10 leaves nine nodes on
+ * disk. And a half-built graph already fails `isBlankGraph` (goal set or node count > 1), so it LOOKS
+ * finished while half the plan is missing — the worst possible shape of a broken state.
+ */
+
+import type { Author, EphemeralConstraint, LogPointer } from './graph-v3.js'
+import { VANISHED_FIELDS_HINT, asAuthor, resolveNodeV3, vanishedFields } from './graph-v3.js'
+
+/** One node as the caller specifies it: `id` + `title` are the only mandatory parts. */
+export interface BootstrapNodeSpec {
+  id: string
+  title: string
+  nodeType?: string
+  requirements?: string[]
+  dependsOn?: string[]
+  status?: 'pending' | 'active' | 'done' | 'abandoned'
+  /** The v3 fields, exactly as `asNode` judges them. */
+  v3?: Record<string, unknown>
+}
+
+export type BootstrapFailure =
+  | 'MISSING_GOAL'
+  | 'TOO_FEW_NODES'
+  | 'MISSING_AUTHOR'
+  | 'MISSING_REASON'
+  | 'GRAPH_NOT_EMPTY'
+  | 'INVALID_FIELD'
+  | 'NODE_EXISTS'
+  | 'AUTHOR_MISMATCH'
+  | 'DANGLING_DEPENDENCY'
+  | 'CYCLE'
+
+export interface BootstrapPlan {
+  goal: string
+  author: Author
+  nodes: Array<{ id: string; title: string; nodeType: string; requirements: string[]; dependsOn: string[]; status: string; v3: Record<string, unknown> }>
+  /** Set when the store carried audit entries but no plan — the caller must surface this. */
+  historyWarning?: string
+}
+
+export interface BootstrapRejection {
+  ok: false
+  code: BootstrapFailure
+  reason: string
+}
+
+export type BootstrapResult = { ok: true; plan: BootstrapPlan } | BootstrapRejection
+
+/**
+ * ── "IS THIS STORE BLANK?" IS NOT `isBlankGraph` ────────────────────────────────────────────────
+ *
+ * `isBlankGraph` also demands `history.length === 0`. Gating bootstrap on that would make a SINGLE
+ * FAILED attempt permanently unretryable: the attempt leaves an audit entry, and the gate would then
+ * say "not blank" forever — a failure that locks the door shut.
+ *
+ * So the gate is "no plan exists": at most the fixed `start` node and no goal. `history` is AUDIT, not
+ * evidence about whether a plan exists, so leftover entries produce a WARNING instead of a refusal.
+ */
+export function isBootstrappable(graph: { nodes: readonly unknown[]; goal: string; history: readonly unknown[] }): {
+  ok: boolean
+  historyWarning?: string
+} {
+  if (graph.goal.length > 0 || graph.nodes.length > 1) return { ok: false }
+  if (graph.history.length > 0) {
+    return {
+      ok: true,
+      historyWarning:
+        `图里有 ${graph.history.length} 条历史记录但仍被视为空（nodes ≤ 1 且 goal 为空）。` +
+        '那是之前失败尝试留下的审计痕迹 —— 审计不参与「是否为空」的判定，否则一次失败就永久锁死。',
+    }
+  }
+  return { ok: true }
+}
+
+/** Reserved ids a batch may depend on without declaring them: they always exist. */
+const RESERVED = new Set(['start', 'goal'])
+
+/**
+ * Tool-side (snake_case) → storage-side (camelCase) for the v3 fields.
+ *
+ * Declared once, here, because `bootstrap` is a SECOND entry point into the same fields that `add`
+ * accepts. Two mappings would drift; `graph-tool.ts` owns the one for `add`/`update`, and this one
+ * exists because that mapping lives in a tool file this module must not import from.
+ */
+const SNAKE_TO_CAMEL: Record<string, string> = {
+  node_type: 'nodeType',
+  depends_on: 'dependsOn',
+  last_change: 'lastChange',
+  log_pointers: 'logPointers',
+  ephemeral_constraints: 'ephemeralConstraints',
+}
+
+/**
+ * Validate a batch and turn it into a plan. NOTHING is written here.
+ *
+ * The order of the checks is the order of the messages a caller will read: goal, then size, then author,
+ * then reason, then per-node shape, then identity, then edges, then cycles. A caller fixing one problem
+ * at a time gets the problems in the order they would think of them.
+ */
+export function planBootstrap(input: {
+  goal: unknown
+  nodes: unknown
+  author: unknown
+  reason: unknown
+  graph: { nodes: readonly unknown[]; goal: string; history: readonly unknown[] }
+}): BootstrapResult {
+  const goal = typeof input.goal === 'string' ? input.goal.trim() : ''
+  if (goal.length === 0) return { ok: false, code: 'MISSING_GOAL', reason: 'bootstrap 需要 goal（没目标就不是计划）' }
+
+  const reason = typeof input.reason === 'string' ? input.reason.trim() : ''
+  if (reason.length === 0) return { ok: false, code: 'MISSING_REASON', reason: 'bootstrap 必须写明理由（reason）' }
+
+  const author = asAuthor(input.author, () => new Date().toISOString())
+  if (author === undefined) {
+    return {
+      ok: false,
+      code: 'MISSING_AUTHOR',
+      reason:
+        'bootstrap 需要顶层 author（谁建的图）：{ kind, sessionId, generation, attempt }。' +
+        '它是图级参数，不是节点字段 —— 节点级 origin.by 会从它派生。',
+    }
+  }
+
+  const raw = Array.isArray(input.nodes) ? input.nodes : []
+  if (raw.length < 3) {
+    return {
+      ok: false,
+      code: 'TOO_FEW_NODES',
+      reason: `bootstrap 至少要 3 个节点，收到 ${raw.length} 个。1–2 个节点直接 add 更快，也不需要 DAG。`,
+    }
+  }
+
+  const blank = isBootstrappable(input.graph)
+  if (!blank.ok) {
+    return {
+      ok: false,
+      code: 'GRAPH_NOT_EMPTY',
+      reason: 'bootstrap 是「从零建图」，而这张图已经有计划了。追加节点请用 op: add；改已有节点请用 op: update。',
+    }
+  }
+
+  const specs: BootstrapNodeSpec[] = []
+  const seen = new Set<string>()
+  for (const [index, item] of raw.entries()) {
+    if (item === null || typeof item !== 'object') {
+      return { ok: false, code: 'INVALID_FIELD', reason: `第 ${index + 1} 个节点不是对象` }
+    }
+    const record = item as Record<string, unknown>
+    const id = typeof record.id === 'string' ? record.id.trim().toLowerCase() : ''
+    const title = typeof record.title === 'string' ? record.title.trim() : ''
+    if (id === '') return { ok: false, code: 'INVALID_FIELD', reason: `第 ${index + 1} 个节点缺 id` }
+    if (title === '') return { ok: false, code: 'INVALID_FIELD', reason: `节点 ${id} 缺 title` }
+    if (RESERVED.has(id)) {
+      return {
+        ok: false,
+        code: 'INVALID_FIELD',
+        reason: `节点 ${id} 用了保留 id：start 恒存在、goal 由 bootstrap 自己创建，批次里不许再声明它们`,
+      }
+    }
+    if (seen.has(id)) {
+      return { ok: false, code: 'NODE_EXISTS', reason: `节点 id 重复：${id}（同一批次里出现了两次）` }
+    }
+    seen.add(id)
+
+    /**
+     * ── A NODE'S `origin.by` MAY NOT CONTRADICT THE BATCH AUTHOR ───────────────────────────────
+     *
+     * One bootstrap is one act by one actor. Letting three of eighteen nodes claim a different author
+     * would make the audit say "this plan was written by four people" when one person wrote it, and the
+     * reverse — one node right, seventeen defaulted — is exactly the quiet misattribution the Author
+     * type exists to prevent. If the nodes genuinely have different authors, that is two batches.
+     */
+    /**
+     * The v3 fields, taken ONLY from the known field names.
+     *
+     * Two naming conventions arrive here and both are accepted: the tool layer speaks snake_case
+     * (`log_pointers`, `ephemeral_constraints`, matching `depends_on` / `knowledge_pointers`), while the
+     * storage layer and `pickV3` speak camelCase. Reading `...record` wholesale would put
+     * `log_pointers` into the v3 object where `resolveNodeV3` looks for `logPointers`, and the field
+     * would be silently dropped on the way in — the exact failure ⑬ exists to catch.
+     */
+    const v3: Record<string, unknown> = {}
+    for (const [key, value] of Object.entries(record)) {
+      if (key === 'id' || key === 'title') continue
+      if (SNAKE_TO_CAMEL[key] !== undefined) {
+        v3[SNAKE_TO_CAMEL[key]] = value
+        continue
+      }
+      v3[key] = value
+    }
+    const origin = v3.origin
+    if (origin !== null && typeof origin === 'object') {
+      const by = (origin as Record<string, unknown>).by
+      if (by !== undefined) {
+        const resolved = asAuthor(by, () => author.at)
+        if (resolved === undefined) {
+          return { ok: false, code: 'MISSING_AUTHOR', reason: `节点 ${id} 的 origin.by 不是合法 Author` }
+        }
+        if (resolved.sessionId !== author.sessionId || resolved.attempt !== author.attempt) {
+          return {
+            ok: false,
+            code: 'AUTHOR_MISMATCH',
+            reason:
+              `节点 ${id} 的 origin.by（${resolved.sessionId} / attempt ${resolved.attempt}）与顶层 author` +
+              `（${author.sessionId} / attempt ${author.attempt}）不一致。一次 bootstrap 是一个人的一次行为；` +
+              '若这些节点确实属于不同作者，请分成两次 bootstrap。',
+          }
+        }
+      }
+    }
+
+    const dependsOn = Array.isArray(record.depends_on)
+      ? record.depends_on
+      : Array.isArray(record.dependsOn)
+        ? record.dependsOn
+        : []
+    specs.push({
+      id,
+      title,
+      nodeType: typeof record.node_type === 'string' ? record.node_type : typeof record.nodeType === 'string' ? record.nodeType : '',
+      requirements: Array.isArray(record.requirements) ? (record.requirements.filter((x) => typeof x === 'string') as string[]) : [],
+      dependsOn: dependsOn.filter((x): x is string => typeof x === 'string').map((x) => x.trim().toLowerCase()),
+      status: record.status === 'active' || record.status === 'done' || record.status === 'abandoned' ? record.status : 'pending',
+      v3,
+    })
+  }
+
+  /**
+   * ── EVERY EDGE MUST LAND INSIDE THIS BATCH OR ON A RESERVED NODE ────────────────────────────
+   *
+   * This is the check `add` performs one node at a time, done here for the whole batch at once: a batch
+   * may reference its own nodes freely (that is why the order does not matter), but an edge that leaves
+   * the batch names a node nobody declared a reason for.
+   */
+  for (const spec of specs) {
+    for (const parent of spec.dependsOn) {
+      if (!seen.has(parent) && !RESERVED.has(parent)) {
+        return {
+          ok: false,
+          code: 'DANGLING_DEPENDENCY',
+          reason: `节点 ${spec.id} 依赖 ${parent}，而它既不在本批次里，也不是 start/goal`,
+        }
+      }
+    }
+  }
+
+  /**
+   * Cycle detection over the BATCH ALONE. `goal` depends on nothing here, and `start` is the root, so a
+   * cycle can only live among the declared nodes — checking the batch is equivalent to checking the
+   * whole graph, and it lets the message name the batch nodes a reader can actually edit.
+   */
+  const cycle = findBatchCycle(specs)
+  if (cycle !== undefined) {
+    return { ok: false, code: 'CYCLE', reason: `批次里有环：${cycle.join(' -> ')}，DAG 不允许环` }
+  }
+
+  /**
+   * Build the batch node by node. A `for` loop rather than `.map()` because a rejection must LEAVE the
+   * function — inside a mapper it would be pushed into the node array as a value, and the store would
+   * receive eighteen entries of which one is an error object.
+   */
+  const nodes: Array<{ id: string; title: string; nodeType: string; requirements: string[]; dependsOn: string[]; status: string; v3: Record<string, unknown> }> = []
+  for (const spec of specs) {
+    /**
+     * The batch author DERIVES `origin.by` when the node did not state one — but only the `by` part.
+     * `origin.kind` stays `planned` because a node created by "make me a plan" was planned; `inserted`
+     * is for a node added to a plan that already exists (see `graph-v3.ts`).
+     */
+    const stated = spec.v3.origin
+    const origin =
+      stated !== null && typeof stated === 'object' && (stated as Record<string, unknown>).by !== undefined
+        ? stated
+        : {
+            kind: 'planned',
+            reason: `bootstrap: ${spec.title}`,
+            by: author,
+            ...(stated !== null && typeof stated === 'object' && typeof (stated as Record<string, unknown>).reason === 'string'
+              ? { reason: (stated as Record<string, unknown>).reason }
+              : {}),
+          }
+    const resolved = resolveNodeV3({ ...spec.v3, origin }, () => author.at)
+    /**
+     * ── A SUPPLIED FIELD THAT DID NOT SURVIVE MUST BE NAMED, NOT DROPPED (㉙, second form) ───────
+     *
+     * `add` asks `vanishedFields` and refuses with `INVALID_FIELD`; `bootstrap` is a SECOND door into
+     * the same twelve fields, and it did not ask. Measured before this check existed: a batch whose
+     * `log_pointers` were `[{ nonsense: 1 }]` and whose `progress` was `999` came back `ok: true`, and
+     * both fields were simply absent on re-read — the caller believes an eighteen-node plan recorded
+     * its pointers and progress, and the store holds neither.
+     *
+     * The message names the NODE as well as the fields: in a batch of eighteen, "logPointers 形状不对"
+     * without an id is a search, not a fix.
+     */
+    const vanished = vanishedFields(spec.v3, resolved)
+    if (vanished.length > 0) {
+      return {
+        ok: false,
+        code: 'INVALID_FIELD',
+        reason: `节点 ${spec.id}：${VANISHED_FIELDS_HINT}（涉及 ${vanished.join(', ')}）`,
+      }
+    }
+    nodes.push({
+      id: spec.id,
+      title: spec.title,
+      nodeType: spec.nodeType,
+      requirements: spec.requirements,
+      dependsOn: spec.dependsOn,
+      status: spec.status,
+      v3: resolved as Record<string, unknown>,
+    })
+  }
+
+  return { ok: true, plan: { goal, author, nodes, ...(blank.historyWarning === undefined ? {} : { historyWarning: blank.historyWarning }) } }
+}
+
+/**
+ * A cycle reachable from the batch, as a readable path, or `undefined`.
+ *
+ * Depth-first with a "currently on the stack" marker rather than a visited set: a visited set finds
+ * that a cycle EXISTS but cannot report the path, and "there is a cycle somewhere" is not actionable
+ * when the batch has eighteen nodes.
+ */
+export function findBatchCycle(specs: ReadonlyArray<{ id: string; dependsOn?: readonly string[] }>): string[] | undefined {
+  const edges = new Map(
+    specs.map((spec) => [spec.id, (spec.dependsOn ?? []).filter((parent) => specs.some((other) => other.id === parent))]),
+  )
+  const onStack = new Set<string>()
+  const done = new Set<string>()
+  const stack: string[] = []
+
+  const visit = (id: string): string[] | undefined => {
+    if (done.has(id)) return undefined
+    if (onStack.has(id)) {
+      /** The cycle is the tail of the current stack, starting at this id, plus this id again. */
+      const from = stack.indexOf(id)
+      return [...stack.slice(from), id]
+    }
+    onStack.add(id)
+    stack.push(id)
+    for (const parent of edges.get(id) ?? []) {
+      const found = visit(parent)
+      if (found !== undefined) return found
+    }
+    stack.pop()
+    onStack.delete(id)
+    done.add(id)
+    return undefined
+  }
+
+  for (const spec of specs) {
+    const found = visit(spec.id)
+    if (found !== undefined) return found
+  }
+  return undefined
+}
+
+/** Re-exported for callers that build specs themselves (tests, and a future import-from-JSON path). */
+export type { Author, EphemeralConstraint, LogPointer }
+
+/**
+ * ── THE EMPTY GRAPH, AS DATA ────────────────────────────────────────────────────────────────────
+ *
+ * A graph that exists but holds no plan: exactly one `start` node and nothing else. It lives here
+ * because "what does a graph look like before a plan exists" is the same question `planBootstrap` asks
+ * with `isBootstrappable` — the state this function produces is the state that function accepts.
+ *
+ * `status: 'done'` for `start`, NOT `active`. The origin is BEHIND you by definition: it is the point
+ * the graph was CUT FROM, not a phase being worked through. Reporting it as `active` made every status
+ * count wrong by one and made the console highlight a node that can never finish.
+ */
+export function makeEmptyGraph(input: {
+  id: string
+  stamp: string
+  startNodeId: string
+}): {
+  version: 1
+  id: string
+  goal: string
+  goalLockedAt: string
+  nodes: Array<Record<string, unknown>>
+  history: Array<Record<string, unknown>>
+  createdAt: string
+  updatedAt: string
+  persistentConstraints: Array<Record<string, unknown>>
+} {
+  return {
+    version: 1,
+    id: input.id,
+    goal: '',
+    goalLockedAt: '',
+    nodes: [
+      {
+        id: input.startNodeId,
+        title: '开始',
+        nodeType: '',
+        requirements: [],
+        status: 'done',
+        dependsOn: [],
+        knowledgePointers: [],
+        fixed: true,
+        harvestedAt: '',
+        createdAt: input.stamp,
+        updatedAt: input.stamp,
+      },
+    ],
+    history: [],
+    createdAt: input.stamp,
+    updatedAt: input.stamp,
+    persistentConstraints: [],
+  }
+}
+
+/**
+ * ── STAMP A FINISHED PHASE AS HARVESTED ────────────────────────────────────────────────────────
+ *
+ * Called by `knowledge_harvest` when the model ACTUALLY writes, so the reminder has a real answer
+ * rather than a checkbox the caller can tick without writing anything.
+ *
+ * I/O is injected (`readGraph`, `writeGraph`) rather than imported: `graph.ts` owns the store, and a
+ * second module that read and wrote `task-graph.json` directly would be a second writer — the failure
+ * ⑪ describes. The lock is taken by the caller for the same reason.
+ *
+ * Returns the ids that were stamped. An empty array means nothing needed it: no graph, no matching
+ * node, or already stamped — and `if (stamped.length === 0) return []` before the write keeps a no-op
+ * from rewriting the file and bumping its mtime (which `check-artifact-fresh`-style tools read).
+ */
+export function stampHarvested(
+  graph: { nodes: readonly Record<string, unknown>[]; history: readonly unknown[]; updatedAt: string } & Record<string, unknown>,
+  nodeIds: readonly string[],
+  at: string,
+): { stamped: string[]; next?: Record<string, unknown> } {
+  const wanted = nodeIds.filter((id) => typeof id === 'string' && id.length > 0)
+  if (wanted.length === 0) return { stamped: [] }
+  const stamped: string[] = []
+  const nodes = graph.nodes.map((node) => {
+    const id = String(node.id)
+    if (!wanted.includes(id)) return node
+    if (typeof node.harvestedAt === 'string' && node.harvestedAt.length > 0) return node
+    stamped.push(id)
+    return { ...node, harvestedAt: at, updatedAt: at }
+  })
+  if (stamped.length === 0) return { stamped: [] }
+  return { stamped, next: { ...graph, nodes, updatedAt: at } }
+}
+
+/**
+ * ── THE SENTENCE A FINISHED PHASE OWES THE NEXT GENERATION ──────────────────────────────────────
+ *
+ * Lives here rather than in `graph.ts` because it is a STATEMENT ABOUT A NODE, not an operation on the
+ * store: no read, no write, no clock. `complete` asks this and puts the answer in its receipt.
+ *
+ * A node that already recorded knowledge is not nagged again — repeating an instruction the model has
+ * satisfied is how a warning becomes noise — and a node with no `nodeType` and no pointers is left
+ * alone, because "you are in [当前]" is not an actionable sentence.
+ */
+export function harvestingPrompt(node: { id: string; nodeType: string; harvestedAt: string; knowledgePointers: readonly string[] } | undefined): string | undefined {
+  if (node === undefined) return undefined
+  if (node.harvestedAt.length > 0) return undefined
+  const phase = node.nodeType.length > 0 ? `[${node.nodeType}] ` : ''
+  const pointers = node.knowledgePointers.length
+  return (
+    `节点 ${node.id} 已完成。请立刻调用 knowledge_harvest 将本阶段经验写入全局知识库，并补充 tags 和 applicable_node_types。` +
+    `\n${phase}本阶段还没有写入任何知识${pointers > 0 ? `（引用了 ${pointers} 条，但那不等于你总结了这一阶段）` : ''}。` +
+    '\n全局知识库只从这种总结里生长；不写，下一个工作区就学不到这次的教训。'
+  )
+}
+
+/**
+ * ── BUILD THE RECORD TO WRITE, FROM THE PLAN ────────────────────────────────────────────────────
+ *
+ * The plan is validated; this turns it into the exact node list and the two history entries the store
+ * needs. It is still a PURE function — it takes the current graph and returns what the next one should
+ * be — so `graph.ts`'s bootstrap branch shrinks to "plan, then write once".
+ *
+ * That split is what keeps the atomicity claim checkable: the only side effect on the whole path is the
+ * single `persist` in `graph.ts`, and everything an auditor might want to verify about the batch is
+ * decided here, in memory.
+ *
+ * ── TWO HISTORY ENTRIES, ONE ACT ────────────────────────────────────────────────────────────────
+ *
+ * `bootstrap` records "a plan was established"; `lock-goal` records "its destination was fixed".
+ * Both are written under one timestamp because they are one act, and an auditor reading the trail later
+ * needs to see that the lock was not a separate decision taken afterwards.
+ */
+export function buildBootstrapRecord(
+  graph: { nodes: readonly unknown[]; history: readonly unknown[] },
+  plan: BootstrapPlan,
+  at: string,
+  reason: string,
+): { nodes: unknown[]; history: unknown[] } {
+  const goalNode = {
+    id: 'goal',
+    title: '最终目标',
+    nodeType: '',
+    requirements: [plan.goal],
+    status: 'pending',
+    dependsOn: [],
+    knowledgePointers: [],
+    fixed: true,
+    harvestedAt: '',
+    createdAt: at,
+    updatedAt: at,
+  }
+  const declared = plan.nodes.map((spec) => ({
+    ...spec.v3,
+    id: spec.id,
+    title: spec.title,
+    nodeType: spec.nodeType,
+    requirements: spec.requirements,
+    status: spec.status,
+    dependsOn: spec.dependsOn,
+    knowledgePointers: [],
+    fixed: false,
+    harvestedAt: '',
+    createdAt: at,
+    updatedAt: at,
+  }))
+  return {
+    nodes: [...graph.nodes, goalNode, ...declared],
+    history: [
+      ...graph.history,
+      { at, op: 'bootstrap', nodeId: 'goal', reason, changed: ['goal', 'goalLockedAt', 'nodes'], author: plan.author },
+      {
+        at,
+        op: 'lock-goal',
+        nodeId: 'goal',
+        reason: `bootstrap 顺带锁定目标：${reason}`,
+        changed: ['goalLockedAt'],
+        author: plan.author,
+      },
+    ],
+  }
+}

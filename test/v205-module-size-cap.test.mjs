@@ -68,6 +68,7 @@ const SCANNED = [
   'extract.ts',
   'filter.ts',
   'graph.ts',
+  'graph-bootstrap.ts',
   'graph-goal-lock.ts',
   'graph-tool.ts',
   'graph-v3.ts',

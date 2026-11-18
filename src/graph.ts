@@ -24,6 +24,7 @@ import { normalizeNodeTypes, normalizeVocabList, recordKnowledgeRefs } from './k
 import type { KnowledgeEntry, KnowledgeQueryResult, KnowledgeRef } from './knowledge.js'
 import { describeNodes } from './graph-view.js'
 import type { GraphNodeView } from './graph-view.js'
+import { buildBootstrapRecord, harvestingPrompt, makeEmptyGraph, planBootstrap, stampHarvested } from './graph-bootstrap.js'
 /** `graph.ts` owns the GRAPH; `graph-v3.ts` owns how a v3 field is JUDGED; `graph-goal-lock.ts` owns
  * LIFECYCLE (what a lock covers, when a constraint retires). Each is a separate file because this one has
  * a hard 800-line cap and a registered ceiling may only go DOWN. */
@@ -128,6 +129,8 @@ export type GraphOp =
   /** Top-level constraints: add/update one, or retire one. `relax` never deletes. */
   | 'constrain'
   | 'relax'
+  /** Build a whole plan atomically: validate everything in memory, then write once. */
+  | 'bootstrap'
 
 export interface TaskGraph {
   version: 1
@@ -240,37 +243,8 @@ export function hasCycle(nodes: readonly GraphNode[]): boolean {
 
 /** A graph with no `start` node is not "empty", it is malformed: the origin is an invariant. */
 export function emptyGraph(id: string, at?: string): TaskGraph {
-  const stamp = nowIso(at)
-  return {
-    version: 1,
-    id,
-    goal: '',
-    goalLockedAt: '',
-    nodes: [
-      {
-        id: START_NODE_ID,
-        title: '开始',
-        nodeType: '',
-        requirements: [],
-        /**
-         * `done`, NOT `active`. The origin is BEHIND you by definition: it is the point the graph
-         * was cut from, not a phase you are working through. Reporting it as `active` made every
-         * status count wrong by one and made the console highlight a node that can never finish.
-         */
-        status: 'done',
-        dependsOn: [],
-        knowledgePointers: [],
-        fixed: true,
-        harvestedAt: '',
-        createdAt: stamp,
-        updatedAt: stamp,
-      },
-    ],
-    history: [],
-    createdAt: stamp,
-    updatedAt: stamp,
-    persistentConstraints: [],
-  }
+  /** The shape lives in `graph-bootstrap.ts` — "before a plan exists" is the state bootstrap accepts. */
+  return makeEmptyGraph({ id, stamp: nowIso(at), startNodeId: START_NODE_ID }) as unknown as TaskGraph
 }
 
 /** Read the graph. A missing or unreadable file is an EMPTY graph, never a throw at call time. */
@@ -375,6 +349,12 @@ export interface GraphUpdateInput {
   constraint?: unknown
   /** For `relax`: which top-level constraint to retire. */
   constraintId?: string
+  /**
+   * For `bootstrap`: the whole plan. Each entry needs `id` + `title`; `depends_on` may reference other
+   * entries in the same batch (order does not matter) or `start`/`goal`. v3 fields are accepted on each
+   * entry exactly as `add` accepts them.
+   */
+  nodes?: unknown
   /** WHO is editing the graph (graph-level, not a node field). `node.author` also accepted. */
   author?: unknown
   /** For `lock-goal`: the objective that becomes immutable. Empty keeps the current one. */
@@ -404,6 +384,12 @@ export interface GraphUpdateResult {
     | 'CONSTRAINT_EXISTS'
     /** A supplied v3 field did not survive normalisation — see `vanishedFields`. */
     | 'INVALID_FIELD'
+    /** `bootstrap` refusals: a plan already exists, no goal, too few nodes, or a batch that contradicts
+     * its own author. All of them leave the store untouched. */
+    | 'GRAPH_NOT_EMPTY'
+    | 'MISSING_GOAL'
+    | 'TOO_FEW_NODES'
+    | 'AUTHOR_MISMATCH'
   reason?: string
   graph: TaskGraph
   node?: GraphNode
@@ -437,7 +423,7 @@ export function updateGraph(memoryDir: string, input: GraphUpdateInput): GraphUp
   const reason = typeof input.reason === 'string' ? input.reason.trim() : ''
   const op = input.op
   const known: GraphOp[] = [
-    'add', 'update', 'deprecate', 'activate', 'complete', 'lock-goal', 'unlock-goal', 'constrain', 'relax',
+    'add', 'update', 'deprecate', 'activate', 'complete', 'lock-goal', 'unlock-goal', 'constrain', 'relax', 'bootstrap',
   ]
   if (!known.includes(op)) {
     return { ok: false, code: 'UNKNOWN_OP', reason: `未知操作 ${JSON.stringify(op)}；可用：${known.join(', ')}`, graph: readGraph(memoryDir, graphId), anchored: 0 }
@@ -525,6 +511,33 @@ export function updateGraph(memoryDir: string, input: GraphUpdateInput): GraphUp
         history: [...graph.history, { at, op, nodeId: outcome.declared.id, reason, changed: ['persistentConstraints'], author }],
       })
       return { ok: true, graph: persist(memoryDir, next), anchored: 0 }
+    }
+
+    /**
+     * ── `bootstrap`: BUILD A WHOLE PLAN, OR CHANGE NOTHING (T2) ────────────────────────────────────
+     *
+     * Every check runs in `planBootstrap` (a pure function over plain data), and only then does this
+     * function perform ONE `persist`. That is the whole point of the op: `add` can be called eighteen
+     * times, and a failure at the tenth leaves nine nodes on disk — a half-built graph that already
+     * fails `isBlankGraph`, so it LOOKS finished while half the plan is missing.
+     *
+     * The goal is locked as part of the same write, with a `lock-goal` history entry beside the
+     * `bootstrap` one: "establishing the plan" and "fixing its destination" are one act, and an auditor
+     * needs to see both under one timestamp.
+     */
+    if (op === 'bootstrap') {
+      const planned = planBootstrap({ goal: input.goal, nodes: input.nodes, author: input.author, reason, graph })
+      if (planned.ok === false) return fail(planned.code as never, planned.reason)
+      const { plan } = planned
+      /** The node list and the two history entries come from `buildBootstrapRecord` — one pure builder. */
+      const record = buildBootstrapRecord(graph, plan, at, reason)
+      const written = persist(memoryDir, finish({ ...graph, ...record, goal: plan.goal, goalLockedAt: at } as TaskGraph))
+      return {
+        ok: true,
+        graph: written,
+        anchored: 0,
+        ...(plan.historyWarning === undefined ? {} : { warnings: [plan.historyWarning] }),
+      } as never
     }
 
     const targetId = asNodeId(input.nodeId ?? input.node?.id)
@@ -717,17 +730,7 @@ export function updateGraph(memoryDir: string, input: GraphUpdateInput): GraphUp
  * has satisfied is how a warning becomes noise. A node that pointed at nothing and whose phase type
  * is unknown is likewise left alone — "you are in [当前]" is not an actionable sentence.
  */
-export function harvestingPrompt(node: GraphNode | undefined): string | undefined {
-  if (node === undefined) return undefined
-  if (node.harvestedAt.length > 0) return undefined
-  const phase = node.nodeType.length > 0 ? `[${node.nodeType}] ` : ''
-  const pointers = node.knowledgePointers.length
-  return (
-    `节点 ${node.id} 已完成。请立刻调用 knowledge_harvest 将本阶段经验写入全局知识库，并补充 tags 和 applicable_node_types。` +
-    `\n${phase}本阶段还没有写入任何知识${pointers > 0 ? `（引用了 ${pointers} 条，但那不等于你总结了这一阶段）` : ''}。` +
-    '\n全局知识库只从这种总结里生长；不写，下一个工作区就学不到这次的教训。'
-  )
-}
+export { harvestingPrompt } from './graph-bootstrap.js'
 
 /**
  * Stamp a node as harvested. Called by `knowledge_harvest` when the model actually writes, so the
@@ -741,19 +744,14 @@ export function markHarvested(memoryDir: string, nodeIds: readonly string[], at 
   if (wanted.length === 0) return []
   return withFileLock(`${graphPath(memoryDir)}.lock`, () => {
     const graph = readGraph(memoryDir)
-    const stamped: string[] = []
-    const nodes = graph.nodes.map((node) => {
-      if (!wanted.includes(node.id)) return node
-      if (node.harvestedAt.length > 0) return node
-      stamped.push(node.id)
-      return { ...node, harvestedAt: at, updatedAt: at }
-    })
-    if (stamped.length === 0) return []
+    /** The pure half lives in `graph-bootstrap.ts`; this function owns the lock and the single write. */
+    const outcome = stampHarvested(graph as never, wanted, at)
+    if (outcome.next === undefined) return []
     atomicWrite(
       graphPath(memoryDir),
-      `${JSON.stringify({ ...graph, nodes, updatedAt: at, history: graph.history.slice(-MAX_HISTORY) }, null, 2)}\n`,
+      `${JSON.stringify({ ...outcome.next, history: graph.history.slice(-MAX_HISTORY) }, null, 2)}\n`,
     )
-    return stamped
+    return outcome.stamped
   })
 }
 
