@@ -90,6 +90,8 @@ export interface MemoryHit {
    * one decision, free to disagree with the score that was actually applied.
    */
   domainMismatch?: boolean
+  /** b3-f8: set when this record was demoted for being N generations behind and never used. */
+  generationBehind?: number
 }
 
 export interface Document {
@@ -150,6 +152,14 @@ export interface Document {
   ageDays: number
   /** D-1: 各层早就在条件对象里写它，只是本接口没声明 ⇒ 编译器看不见 ⇒ 复制那行没被写出来。 */
   hits?: number
+  /**
+   * ── b3-f8: has this record ever been USED? ───────────────────────────────────────────────────
+   *
+   * `false` = the record carries a usage counter and it says "never"; `undefined` = this kind of
+   * record has no such counter (facts / experiences), i.e. UNKNOWN. The generation downgrade may
+   * only act on `false` — "unknown" must never become "unused" (see `src/generation.ts`).
+   */
+  referenced?: boolean
   importance: number
 }
 
@@ -162,6 +172,8 @@ export interface Scored {
   currentCommit?: string
   /** TD-M7: a negative whose words share nothing with the current task (down-weighted). */
   domainMismatch?: boolean
+  /** b3-f8: how many generations behind this record is, when the downgrade applied. */
+  generationBehind?: number
 }
 
 export interface WorkspaceGate {
@@ -202,6 +214,16 @@ export interface CandidateOptions {
   taskTerms?: ReadonlySet<string>
   /** v0.20: set false to relax the incident-log rule (differential tests). */
   taskAlignment?: boolean
+  /**
+   * ── b3-f8: the generation downgrade's three inputs ────────────────────────────────────────────
+   *
+   * `currentGeneration` comes from the caller (`readCurrentGeneration`), never re-computed here.
+   * `mode` defaults to `never`; `generationMin` is N, and when N has not been decided the rule
+   * does nothing (see `src/generation.ts` — an undecided threshold must not act).
+   */
+  currentGeneration?: number
+  generationMode?: 'never' | 'always' | 'manual-only'
+  generationMin?: number
 }
 
 export interface HybridRecallOptions extends CandidateOptions {
@@ -290,6 +312,10 @@ export interface FilterOptions {
   taskTerms?: ReadonlySet<string>
   /** v0.20: set false to relax the incident-log rule (differential tests). */
   taskAlignment?: boolean
+  /** b3-f8: the generation downgrade's inputs — same three as `CandidateOptions`. */
+  currentGeneration?: number
+  generationMode?: 'never' | 'always' | 'manual-only'
+  generationMin?: number
   /**
    * v0.22 P1: degrade to STRICT lexical recall when the judge is slow or fails.
    *

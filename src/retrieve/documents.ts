@@ -34,6 +34,8 @@ import { getCachedSkillDocs, setCachedSkillDocs } from '../skill-cache.js'
 import type { IndexDocument } from '../sqlite-index.js'
 import { readSkillValidity } from '../store/skill.js'
 import { normalizeWorkspace } from '../workspace.js'
+/** b3-f8: "被引用过吗" 的判据（纯函数，与 memory_stats 同一口径）。 */
+import { isReferenced } from '../generation.js'
 import type { Document, DocumentKind } from '../retrieve.js'
 import { INCIDENT_MARKERS, ageDaysOf, clipTitle, documentCache, layerDocumentOf, negativeDocumentOf, provenanceOf, skillDirKey, tokenize, triggerOf } from './interning.js'
 
@@ -198,6 +200,15 @@ export function skillDocuments(skillsDir: string, now: number): Document[] {
       confidence,
       ...(stale ? { stale: true } : {}),
       ...(generation === undefined ? {} : { generation }),
+      ...((() => {
+        /**
+         * b3-f8: decided HERE from the record's own counters. A SKILL.md always carries
+         * `last_used` and `sources`, so the answer for a skill is always a boolean — pass them even
+         * when empty, or "no counter" and "never used" become indistinguishable.
+         */
+        const referenced = isReferenced({ lastUsed: lastUsed ?? '', sources })
+        return referenced === undefined ? {} : { referenced }
+      })()),
       ...(commitHash === undefined ? {} : { commitHash }),
       ...(lastValidated === undefined ? {} : { lastValidated }),
       ...(updated === undefined ? {} : { updatedAt: updated }),

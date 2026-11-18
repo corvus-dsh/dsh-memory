@@ -120,6 +120,7 @@ filter.ts -> retrieve.ts : type-only   （import type { MemoryHit }，运行时�
 | `src/store/io.ts` | IO 原语：原子写、JSONL 读写、目录准备。B 的产物。 | `atomicWrite`, `ensureDir`, `readJsonl`, `readJsonlFresh`, `writeEdge`, `writeEdges` …（共 8） | — |
 | `src/store/clock.ts` | 单调时钟接缝：`monotonicTimestamp` 与它的测试重置钩子。第 0 步的产物。 | `monotonicTimestamp`, `resetMonotonicClockForTest` …（共 3） | — |
 | `src/thresholds.ts` | 六个决定「召回什么」的数的唯一出处：零 import 的叶子（TD-M6）。 | `FLOOR`, `THRESHOLD`, `MERGE_SIMILARITY`, `TASK_TERM_LIMIT`, `FILTER_MAX_CANDIDATES`, `NEGATIVE_STALE_DAYS` | — |
+| `src/generation.ts` | b3-f8：跨代降级的判据（「一代」「被引用」两个定义）与当前代读取。 | `DEFAULT_GENERATION_MODE`, `GENERATION_DOWNGRADE_WEIGHT`, `GenerationMode`, `generationDowngradeFor`, `isReferenced`, `readCurrentGeneration` | — |
 | `src/retrieve/interning.ts` | 检索层的共享原语：分词、标题裁剪、证据提取、陈旧负判定、Document 构造。 | `INCIDENT_MARKERS`, `NEGATIVE_STALE_DAYS`, `NEGATIVE_STALE_WEIGHT`, `ageDaysOf`, `clipTitle`, `documentCache` …（共 14） | extract.ts (type-only), skill-cache.ts, workspace.ts |
 | `src/retrieve/storage-tier.ts` | 存储选路：json 默认、sqlite 可选；三个模块级 let 与它们的唯一写者同处一模块。 | `currentIndex`, `getStorageTier`, `setStorageTier` …（共 3） | sqlite-index.ts |
 | `src/retrieve/commit-cache.ts` | 工作区 commit 归属：按分钟缓存，失败回落到空串；commit 漂移判定的权重常量同处一模块。 | `COMMIT_DRIFT_WEIGHT`, `clearCommitCache`, `currentCommitOf`, `sameCommit` | — |

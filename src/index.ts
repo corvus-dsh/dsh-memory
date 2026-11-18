@@ -21,6 +21,8 @@ import { extractEpisode } from './extract.js'
 import type { EvidenceRef, ExtractionResult, MemoryProvenance } from './extract.js'
 import { findSkillCandidate } from './dedupe.js'
 import { retrieve, renderHint, retrieveWithFilter, collectScenes, extractTaskTerms, askAsksForFix, DEFAULT_RETRIEVAL_THRESHOLD, isolateHint, currentCommitOf } from './retrieve.js'
+/** b3-f8: "how many generations have passed" — read from the SAME file the harvest wrote it from. */
+import { readCurrentGeneration } from './generation.js'
 import { applySkillArchive, listSkillSummaries, planSkillArchive, DEFAULT_SKILL_LIMIT } from './archive.js'
 /** TD-M6: the recall floor's value — imported from its ONE home, never declared here. */
 import { FLOOR } from './thresholds.js'
@@ -294,6 +296,18 @@ export interface MemoryConfig {
    */
   taskAlignment?: boolean
   /**
+   * ── b3-f8: THE GENERATION DOWNGRADE, AND WHY BOTH FIELDS ARE NEEDED ──────────────────────────
+   *
+   * `'never'` (default) keeps today's behaviour byte for byte. `'always'` acts in scoring — but
+   * ONLY together with `generationMin` (N): the real store has no record carrying a `generation`
+   * at all (see `docs/gen-downgrade.md` §4), so N cannot be decided from it, and an undecided
+   * threshold must not act. `'manual-only'` is accepted for the documented mode set; there is no
+   * manual entry point yet, so it behaves like `'never'` on the automatic path.
+   */
+  generationDowngrade?: 'never' | 'always' | 'manual-only'
+  /** N: how many generations behind counts as "the code moved on". Required for `'always'`. */
+  generationMin?: number
+  /**
    * v0.21 P1: ACTIVE skills above which one archival pass runs at activation.
    * Default 100 (see `DEFAULT_SKILL_LIMIT`). 0 disables the pass.
    */
@@ -373,6 +387,25 @@ function resolveConfig(ctx: ContextLike, config: MemoryConfig) {
     workspaceIsolation: config.workspaceIsolation !== false,
     // v0.20: on by default. A filter that is off by default protects nobody.
     taskAlignment: config.taskAlignment !== false,
+    /**
+     * ── b3-f8: THE GENERATION DOWNGRADE, OFF BY DEFAULT ──────────────────────────────────────────
+     *
+     * `never` unless the config says otherwise, and even `always` needs `generationMin` (N): the
+     * real store does not have enough generations to decide N (see `docs/gen-downgrade.md`), and an
+     * undecided threshold must not act. `manual-only` is accepted and, today, behaves like `never`
+     * for the automatic path — there is no manual entry point yet, which is stated rather than
+     * implied.
+     */
+    generationMode:
+      config.generationDowngrade === 'always'
+        ? ('always' as const)
+        : config.generationDowngrade === 'manual-only'
+          ? ('manual-only' as const)
+          : ('never' as const),
+    generationMin:
+      Number.isFinite(Number(config.generationMin)) && Number(config.generationMin) > 0
+        ? Math.trunc(Number(config.generationMin))
+        : undefined,
     // v0.21: 0 disables the archival pass; absent means the default threshold.
     skillLimit:
       Number.isFinite(Number(config.skillLimit)) && Number(config.skillLimit) >= 0
@@ -1016,6 +1049,22 @@ function activeNodeIdsForHarvest(memoryDir: string): string[] {
 function applyInner(ctx: ContextLike, config: MemoryConfig): void {
   const resolved = resolveConfig(ctx, config)
   /**
+   * b3-f8: THE GENERATION GATE, IN ONE OBJECT.
+   *
+   * `currentGeneration` is READ from `.graft-targets.json` (the same file the harvest wrote each
+   * record's `generation` from), never inferred. Both retrieval call sites spread this object, so
+   * "how many generations behind" cannot be answered two different ways on two paths.
+   *
+   * With the default `mode: 'never'` (or with no `generationMin`) the rule is a no-op: the weight
+   * is 1 and nothing is demoted. That is what keeps this feature from changing behaviour until
+   * someone turns it on AND names N.
+   */
+  const generationGate = {
+    currentGeneration: readCurrentGeneration(resolved.graftDataDir),
+    generationMode: resolved.generationMode,
+    generationMin: resolved.generationMin,
+  }
+  /**
    * v1.1.0 — START THE LEDGER FLUSH LOOP.
    *
    * Writes now land in a WAL and are merged into the main ledger on a schedule. Without this
@@ -1349,12 +1398,14 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
         ? await retrieveWithFilter(resolved.memoryDir, resolved.skillsDir, query, {
             floor: explicitThreshold ?? resolved.floor,
             ...gate,
+            ...generationGate,
             llm,
             ...resolveFilterTarget(ctx, resolved.filterProvider, resolved.filterModel),
           })
         : retrieve(resolved.memoryDir, resolved.skillsDir, query, {
             threshold: explicitThreshold ?? resolved.threshold,
             ...gate,
+            ...generationGate,
           })
       const hint = renderHint(result)
       // `hint: undefined` is not lossless JSON: the ToolService validates the raw
@@ -2018,6 +2069,8 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
           // would refuse everything (or, worse, match only generic words). The ask is
           // remembered per agent so the gate stays stable as the work proceeds.
           ...taskGate(resolved, agentId, userText),
+          /** b3-f8: same object as `memory_search` — one answer to "how many generations behind". */
+          ...generationGate,
           // v0.15: the supersede verdict is PERSISTED here — this is the one path
           // where a real turn is being served. `applySupersede` refuses a machine
           // verdict against a human memory and appends the audit line; the manual

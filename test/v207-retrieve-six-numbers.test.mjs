@@ -147,14 +147,14 @@ const DOCUMENTED = {
    */
   components: 6,
   trunkDeclarations: 21,
-  trunkLines: 581,
+  trunkLines: 618,
   sccs: 31,
   nontrivialSccs: 0,
   layers: 4,
-  tiers: { D: 396, C: 106, B: 169, A: 85 },
+  tiers: { D: 437, C: 113, B: 172, A: 85 },
   tierCounts: { D: 3, C: 2, B: 7, A: 19 },
   declarations: 31,
-  spanSum: 756,
+  spanSum: 807,
 }
 
 test('v207 ①: 当前六数与内置基线逐项相等（基线来自实测，不是从文档反读）', (t) => {

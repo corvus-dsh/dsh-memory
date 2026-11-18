@@ -96,6 +96,7 @@ const SCANNED = [
   'storage-tier.ts',
   'store.ts',
   'thresholds.ts',
+  'generation.ts',
   'suggest.ts',
   'threat.ts',
   'workspace.ts',
@@ -142,7 +143,7 @@ const EXEMPT = new Map([
      * 天花板的规则是「今天多大就是多大」，所以它必须跟着实测走；不允许的是**留虚高配额**（实测 1900
      * 却登记 2009）。这一条下次仍按实测收紧，不因为「这次是加功能」就放宽。
      */
-    ceiling: 2478,
+    ceiling: 2531,
     reason:
       'dsh-memory 的插件入口：applyInner 一个函数 1362 行（占 58%），加上工具注册、console 网络端、'
       + 'harvest 编排与 33 个导出。它是整个重构的**目标文件**，拆它需要先拆它依赖的 store/retrieve'
@@ -152,7 +153,7 @@ const EXEMPT = new Map([
       + '2478，`DEFAULT_RETRIEVAL_FLOOR` 改为从 thresholds.ts 取值；理由见上方注释。）',
   }],
   ['retrieve.ts', {
-    ceiling: 1127,
+    ceiling: 1181,
     reason:
       '检索层：词法召回、IDF×鲜活度×重要度打分、两阶段 LLM 过滤、提示渲染。它与 store.ts 曾共享大量'
       + 'helper。2026-11-16 已完成六步搬运：'

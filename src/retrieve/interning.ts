@@ -138,6 +138,8 @@ export function provenanceOf(value: unknown): MemoryProvenance {
  */
 import { NEGATIVE_STALE_DAYS } from '../thresholds.js'
 export { NEGATIVE_STALE_DAYS }
+/** b3-f8: the "ever used" judgement, shared with the skill documents (same counters, one rule). */
+import { isReferenced } from '../generation.js'
 
 /** What an old, never-rehit negative keeps of its weight. */
 export const NEGATIVE_STALE_WEIGHT = 0.5
@@ -282,6 +284,11 @@ export function negativeDocumentOf(record: Record<string, unknown>, index: numbe
         // v0.21: how many times this failure has actually recurred. A re-hit negative
         // is a live rule; an old one-shot is an anecdote (see `isStaleNegative`).
         ...(Number.isFinite(hits) ? { hits } : {}),
+        /** b3-f8: a negative is "used" when the same pitfall happened again (`hits > 1`). */
+        ...((() => {
+          const referenced = isReferenced({ hits })
+          return referenced === undefined ? {} : { referenced }
+        })()),
         // A falsified rule keeps its warning but must lose the argument.
         importance:
           (1 + Math.min(0.5, 0.15 * Math.log(1 + Math.max(1, hits)))) *

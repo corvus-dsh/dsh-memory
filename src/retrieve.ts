@@ -34,6 +34,9 @@ import { SqliteIndex, sqliteAvailable } from './sqlite-index.js'
 import type { IndexDocument } from './sqlite-index.js'
 import { INCIDENT_MARKERS, ageDaysOf, clipTitle, documentCache, domainVerdictFor, isStaleNegative, layerDocumentOf, negativeDocumentOf, provenanceOf, skillDirKey, tokenize, triggerOf } from './retrieve/interning.js'
 import { currentIndex } from './retrieve/storage-tier.js'
+/** b3-f8: the generation downgrade's pure rules — no IO, no upward import. */
+import { generationDowngradeFor } from './generation.js'
+import type { GenerationMode } from './generation.js'
 import { COMMIT_DRIFT_WEIGHT, currentCommitOf, sameCommit } from './retrieve/commit-cache.js'
 import { ERROR_IDENTIFIER, STOPWORDS, contentOf, layerDocuments, negativeDocuments, skillDocuments, tierDocumentOf, looksLikeIncidentLog } from './retrieve/documents.js'
 import { classifyScene, inferScene } from './retrieve/scene.js'
@@ -385,6 +388,14 @@ function scoreDocuments(
    * HEAD (cached); tests pin it so drift can be asserted without a repository.
    */
   currentCommitOverride?: string,
+  /**
+   * b3-f8: the generation downgrade's inputs, passed as ONE object.
+   *
+   * Same rule as `taskTerms`: the leaf rules live in `src/generation.ts`, and this function is
+   * only where they are APPLIED — because this is the one place that has both the record's own
+   * `generation` and the caller's `currentGeneration`.
+   */
+  generationOptions?: { currentGeneration?: number; mode?: GenerationMode; minGenerations?: number },
 ): {
   terms: string[]
   scored: Scored[]
@@ -485,8 +496,26 @@ function scoreDocuments(
      * cross-domain warning), just not at full weight.
      */
     const domain = document.kind === 'negative' ? domainVerdictFor(document, taskGate?.terms) : undefined
+    /**
+     * ── b3-f8: NO LONGER USED, AND OLD ENOUGH THAT THE CODE MOVED ON ─────────────────────────────
+     *
+     * The verdict is a pure function call — `generationDowngradeFor` decides, this line applies.
+     * `mode: 'never'` (the default) returns weight 1, so this is a no-op until someone turns it on
+     * AND names N; both are required (see `src/generation.ts`).
+     */
+    const generation = generationDowngradeFor(
+      { generation: document.generation, referenced: document.referenced },
+      {
+        currentGeneration: generationOptions?.currentGeneration,
+        mode: generationOptions?.mode,
+        minGenerations: generationOptions?.minGenerations,
+      },
+    )
     const score =
-      Math.min(1, coverage * freshness(document.ageDays) * document.importance * (domain?.weight ?? 1)) *
+      Math.min(
+        1,
+        coverage * freshness(document.ageDays) * document.importance * (domain?.weight ?? 1) * generation.weight,
+      ) *
       (drift ? COMMIT_DRIFT_WEIGHT : 1)
     return {
       document,
@@ -494,6 +523,7 @@ function scoreDocuments(
       score,
       ...(drift ? { commitDrift: true, currentCommit: current } : {}),
       ...(domain?.mismatch === true ? { domainMismatch: true } : {}),
+      ...(generation.downgrade ? { generationBehind: generation.behind } : {}),
     }
   })
   scored.sort((a, b) => b.score - a.score)
@@ -570,6 +600,8 @@ function hitOf(document: Document, score: number, scored?: Scored): MemoryHit {
     ...(scored?.currentCommit === undefined ? {} : { currentCommit: scored.currentCommit }),
     /** TD-M7: the ONE place this is computed; carried here so the hint cannot recompute it. */
     ...(scored?.domainMismatch === true ? { domainMismatch: true } : {}),
+    /** b3-f8: same rule — computed in scoring, carried, never rebuilt at render time. */
+    ...(scored?.generationBehind === undefined ? {} : { generationBehind: scored.generationBehind }),
   }
 }
 
@@ -602,6 +634,7 @@ export function retrieveCandidates(
       ...(options.taskAlignment === undefined ? {} : { enabled: options.taskAlignment }),
     },
     options.currentCommit,
+    { currentGeneration: options.currentGeneration, mode: options.generationMode, minGenerations: options.generationMin },
   )
   const out: MemoryHit[] = []
   for (const item of scored) {
@@ -726,6 +759,12 @@ export function retrieve(
     taskAlignment?: boolean
     /** v0.20: the ask itself is about a failure, so incident logs are in scope. */
     taskFixIntent?: boolean
+    /** b3-f8: the generation downgrade's inputs (same three as `CandidateOptions`). */
+    currentGeneration?: number
+    generationMode?: 'never' | 'always' | 'manual-only'
+    generationMin?: number
+    /** v1.0.2: the checkout this search runs against (read below, and passed to scoring). */
+    currentCommit?: string
   } = {},
 ): RetrieveResult {
   const now = options.now ?? Date.now()
@@ -746,6 +785,7 @@ export function retrieve(
       ...(options.taskFixIntent === undefined ? {} : { askIsFixIntent: options.taskFixIntent }),
     },
     options.currentCommit,
+    { currentGeneration: options.currentGeneration, mode: options.generationMode, minGenerations: options.generationMin },
   )
   const blocked = {
     ...(blockedByWorkspace > 0 ? { blockedByWorkspace } : {}),
@@ -1053,6 +1093,20 @@ export function renderHint(result: RetrieveResult): string | undefined {
       ? `**[此经验来自第 ${result.skill.generation ?? '?'} 代的旧提交 ${String(result.skill.commitHash ?? '').slice(0, 7)}，当前为 ${String(result.skill.currentCommit ?? '').slice(0, 7) || '未知'}，请谨慎使用]** `
       : ''
   const staleWarning = result.skill?.stale === true ? '注意：此技能较久未被验证，请结合当前环境谨慎使用。' : ''
+  /**
+   * ── b3-f8: SAY WHY IT IS QUIETER ─────────────────────────────────────────────────────────────
+   *
+   * A demoted memory that says nothing reads as a memory that simply exists. The reason is taken
+   * OFF THE HIT (`generationBehind`), never recomputed — same rule as `domainMismatch`, and D-1 is
+   * the measured cost of learning it the hard way.
+   *
+   * The prefix states the COUNT, not a verdict: 「未被引用」is a fact about this store's own
+   * counters, and the reader can check it.
+   */
+  const generationBehind = [result.skill?.generationBehind, result.negative?.generationBehind]
+    .filter((value): value is number => Number.isFinite(value))
+    .sort((left, right) => (right ?? 0) - (left ?? 0))[0]
+  const generationPrefix = generationBehind === undefined ? '' : `[${generationBehind} 代未被引用] `
   // v0.17: the trust tier is a PREFIX, not a footnote.
   //
   // Only a `human` record may present itself as an ordinary "记忆提示": it is the
@@ -1074,7 +1128,7 @@ export function renderHint(result: RetrieveResult): string | undefined {
     result.skill === undefined
       ? ''
       : `；需要具体步骤时调用 skill_read("${result.skill.id}")`
-  const text = `${drift}${trustPrefix}（记忆提示：${parts.join('；')}${bodyPointer}。${staleWarning}）`
+  const text = `${drift}${generationPrefix}${trustPrefix}（记忆提示：${parts.join('；')}${bodyPointer}。${staleWarning}）`
   // v0.8.1: the last gate. Every field above comes from the store, and the store
   // is already filtered — but this is the exact string that enters a prompt, so it
   // is the one place where "the filter upstream did its job" is worth re-checking.
