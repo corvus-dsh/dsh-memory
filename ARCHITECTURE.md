@@ -207,7 +207,7 @@
 
 ---
 
-### TD-M18 `knowledge_harvest` 的拒收语没说它真正执行的规则，且超限 tag 被**静默丢弃**（P2，2026-11-18 登记）
+### TD-M18 `knowledge_harvest` 的拒收语没说它真正执行的规则，且超限 tag 被**静默丢弃**（P2，2026-11-18 登记 —— **已关闭 2026-11-18**）
 
 | 项 | 内容 |
 |---|---|
@@ -217,6 +217,9 @@
 | 为什么现在不修 | 报错语改字符串很便宜，但要连带一条测试钉住「报错语必须点名上限」；`asVocab` 的静默丢弃要改成「如实报告被丢弃的项」，涉及它的全部调用点（tag / node type / scene 词表）。两者都是**改判据语**，与 B3 的功能批不同性质，混进去会让「这批交付了什么」再次说不清。 |
 | 退出条件（三条） | ① 拒收语写出真实规则（字符集 + 长度上限），并有一条测试断言它点名了上限；② `asVocab` 对非法/超限 tag 不再静默：调用方能拿到被丢弃的项，`memory_contribute` / `knowledge_harvest` 的结果里如实报告；③ 长度上限要么写进 ARCHITECTURE，要么抬高 —— **不许再出现「文档说一套、判据做一套」**。 |
 | 关联 | 本条登记自 B2 批次收尾的缺陷记账（`docs/incidents/2026-11-18-evidence-errors.md` 第 1 条是同一轮里 lead 侧的错）。 |
+| 关闭对账（2026-11-18） | ① 拒收语：`VOCAB_RULE = '1-32 chars, first [a-z0-9], rest [a-z0-9+#._-]'` 只写一次，id 与 tag 两处共用；回显本次长度 ⇒ `v245 ①②`；② `normalizeVocabList` / `asVocab` 的**可选**第三参数收 `dropped`，`KnowledgeWriteResult.droppedTags` 恒为数组，按字段前缀（`tags:` / `applicable_node_types:`）分行 ⇒ `v245 ③④⑤⑥`，且**穿过工具**：`knowledge_harvest` / `memory_contribute` 都 `...result` spread，`v245 ⑦` 走真实 `tools.execute` 断言这个字段在**工具返回**里；③ **上限仍是 32，一个字都没抬**（本节「现状」行即文档，`v245 ⑥⑧` 断言上限语义未变）。 |
+| 关闭时的边界 | 读路径（`asEntry` 的两处 `normalizeVocabList`）**没动**：读一份带越界 tag 的旧条目仍不报告，因为那属于读契约变更，需要单独决定。`graph.ts` 的两处 decoder（`nodeType` max=1、`knowledgePointers` max=24）仍两参调用 —— `v245 ⑧` 静态断言「不许传第三参数」+ 行为断言（1 / 24 / 默认 8 三个上限都不变）。 |
+| 已知残留（未修，如实记） | **cap 溢出仍不报告**：`max` 只用来的截断（默认 8、合并时 12），被截掉的项是**合法但没放下**，与「非法被拒」不是一类，所以没并进 `droppedTags`。要报需要先定「谁该告诉用户配额满了」，那是另一个决定。 |
 
 ---
 

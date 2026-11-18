@@ -53,17 +53,49 @@ export function defaultKnowledgeDir(): string {
  * The vocabulary shape. Lowercase latin, digits, and the punctuation that appears in real tags
  * (`c++`, `c#`, `node.js`, `ui-ux`). Deliberately ASCII: a Chinese tag would be a search term
  * masquerading as a category, and the store already has free-text triggers for that.
+ *
+ * ── TD-M18 (2026-11-18): THE RULE IS NOW ALSO WRITTEN IN WORDS ─────────────────────────────────
+ *
+ * Measured twice in one session: `declaration-binds-to-measured-artifact` (38 chars) and
+ * `state-file-backup-copy-test-apply` (33) were refused with "id must be lowercase latin
+ * kebab-case" — a sentence whose rule BOTH ids satisfied. The refusal was true and useless: the
+ * caller was told about a rule it had not broken. The two facts this regex knows and the message
+ * did not: the total length cap (32) and the four extra characters (`+ # . _`).
  */
 const VOCAB = /^[a-z0-9][a-z0-9+#._-]{0,31}$/u
 
-/** Normalise a tag list: lowercase, dedupe, validate, cap. Invalid entries are DROPPED, not thrown. */
-export function normalizeVocabList(value: unknown, max = 8): string[] {
+/** The rule, spelled out ONCE so the id refusal and the tag refusal cannot drift apart. */
+const VOCAB_RULE = '1-32 chars, first [a-z0-9], rest [a-z0-9+#._-]'
+
+/**
+ * Normalise a tag list: lowercase, dedupe, validate, cap.
+ *
+ * `dropped` (TD-M18) is an OPTIONAL collector: when given, every entry this function throws away
+ * is pushed as one readable line naming the entry, its length, and the rule it missed. Two reasons
+ * it is a parameter rather than a return value:
+ *
+ *   1. the old contract is a plain `string[]` and dozens of call sites rely on it;
+ *   2. the two callers that must REPORT are the writers; readers (`asEntry`) have no one to tell.
+ *
+ * Cap overflow is NOT reported here (see the note in the report): it is a different kind of loss —
+ * the entries are valid and were simply not kept — and folding the two into one array would make
+ * "invalid" and "over quota" indistinguishable to whoever reads it.
+ */
+export function normalizeVocabList(value: unknown, max = 8, dropped?: string[]): string[] {
   const raw = Array.isArray(value) ? value : typeof value === 'string' ? value.split(/[,\s]+/u) : []
   const out: string[] = []
   for (const item of raw) {
     if (typeof item !== 'string') continue
     const tag = item.trim().toLowerCase().replace(/\s+/gu, '-')
-    if (!VOCAB.test(tag)) continue
+    if (!VOCAB.test(tag)) {
+      /**
+       * A REFUSED TAG IS A DENIED TAG, and the difference matters: an id refusal keeps the entry
+       * out of the store (visible), while a tag refusal used to leave the entry in place with the
+       * tag quietly gone. `dropped` is how the writer gets to say so.
+       */
+      dropped?.push(`${tag || '(empty)'} (${tag.length} chars): tag must be ${VOCAB_RULE}`)
+      continue
+    }
     if (out.includes(tag)) continue
     out.push(tag)
     if (out.length >= max) break
@@ -216,6 +248,14 @@ export interface KnowledgeWriteResult {
   merged: number
   /** Refused entries with a reason. Never silent: a dropped entry is a memory the user thinks exists. */
   refused: string[]
+  /**
+   * TD-M18: every tag / node-type this write did NOT keep, as one readable line each.
+   *
+   * ALWAYS an array (never `undefined`): "nothing was dropped" is a fact the caller can print, and
+   * an absent field is indistinguishable from "this build does not report". The entry is still
+   * written — the tag is what was denied, not the skill.
+   */
+  droppedTags: string[]
   /** The entries as stored (after normalisation), so a caller can report exact ids. */
   entries: KnowledgeEntry[]
 }
@@ -237,6 +277,8 @@ export function writeKnowledge(
   options: { at?: string; workspace?: string; sessionId?: string } = {},
 ): KnowledgeWriteResult {
   const refused: string[] = []
+  /** TD-M18: denied vocabularies are REPORTED, not swallowed (see `normalizeVocabList`). */
+  const droppedTags: string[] = []
   const accepted: KnowledgeEntry[] = []
   const at = options.at ?? new Date().toISOString()
   const workspace = normalizeWorkspace(options.workspace)
@@ -244,7 +286,13 @@ export function writeKnowledge(
   for (const input of inputs) {
     const id = typeof input.id === 'string' ? input.id.trim().toLowerCase() : ''
     if (!VOCAB.test(id)) {
-      refused.push(`${id || '(empty)'}: id must be lowercase latin kebab-case`)
+      /**
+       * THE REAL RULE, and the measured length. The old sentence ("id must be lowercase latin
+       * kebab-case") was true about characters and silent about the cap — the only rule the two
+       * measured refusals had actually broken. A refusal that describes a different rule makes the
+       * next attempt fail the same way.
+       */
+      refused.push(`${id || '(empty)'} (${id.length} chars): id must be ${VOCAB_RULE}`)
       continue
     }
     const title = typeof input.title === 'string' && input.title.trim().length > 0 ? input.title.trim() : id
@@ -258,14 +306,26 @@ export function writeKnowledge(
     const evidence = (Array.isArray(input.evidence) ? input.evidence : [])
       .map((item) => (typeof item === 'string' ? item : ''))
       .filter((item) => item.length > 0)
+    /**
+     * Collect the denied vocabularies FIRST, then prefix the lines with the field they came from.
+     * The prefix is what makes the report actionable: `tags: …` and `applicable_node_types: …` are
+     * different fields of the frontmatter, and "a tag was dropped" without saying which one sends
+     * the reader looking at the wrong line.
+     */
+    const tagDrops: string[] = []
+    const nodeDrops: string[] = []
+    const tags = normalizeVocabList(input.tags, 8, tagDrops)
+    const applicableNodeTypes = normalizeVocabList(input.applicableNodeTypes, 8, nodeDrops)
+    droppedTags.push(...tagDrops.map((line) => `tags: ${line}`))
+    droppedTags.push(...nodeDrops.map((line) => `applicable_node_types: ${line}`))
     accepted.push({
       id,
       kind: input.kind === 'negative' ? 'negative' : 'skill',
       title,
       when,
       body,
-      tags: normalizeVocabList(input.tags),
-      applicableNodeTypes: normalizeVocabList(input.applicableNodeTypes),
+      tags,
+      applicableNodeTypes,
       workspace,
       provenance:
         input.provenance === 'human' || input.provenance === 'tool' || input.provenance === 'inferred'
@@ -278,7 +338,7 @@ export function writeKnowledge(
       updatedAt: at,
     })
   }
-  if (accepted.length === 0) return { written: 0, merged: 0, refused, entries: [] }
+  if (accepted.length === 0) return { written: 0, merged: 0, refused, droppedTags, entries: [] }
 
   mkdirSync(dir, { recursive: true })
   const stored = withFileLock(`${knowledgePath(dir)}.lock`, () => {
@@ -320,6 +380,7 @@ export function writeKnowledge(
     written: stored.written,
     merged: stored.merged,
     refused,
+    droppedTags,
     entries: accepted.map((entry) => stored.rows.find((row) => row.id === entry.id) ?? entry),
   }
 }
