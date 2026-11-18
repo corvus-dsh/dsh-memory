@@ -68,17 +68,21 @@
 | 退出条件 | 新建 `thresholds.ts`（零依赖叶子模块）承载 `FLOOR` / `THRESHOLD` / `MERGE_SIMILARITY` / `TASK_TERM_LIMIT` / `NEGATIVE_STALE_DAYS` / `FILTER_MAX_CANDIDATES`；所有模块只从它导入；加一条「`src/` 内无跨层反向常量导入」的静态检查测试 |
 | 关闭对账（2026-11-18） | ① `src/thresholds.ts`（48 行）承载六个常量，**import 数 = 0**（`v246 ①`）；② 只导出这六个（`v246 ②`）；③ 所有值 import 的来源必须是 `thresholds.js`（`v246 ③`，静态扫全树）；④ 六个值逐项没变（`v246 ④`）；⑤ 公开面未断：`retrieve.js` / `archive.js` / `retrieve/interning.js` / `index.js` 的旧名字仍在且等于新名字（`v246 ⑤`），`MERGE_SIMILARITY`、`TASK_TERM_LIMIT`、`FILTER_MAX_CANDIDATES`、`NEGATIVE_STALE_DAYS`、`DEFAULT_RETRIEVAL_THRESHOLD`、`DEFAULT_RETRIEVAL_FLOOR` 一个都没少 |
 | ⚠ 退出条件假设的东西当时**不存在** | 退出条件点名的 `FLOOR` 与 `THRESHOLD` 在代码里**从来没有出现过**。真实状态：`DEFAULT_RETRIEVAL_FLOOR = 0.2` 在 **`index.ts`**（上层），`retrieve.ts` 向下取不到它，于是同一个 `0.2` 在检索器里又被字面量写了**两遍**；`DEFAULT_RETRIEVAL_THRESHOLD = 0.55` 在 `retrieve.ts`，而同一文件十行之下**又写了一遍** `0.55`。所以这一笔实际是「**立名 + 搬移**」——把两个无名/错位的数先命名，再把四个已命名的搬走。这一点写在这里，因为「退出条件点名的名字不存在」本身是判据说谎的一种（与 TD-M18 同族） |
-| 形状与代价 | 一个 import + re-export 的壳：`retrieve.ts` 的 `declarations` 32 → 30、`sccs` 32 → 30、`trunk` 22/561 → 21/560（`v207` 基线按实测重记并写明四类变化）；`retrieve.ts` 1078 → 1085 行、`index.ts` 2467 → 2478 行（`v205` 天花板按实测收紧）。**行为零变化**：`v207`（六数）、`v205`（尺寸）、常量的既有断言全绿 |
+| 形状与代价 | 一个 import + re-export 的壳：`retrieve.ts` 的 `declarations` 32 → 30、`sccs` 32 → 30、`trunk` 22/561 → 21/560（`v207` 基线按实测重记并写明四类变化）；当次实测行数 `retrieve.ts` 1078 → 1085、`index.ts` 2467 → 2478（`v205` 天花板按实测收紧）。**行为零变化**：`v207`（六数）、`v205`（尺寸）、常量的既有断言全绿 |
 | 明确不做 | **不改任何上限的值**（只立名与搬移）。**不做 semantic 相关的合并**（TD-M2）。**没有扩大清单**：`0.2` 还以「置信度下限」的身份出现在 `clampConfidence` 等处，那是**另一个数**（值相同、语义不同），混进来会把两种阈值搅成一条 |
 
-### TD-M7 负知识时效只看 `hits` 与年龄（P2）
+### TD-M7 负知识时效只看 `hits` 与年龄（P2 —— **已关闭 2026-11-18**）
 
 | 项 | 内容 |
 |---|---|
-| 现状 | `isStaleNegative` 判据：`ageDays > 30` 且 `hits <= 1` ⇒ 降权 0.5 并加 `[历史偶发错误，仅供参考]` 前缀 |
-| 影响 | 「当时报错上下文与当前不符」这一条目前用**年龄 + 未复发**代理，没有真正比对上下文 |
-| 为什么现在不动 | 真正比对上下文需要把当前任务词与负知识的 `symptom/cause` 做语义比较，属于 TD-M2 的同一类成本 |
+| 现状（关闭前） | `isStaleNegative` 判据：`ageDays > 30` 且 `hits <= 1` ⇒ 降权 0.5 并加 `[历史偶发错误，仅供参考]` 前缀 |
+| 影响（关闭前） | 「当时报错上下文与当前不符」这一条目前用**年龄 + 未复发**代理，没有真正比对上下文 |
+| 为什么当时不动 | 真正比对上下文需要把当前任务词与负知识的 `symptom/cause` 做语义比较，属于 TD-M2 的同一类成本 |
 | 退出条件 | 复用 task-alignment 的 `taskTerms`：当负知识的领域词与当前任务零交集时，额外降权并在前缀里写明「领域不符」；需一条「同领域旧负知识不降权」的对照测试 |
+| 关闭对账（2026-11-18） | ① 判据：`domainVerdictFor(negative, taskTerms?)`（`src/retrieve/interning.ts`，叶层），双方都有词且**零交集**才算不符；没有任务词或负知识没有词 ⇒ **未知，不算不符**（`v247 ③`）；② 额外降权：`NEGATIVE_DOMAIN_MISMATCH_WEIGHT = 0.5`，乘在**时效权重之上**（两条规则各管一件事），落在 `scoreDocuments` 的分数里（`v247 ④` 用差分开关比分数）；③ 说出来：前缀 `[领域不符]`，与时序前缀**各说各的**、顺序固定（先时间后领域，`v247 ②`）；④ 对照测试：同领域 **不额外**降权、文案无「领域不符」（`v247 ①`）—— 那一半与 ② 配对，只看「降权了」会奖励一个把什么都降权的实现；⑤ 端到端两步（`retrieve` → `renderHint`）都带上（`v247 ⑥`） |
+| 反向导入：绕开了，且被静态钉住 | 判据在**叶层**，`taskTerms` 由**调用方传下来**（`retrieve.ts` 的 `scoreDocuments` 把它递进去），叶层没有 import `extractTaskTerms`。`v247 ⑤` 静态断言：`interning.ts` 对 `retrieve.ts` **没有值依赖**（`import type` 允许，构建时擦除），且 `domainVerdictFor` 的签名必须收 `taskTerms?`。can-red：把「同领域」那一条改成恒判不符 ⇒ ①③④ 红，②（不同领域那一半）仍绿 |
+| ⚠ 一个既有的严格性必须先说清 | 在**非修错意图**下，task-alignment 门对「零交集 + incident 形状」的文档是**直接拦掉**（`blockedByTask`），不是降权。所以「领域不符降权」真正可见的形态是：**修错意图**放行后（`askIsFixIntent`）不同领域的负知识，或显式放宽门（`taskAlignment:false`）看权重差。这不是 TD-M7 没生效 —— 门管「要不要出现」，M7 管「出现时该说得多重」。`v247` 的 ①②④⑥ 分别在两条路径上验 |
+| 明确不做 | **不做语义比较**（TD-M2 的成本：激活路径上不引 LLM）。判据仍是**词交集**：它会把「同一个东西的两种叫法」误判为不符（`pytest` vs `单元测试`）。那是漏降权（安全方向），不是误降权（危险方向） |
 
 ### TD-M12 任务图从未被创建过：三个工具齐全、`phaseNudge` 默认开，整条链空转（P1，2026-11-09 登记 —— **已关闭 2026-11-18**）
 

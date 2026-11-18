@@ -142,6 +142,50 @@ export { NEGATIVE_STALE_DAYS }
 /** What an old, never-rehit negative keeps of its weight. */
 export const NEGATIVE_STALE_WEIGHT = 0.5
 
+/**
+ * ── TD-M7: WHAT AN OFF-TOPIC NEGATIVE KEEPS (an EXTRA factor on top of staleness) ──────────────
+ *
+ * TD-M7's exit condition: reuse the task-alignment terms; when the negative's own domain words and
+ * the current task share NOTHING, down-weight it FURTHER and SAY SO in the hint prefix.
+ *
+ * ── WHY THIS IS A PARAMETER AND NOT A LOOKUP ──────────────────────────────────────────────────
+ *
+ * This file is the LEAF of the retrieval layer; `retrieve.ts` sits above it. If this function
+ * imported `extractTaskTerms` from `retrieve.ts`, the dependency would point UPWARD — the exact
+ * thing TD-M6 just made impossible to do accidentally. So the CALLER passes the task terms down:
+ * the leaf never fetches the current task by itself.
+ */
+export const NEGATIVE_DOMAIN_MISMATCH_WEIGHT = 0.5
+
+export interface DomainVerdict {
+  /** True only when BOTH sides have words and the intersection is empty. */
+  mismatch: boolean
+  /** Multiplier applied ON TOP of the stale weight. 1 when nothing can be said. */
+  weight: number
+}
+
+/**
+ * Compare a negative's own words with the current task's terms.
+ *
+ * "UNKNOWN" IS NOT "OFF-TOPIC": no task terms (an offline caller), or a negative with no words at
+ * all, returns `mismatch: false`. Demoting on an unknown would suppress a memory for a reason
+ * nobody could state, and the same wrong-direction error as every other silent gate.
+ */
+export function domainVerdictFor(
+  negative: { tokens?: ReadonlySet<string>; title?: string; detail?: string; scanText?: string },
+  taskTerms?: ReadonlySet<string>,
+): DomainVerdict {
+  const unknown = { mismatch: false, weight: 1 }
+  if (taskTerms === undefined || taskTerms.size === 0) return unknown
+  const own =
+    negative.tokens !== undefined && negative.tokens.size > 0
+      ? negative.tokens
+      : new Set(tokenize(`${negative.scanText ?? ''} ${negative.title ?? ''} ${negative.detail ?? ''}`))
+  if (own.size === 0) return unknown
+  for (const term of taskTerms) if (own.has(term)) return unknown
+  return { mismatch: true, weight: NEGATIVE_DOMAIN_MISMATCH_WEIGHT }
+}
+
 export function isStaleNegative(
   negative: { ageDays?: number; confidence?: number; counterEvidence?: number[]; hits?: number },
   now = Date.now(),

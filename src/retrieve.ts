@@ -32,7 +32,7 @@ import { getNeighbors } from './edges.js'
 import { ledgerPatchCount, ledgerVersion, readRecords } from './ledger-cache.js'
 import { SqliteIndex, sqliteAvailable } from './sqlite-index.js'
 import type { IndexDocument } from './sqlite-index.js'
-import { INCIDENT_MARKERS, ageDaysOf, clipTitle, documentCache, isStaleNegative, layerDocumentOf, negativeDocumentOf, provenanceOf, skillDirKey, tokenize, triggerOf } from './retrieve/interning.js'
+import { INCIDENT_MARKERS, ageDaysOf, clipTitle, documentCache, domainVerdictFor, isStaleNegative, layerDocumentOf, negativeDocumentOf, provenanceOf, skillDirKey, tokenize, triggerOf } from './retrieve/interning.js'
 import { currentIndex } from './retrieve/storage-tier.js'
 import { COMMIT_DRIFT_WEIGHT, currentCommitOf, sameCommit } from './retrieve/commit-cache.js'
 import { ERROR_IDENTIFIER, STOPWORDS, contentOf, layerDocuments, negativeDocuments, skillDocuments, tierDocumentOf, looksLikeIncidentLog } from './retrieve/documents.js'
@@ -309,6 +309,13 @@ function isPoisoned(document: Document): boolean {
  */
 export const NEGATIVE_STALE_PREFIX = '[历史偶发错误，仅供参考]'
 
+/**
+ * TD-M7: the second bracket. `stale` and `off-topic` are DIFFERENT reasons and must be readable
+ * apart — "old" is about time, "domain" is about subject; a hint that merged them into one phrase
+ * would tell the reader neither.
+ */
+export const NEGATIVE_DOMAIN_PREFIX = '[领域不符]'
+
 function isActive(document: Document, now: number): boolean {
   // v0.21: an ARCHIVED skill is retired by maintenance, not by time. It is still on
   // disk with its evidence and provenance, so this is a cost (it stops being
@@ -466,9 +473,28 @@ function scoreDocuments(
     const current =
       recorded === undefined ? '' : (currentCommitOverride !== undefined ? currentCommitOverride : currentCommitOf(document.workspace ?? ''))
     const drift = recorded !== undefined && current.length > 0 && !sameCommit(recorded, current)
+    /**
+     * ── TD-M7: THE NEGATIVE'S DOMAIN IS JUDGED HERE, WHERE BOTH SIDES ARE KNOWN ─────────────────
+     *
+     * `taskGate.terms` is the caller's current-task vocabulary (the alignment gate's own terms —
+     * reusing them is what keeps "off-topic" meaning the same thing in both places). The verdict is
+     * computed ONCE and carried on the hit, so the hint's prefix cannot disagree with the score.
+     *
+     * Only negatives: a skill that shares no word with the task was already refused by the
+     * alignment gate; a negative that shares none is still worth showing (it may be a genuine
+     * cross-domain warning), just not at full weight.
+     */
+    const domain = document.kind === 'negative' ? domainVerdictFor(document, taskGate?.terms) : undefined
     const score =
-      Math.min(1, coverage * freshness(document.ageDays) * document.importance) * (drift ? COMMIT_DRIFT_WEIGHT : 1)
-    return { document, coverage, score, ...(drift ? { commitDrift: true, currentCommit: current } : {}) }
+      Math.min(1, coverage * freshness(document.ageDays) * document.importance * (domain?.weight ?? 1)) *
+      (drift ? COMMIT_DRIFT_WEIGHT : 1)
+    return {
+      document,
+      coverage,
+      score,
+      ...(drift ? { commitDrift: true, currentCommit: current } : {}),
+      ...(domain?.mismatch === true ? { domainMismatch: true } : {}),
+    }
   })
   scored.sort((a, b) => b.score - a.score)
   return { terms, scored, blockedByWorkspace, blockedByThreat, blockedByInvalid, blockedByTask }
@@ -542,6 +568,8 @@ function hitOf(document: Document, score: number, scored?: Scored): MemoryHit {
     ...(document.commitHash === undefined ? {} : { commitHash: document.commitHash }),
     ...(scored?.commitDrift === true ? { commitDrift: true } : {}),
     ...(scored?.currentCommit === undefined ? {} : { currentCommit: scored.currentCommit }),
+    /** TD-M7: the ONE place this is computed; carried here so the hint cannot recompute it. */
+    ...(scored?.domainMismatch === true ? { domainMismatch: true } : {}),
   }
 }
 
@@ -982,7 +1010,19 @@ export function renderHint(result: RetrieveResult): string | undefined {
     // sentence is read, which is the whole point when the failure mode is a model
     // routing around good work because of a three-month-old scare.
     const stale = isStaleNegative({ ageDays: negative.ageDays, hits: negative.hits })
-    const prefix = stale ? `${NEGATIVE_STALE_PREFIX} ` : ''
+    /**
+     * ── TD-M7: 「领域不符」 IS SAID, NOT JUST APPLIED ─────────────────────────────────────────────
+     *
+     * The weight was already applied during scoring; saying it here is the other half, because a
+     * reader who sees a full-strength warning cannot tell it was demoted. Prefix order matters for
+     * the same reason it did in v0.21: the brackets change how the sentence is read.
+     *
+     * `domainMismatch` is read OFF THE HIT — not recomputed here. Recomputing it from `title` and
+     * `detail` would be a second copy of one decision (and D-1 is the measured cost of exactly
+     * that: a renderer that rebuilt a value the producer never passed).
+     */
+    const offTopic = negative.domainMismatch === true
+    const prefix = `${stale ? `${NEGATIVE_STALE_PREFIX} ` : ''}${offTopic ? `${NEGATIVE_DOMAIN_PREFIX} ` : ''}`
     parts.push(
       falsified
         ? `${prefix}另有一次「${negative.title}」曾翻车，但已有 ${negative.counterEvidence!.length} 条反向证据，可信度 ${Math.round((negative.confidence ?? 1) * 100)}%`
@@ -1064,12 +1104,14 @@ export function renderHint(result: RetrieveResult): string | undefined {
     staleWarning.length > 0 || fact !== undefined || experience !== undefined || trustPrefix.length > 0
   return text.slice(0, long ? 260 : 120)
 }
-export { NEGATIVE_STALE_DAYS, NEGATIVE_STALE_WEIGHT, isStaleNegative, tokenize } from './retrieve/interning.js'
+export { NEGATIVE_STALE_DAYS, NEGATIVE_STALE_WEIGHT, NEGATIVE_DOMAIN_MISMATCH_WEIGHT, domainVerdictFor, isStaleNegative, tokenize } from './retrieve/interning.js'
 export { setStorageTier, getStorageTier } from './retrieve/storage-tier.js'
 export { COMMIT_DRIFT_WEIGHT, currentCommitOf, clearCommitCache } from './retrieve/commit-cache.js'
 export { looksLikeIncidentLog } from './retrieve/documents.js'
 export { SCENE_PROMPT, clearSceneCache, sceneCacheStats, classifyScene, inferScene } from './retrieve/scene.js'
 export type { SceneOptions } from './retrieve/scene.js'
+/** TD-M7: the verdict shape travels with the two functions above (v213 asserts this). */
+export type { DomainVerdict } from './retrieve/interning.js'
 
 export type { DocumentKind }
 export type { MemoryHit }

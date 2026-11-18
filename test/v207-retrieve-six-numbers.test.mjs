@@ -133,19 +133,28 @@ const DOCUMENTED = {
    *   · `sccs` 32 → 30：与常量成环的那两个候选随常量下沉消失；
    *   · `tiers.A` / `tierCounts.A` 86/20 → 84/18：A 层少的就是那两处声明。
    *
+   * ── 同一批次紧接着（TD-M7）：再把一笔算进来 ─────────────────────────────────────────────────
+   *
+   * TD-M7 给负知识加了「领域不符」的额外降权，判据函数在叶层（`interning.ts`），**调用方把
+   * 任务词传下来**。落在 `retrieve.ts` 的是三处：`scoreDocuments` 里一次判定与一次乘权、
+   * `hitOf` 一行携带、`renderHint` 一行前缀。于是这一组再变一次：
+   * `declarations` 30 → 31、`trunk.lines` 560 → 581、`sccs` 30 → 31、`spanSum` 722 → 756、
+   * `tiers.D` 365 → 396、`tiers.B` 167 → 169、`tiers.A` 84 → 85（计数 A 18 → 19）。
+   * 全是**新增判定**造成的，不是同一段代码搬家；数字仍按实测重记。
+   *
    * 这些数字是**读出来的**，不是推的（`node scripts/retrieve-report.mjs --json`）。
    * 基线跟着实测走（与 v205 的棘轮同一条纪律），但只允许「变小或可解释地变」。
    */
   components: 6,
   trunkDeclarations: 21,
-  trunkLines: 560,
-  sccs: 30,
+  trunkLines: 581,
+  sccs: 31,
   nontrivialSccs: 0,
   layers: 4,
-  tiers: { D: 365, C: 106, B: 167, A: 84 },
-  tierCounts: { D: 3, C: 2, B: 7, A: 18 },
-  declarations: 30,
-  spanSum: 722,
+  tiers: { D: 396, C: 106, B: 169, A: 85 },
+  tierCounts: { D: 3, C: 2, B: 7, A: 19 },
+  declarations: 31,
+  spanSum: 756,
 }
 
 test('v207 ①: 当前六数与内置基线逐项相等（基线来自实测，不是从文档反读）', (t) => {

@@ -152,7 +152,7 @@ const EXEMPT = new Map([
       + '2478，`DEFAULT_RETRIEVAL_FLOOR` 改为从 thresholds.ts 取值；理由见上方注释。）',
   }],
   ['retrieve.ts', {
-    ceiling: 1085,
+    ceiling: 1127,
     reason:
       '检索层：词法召回、IDF×鲜活度×重要度打分、两阶段 LLM 过滤、提示渲染。它与 store.ts 曾共享大量'
       + 'helper。2026-11-16 已完成六步搬运：'
@@ -171,6 +171,9 @@ const EXEMPT = new Map([
       + '**B3 收口 / TD-M6：1078 → 1085（+7）**：`FLOOR` / `THRESHOLD` / `TASK_TERM_LIMIT` / '
       + '`FILTER_MAX_CANDIDATES` 改为从 `thresholds.ts` 导入并 re-export，三处字面量换成名字。'
       + '行为零变化（`v246` 静态断言 + 既有的 v205/v207/v212 数字断言全部仍绿）。'
+      + '**同一批次紧接着 TD-M7：1085 → 1127（+42）**：`scoreDocuments` 里一次领域判定与一次乘权、'
+      + '`hitOf` 一行携带、`renderHint` 一行前缀，以及两处解释「为什么判据在叶层、调用方传词」的注释。'
+      + '**这是新增判定，不是搬家** —— 与上面那 7 行性质不同，所以分开记。'
       + '层账（由 `node scripts/retrieve-report.mjs` 的「层账」一节算，不手抄）：旧值 1074 行时'
       + '搬完 L1+L2+L3 是 689 行，**已经 ≤ 800**；再搬 L0（335）只剩 354 —— '
       + '那 354 行是 import / re-export / 文件头注释 / 空行，不是可搬的声明。'

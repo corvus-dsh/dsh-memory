@@ -82,6 +82,14 @@ export interface MemoryHit {
   commitDrift?: boolean
   /** v0.32 P1: what the current checkout is at, for the hint's wording. */
   currentCommit?: string
+  /**
+   * ── TD-M7: this negative shares NO word with the current task ────────────────────────────────
+   *
+   * Computed ONCE where the task terms are known (scoring), then CARRIED on the hit. The D-1
+   * lesson is why: recomputing it in `renderHint` from `title`/`detail` would be a second copy of
+   * one decision, free to disagree with the score that was actually applied.
+   */
+  domainMismatch?: boolean
 }
 
 export interface Document {
@@ -152,6 +160,8 @@ export interface Scored {
   /** v0.32 P1: set when the skill's commit no longer matches the checkout. */
   commitDrift?: boolean
   currentCommit?: string
+  /** TD-M7: a negative whose words share nothing with the current task (down-weighted). */
+  domainMismatch?: boolean
 }
 
 export interface WorkspaceGate {
