@@ -126,12 +126,24 @@ const HISTORICAL = new Set([
  */
 const EXEMPT = new Map([
   ['index.ts', {
-    ceiling: 2298,
+    /**
+     * ── 2026-11-18（B3 / F6）2298 → 2467：一次**有理由的增长**，不是棘轮的例外 ────────────────────
+     *
+     * 新增的是 `memory_contribute` 工具（schema + 四条边界：nodeId 必须存在、author 是图级参数、
+     * 只覆盖 skill/negative、被拒不许留半份数据）与 `memory_stats.flywheel` 的三个数。这两块都在
+     * `applyInner` 的闭包里，直接使用 `resolved` / `readGraph` / `writeKnowledge` / `markHarvested`；
+     * 抽成模块要先把这四个依赖改成注入，是本轮之外的一次重构（TD-1 的同一件事）。
+     *
+     * 天花板的规则是「今天多大就是多大」，所以它必须跟着实测走；不允许的是**留虚高配额**（实测 1900
+     * 却登记 2009）。这一条下次仍按实测收紧，不因为「这次是加功能」就放宽。
+     */
+    ceiling: 2467,
     reason:
       'dsh-memory 的插件入口：applyInner 一个函数 1362 行（占 58%），加上工具注册、console 网络端、'
       + 'harvest 编排与 33 个导出。它是整个重构的**目标文件**，拆它需要先拆它依赖的 store/retrieve'
       + '（已完成 store 的 A1；retrieve 尚未开始）。在拆完之前把它排除在门禁之外等于开一个 2361 行的洞，'
-      + '所以登记为天花板：尺寸可见、不可增长。',
+      + '所以登记为天花板：尺寸可见、不可增长。'
+      + '（2026-11-18 B3/F6：2467，因 memory_contribute + flywheel 落进同一个闭包；理由见上方注释。）',
   }],
   ['retrieve.ts', {
     ceiling: 1078,

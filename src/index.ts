@@ -45,6 +45,12 @@ import {
   updateGraph,
 } from './graph.js'
 import { graphUpdateTool } from './graph-tool.js'
+/**
+ * v0.40 (B3 / F6): `asAuthor` is the SAME validator `constrain` uses, so "who counts as an author" has
+ * one answer across both graph-level tools. Importing it here rather than writing a second shape check
+ * is ㉛ applied to ourselves.
+ */
+import { asAuthor } from './graph-v3.js'
 
 /**
  * v0.32 — THE STORE'S WRITE SURFACE, re-exported for the causal layer's tests and for any consumer that
@@ -1159,6 +1165,37 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
           ...(visibility.note === '' ? {} : { visibilityNote: visibility.note }),
         }
       })(),
+      /**
+       * ── v0.40 (B3 / F6): THE FLYWHEEL, AS NUMBERS THAT MUST EXPLAIN EACH OTHER ─────────────────
+       *
+       * Until B3 the flywheel had a REMINDER but no ENTRANCE: the warning told a model to harvest, and
+       * the only tool that could do it was `knowledge_harvest`, which knows nothing about which node a
+       * lesson came from. `memory_contribute` closes the loop by naming the node.
+       *
+       *   harvestedNodes  finished nodes that already contributed
+       *   pendingNodes    finished nodes that have NOT — what the reminder counts
+       *   contributed     entries the knowledge base holds, by kind
+       *
+       * A reader who cannot check `pendingNodes` against the reminder cannot tell a working flywheel
+       * from one that is merely quiet.
+       */
+      flywheel: (() => {
+        const graph = readGraph(resolved.memoryDir)
+        const finished = graph.nodes.filter((node) => node.status === 'done' && node.id !== START_NODE_ID)
+        const harvestedNodes = finished.filter((node) => node.harvestedAt.length > 0).length
+        const pendingNodes = finished.filter((node) => node.harvestedAt.length === 0).length
+        const knowledge = readKnowledge(resolved.knowledgeDir)
+        return {
+          contributed: knowledge.length,
+          byKind: {
+            skill: knowledge.filter((entry) => entry.kind === 'skill').length,
+            negative: knowledge.filter((entry) => entry.kind === 'negative').length,
+          },
+          harvestedNodes,
+          pendingNodes,
+          totalFinishedNodes: finished.length,
+        }
+      })(),
       // v0.18: so the console can say WHY nothing was harvested after a version
       // change instead of showing an empty ledger that looks like "no sessions".
       ledger: (() => {
@@ -1437,6 +1474,138 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
         knowledgeDir: resolved.knowledgeDir,
         workspace,
         ...(harvested.length === 0 ? {} : { harvestedNodes: harvested }),
+      }
+    },
+  })
+
+  ctx.tools?.register({
+    name: 'memory_contribute',
+    description:
+      'Contribute ONE piece of knowledge from a NAMED task-graph node, and stamp that node as harvested. ' +
+      'Same write path as knowledge_harvest — this is the "I know which node this came from" door, so the ' +
+      'record has an owner. Facts are NOT accepted: they are written by the extraction pipeline into ' +
+      'facts.jsonl, and a second writer there would be two truths for one record.',
+    parameters: {
+      type: 'object',
+      properties: {
+        nodeId: { type: 'string', description: 'The graph node this knowledge came from. Must exist.' },
+        kind: { type: 'string', enum: ['skill', 'negative'] },
+        title: { type: 'string' },
+        body: { type: 'string' },
+        tags: { type: 'array', items: { type: 'string' } },
+        applicable_node_types: { type: 'array', items: { type: 'string' } },
+        /** Graph-level, exactly like `constrain`: WHO is contributing. Not a node field. */
+        author: { type: 'object', description: '{ kind, sessionId, generation, attempt }' },
+        reason: { type: 'string' },
+      },
+      required: ['nodeId', 'kind', 'title', 'author'],
+      additionalProperties: false,
+    },
+    output: textOutput(),
+    execute: async (args: Record<string, unknown> = {}, exec?: { agent?: { id?: string } }) => {
+      const nodeId = typeof args.nodeId === 'string' ? args.nodeId.trim().toLowerCase() : ''
+      /**
+       * ── BOUNDARY 1: THE KNOWLEDGE NEEDS AN OWNER ──────────────────────────────────────────────
+       *
+       * A contribution that cannot name its node is an ownerless record: nobody can answer "why does
+       * this exist" later, which is the whole reason the graph and the knowledge base are linked. So
+       * the node must be named AND exist — a typo must not silently create a second kind of record.
+       */
+      if (nodeId.length === 0) {
+        return { ok: false, code: 'INVALID_FIELD', reason: 'memory_contribute 需要 nodeId（这条知识来自哪个节点）' }
+      }
+      const graph = readGraph(resolved.memoryDir)
+      const node = graph.nodes.find((candidate) => candidate.id === nodeId)
+      if (node === undefined) {
+        return {
+          ok: false,
+          code: 'NODE_NOT_FOUND',
+          reason: `没有节点 ${nodeId}；这条知识必须挂在一个真实存在的节点上，否则它没有主人`,
+        }
+      }
+      /**
+       * ── BOUNDARY 2: THE AUTHOR IS GRAPH-LEVEL ──────────────────────────────────────────────────
+       *
+       * Identical rule and identical code to `constrain` (B2-T1c): the author names WHO is editing the
+       * plan, so it belongs at the top level, never inside the node. `asAuthor` is the same validator,
+       * so "who counts as an author" has one answer.
+       */
+      const author = asAuthor(args.author, () => new Date().toISOString())
+      if (author === undefined) {
+        return {
+          ok: false,
+          code: 'MISSING_AUTHOR',
+          reason:
+            'memory_contribute 需要 author（谁提交的这条知识）：{ kind, sessionId, generation, attempt }。' +
+            '它是图级参数，不是节点字段 —— 与 constrain 同规矩。',
+        }
+      }
+      /**
+       * ── BOUNDARY 3/4: ONE WRITE, AND ONLY A REAL WRITE COUNTS ─────────────────────────────────
+       *
+       * `writeKnowledge` is the SAME function `knowledge_harvest` uses: one write path, two doors. A
+       * second implementation would be ㉛'s second door with the guards left behind.
+       *
+       * The node is stamped only when something was actually written or merged. A refused entry that
+       * still stamped the node would silence the reminder without answering it — the failure the
+       * harvest warning exists to prevent.
+       */
+      const kind = args.kind === 'negative' ? ('negative' as const) : args.kind === 'skill' ? ('skill' as const) : undefined
+      if (kind === undefined) {
+        return {
+          ok: false,
+          code: 'INVALID_FIELD',
+          reason:
+            'kind 只能是 skill 或 negative。fact 不在其列：事实由抽取管线写进 facts.jsonl，' +
+            '在这里再开一条写路径会让同一条记录有两个写者（㉛）。',
+        }
+      }
+      const title = typeof args.title === 'string' ? args.title.trim() : ''
+      if (title.length === 0) {
+        return { ok: false, code: 'INVALID_FIELD', reason: 'title 不能为空' }
+      }
+
+      const workspace =
+        sessionWorkspaceOf(typeof exec?.agent?.id === 'string' ? exec.agent.id : '') || currentWorkspaceOf(undefined)
+      const result = writeKnowledge(
+        resolved.knowledgeDir,
+        [
+          {
+            id: typeof args.id === 'string' ? args.id : `contributed-${nodeId}-${Date.now().toString(36)}`,
+            kind,
+            title,
+            when: typeof args.reason === 'string' ? args.reason : undefined,
+            body: typeof args.body === 'string' ? args.body : undefined,
+            tags: args.tags,
+            applicableNodeTypes: args.applicable_node_types ?? args.applicableNodeTypes,
+            evidence: [nodeId],
+          },
+        ],
+        { workspace },
+      )
+      const recorded = result.written + result.merged
+      if (recorded === 0) {
+        /**
+         * NOTHING LANDED ⇒ NOTHING IS STAMPED. Reported rather than swallowed: the caller must be able
+         * to tell "you contributed" from "your contribution was refused", and a silent no-op here
+         * would leave the node un-harvested with no explanation anywhere.
+         */
+        return {
+          ok: false,
+          code: 'INVALID_FIELD',
+          reason: '这条知识没有落盘（形状被拒）；节点不会被盖 harvestedAt，提醒会继续响',
+          ...result,
+        }
+      }
+      const harvested = markHarvested(resolved.memoryDir, [nodeId])
+      return {
+        ok: true,
+        ...result,
+        knowledgeDir: resolved.knowledgeDir,
+        workspace,
+        nodeId,
+        author,
+        harvestedNodes: harvested,
       }
     },
   })

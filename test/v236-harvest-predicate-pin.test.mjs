@@ -32,18 +32,21 @@ const SOURCE = readFileSync(join(REPO, 'src', 'index.ts'), 'utf8')
 /** The predicate, as one exact string — the thing whose existence this file exists to guarantee. */
 const PREDICATE = 'node.harvestedAt.length === 0'
 
-test('v236 ①: 「未提炼」判据在三处读取面都还在（completion 提示 / 列表 / harvestWarningFor）', () => {
+test('v236 ①: 「未提炼」判据在四处读取面都还在（completion 提示 / 列表 / harvestWarningFor / flywheel）', () => {
   const occurrences = SOURCE.split(PREDICATE).length - 1
   /**
-   * Three, and the number matters: the predicate is read from three different surfaces (the warning
-   * builder, the node listing, and `harvestWarningFor`). A refactor that keeps only one of them
-   * leaves the other two reporting a finished node as harvested — the same silent zero, one layer
-   * down.
+   * FOUR, as of v0.40 (B3 / F6), and the change is recorded here rather than absorbed silently:
    *
-   * If this count changes because a surface was REMOVED on purpose, update this number and say why in
+   *   ① the completion prompt   ② the node listing   ③ `harvestWarningFor`   ④ the flywheel count
+   *
+   * ④ is new: `memory_stats.flywheel.pendingNodes` answers the same question the reminder answers
+   * ("which finished nodes have not contributed"), so it must use the same predicate. A count derived
+   * some other way would be a second definition of "un-harvested", and the two would drift.
+   *
+   * If this number changes again because a surface was REMOVED on purpose, update it and say why in
    * the commit; do not delete the assertion.
    */
-  assert.equal(occurrences, 3, `判据必须仍在三处，实测 ${occurrences} 处`)
+  assert.equal(occurrences, 4, `判据必须仍在四处，实测 ${occurrences} 处`)
 })
 
 test('v236 ②: 判据没有被换成字面 false（can-red 的形状）', () => {
