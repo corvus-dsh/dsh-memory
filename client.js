@@ -1459,6 +1459,36 @@ window.__ModuleLoader__.load({
                 h('tbody', { key: 'tb' }, shown.map(skillRow)),
               ]),
         ]),
+        /**
+         * ── v0.45 (B4-0b-1 C-6 ③): 飞轮读数 ─────────────────────────────────────────────────────
+         *
+         * The tool reported these numbers and the panel showed NONE of them (measured: zero hits for
+         * 飞轮 in this file), so "is the knowledge loop turning?" could only be answered by asking the
+         * model. The numbers come from the Host (`memoryConsoleState` → the SAME `flywheelStatsOf`
+         * that `memory_stats` uses), never recomputed here — a second computation is how the panel and
+         * the tool start disagreeing about one store.
+         */
+        h('div', { key: 'flywheel', className: 'mc-card' }, [
+          h('h3', { key: 'h', className: 'mc-h' }, '飞轮（知识回流）'),
+          state === null || state === undefined || state.flywheel === undefined
+            ? h('p', { key: 's', className: 'mc-sub' }, '正在读取…')
+            : (() => {
+                const fly = state.flywheel || {}
+                const kind = fly.byKind || {}
+                const finished = num0(fly.totalFinishedNodes)
+                const pending = num0(fly.pendingNodes)
+                return [
+                  h('p', { key: 'c', className: 'mc-sub', style: { margin: '0 0 6px' } },
+                    `已贡献 ${num0(fly.contributed)} 条（技能 ${num0(kind.skill)} / 负知识 ${num0(kind.negative)}）` +
+                      ` · 已完成节点 ${finished}（已提炼 ${num0(fly.harvestedNodes)}，待提炼 ${pending}）`),
+                  pending > 0
+                    ? h('p', { key: 'p', className: 'mc-sub', style: { color: '#b45309', margin: 0 } },
+                        `有 ${pending} 个已完成节点还没有贡献过知识 —— 这是「飞轮空转」的唯一读数，` +
+                          '不是失败：下一次 harvest 会提示，也可以用 memory_contribute 指定节点写一条。')
+                    : h('p', { key: 'p', className: 'mc-sub', style: { margin: 0 } }, '没有待提炼的已完成节点。'),
+                ]
+              })(),
+        ]),
         h('div', { key: 'ledger', className: 'mc-card' }, [
           h('h3', { key: 'h', className: 'mc-h' }, '台账状态（交接来源）'),
           // v0.23: `ledger` is a local guard now, and `ledger.epoch` is assumed to

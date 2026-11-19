@@ -39,7 +39,7 @@ import type { ExtractedSkill } from '../extract.js'
 import { replaceEdges } from '../edges.js'
 import { commitLedger } from '../ledger-cache.js'
 import { invalidateSkillDocs } from '../skill-cache.js'
-import { acquireFileLock } from '../lock.js'
+import { acquireFileLock, withFileLock } from '../lock.js'
 import { normalizeWorkspace } from '../workspace.js'
 import { atomicWrite, readJsonl, readJsonlFresh } from './io.js'
 import {
@@ -552,15 +552,25 @@ export function touchSkillUsage(skillsDir: string, name: string, at?: string): b
   const path = skillPath(skillsDir, name)
   if (!existsSync(path)) return false
   try {
-    let text = readFileSync(path, 'utf8')
-    const stamp = at ?? new Date().toISOString()
-    text = /^last_used:/mu.test(text)
-      ? text.replace(/^last_used:.*$/mu, `last_used: ${stamp}`)
-      : text.replace(/^(name:.*)$/mu, `$1\nlast_used: ${stamp}`)
-    atomicWrite(path, text)
-    /** v1.1.0: a usage stamp changes last_used/decay, which retrieval derives from. */
-    invalidateSkillDocs(skillsDir)
-    return true
+    /**
+     * ── v0.44 (B4-0b-1 A9): LOCK, THEN RE-READ ─────────────────────────────────────────────────
+     *
+     * `touchSkillUsage` is a one-line rewrite, which is exactly the form that loses the most: two
+     * windows stamp `last_used` at the same moment, the later write wins, and the other's evidence of
+     * use disappears while both return `true`. Re-reading INSIDE the lock is the part that matters —
+     * a lock around a stale in-hand text would still write the stale text.
+     */
+    return withFileLock(`${path}.lock`, () => {
+      let text = readFileSync(path, 'utf8')
+      const stamp = at ?? new Date().toISOString()
+      text = /^last_used:/mu.test(text)
+        ? text.replace(/^last_used:.*$/mu, `last_used: ${stamp}`)
+        : text.replace(/^(name:.*)$/mu, `$1\nlast_used: ${stamp}`)
+      atomicWrite(path, text)
+      /** v1.1.0: a usage stamp changes last_used/decay, which retrieval derives from. */
+      invalidateSkillDocs(skillsDir)
+      return true
+    })
   } catch {
     return false
   }
@@ -603,22 +613,33 @@ export function applySkillFeedback(
       continue
     }
     try {
-      let text = readFileSync(path, 'utf8')
-      const previous = clampConfidence(text.match(/^confidence:\s*(.+)$/mu)?.[1])
-      const next = outcome === 'positive' ? Math.min(1, Math.round((previous + 0.05) * 100) / 100) : Math.max(0.2, Math.round((previous - 0.1) * 100) / 100)
-      text = /^confidence:/mu.test(text)
-        ? text.replace(/^confidence:.*$/mu, `confidence: ${next.toFixed(2)}`)
-        : text.replace(/^(name:.*)$/mu, `$1\nconfidence: ${next.toFixed(2)}`)
-      text = /^last_feedback:/mu.test(text)
-        ? text.replace(/^last_feedback:.*$/mu, `last_feedback: ${outcome}`)
-        : text.replace(/^(name:.*)$/mu, `$1\nlast_feedback: ${outcome}`)
-      if (outcome === 'positive') {
-        // Confirmed in use = validated now; this restarts the decay clock.
-        text = /^last_validated:/mu.test(text)
-          ? text.replace(/^last_validated:.*$/mu, `last_validated: ${stamp}`)
-          : text.replace(/^(name:.*)$/mu, `$1\nlast_validated: ${stamp}`)
-      }
-      atomicWrite(path, text)
+      /**
+       * ── v0.44 (A9): same lock, same reason as `touchSkillUsage` ─────────────────────────────────
+       *
+       * Feedback is a read→clamp→write on `confidence` / `last_feedback` / `last_validated`. Two
+       * windows confirming the same skill is the ordinary case (the same skill is recalled in both),
+       * and without the lock one of the two confirmations silently vanishes — the skill keeps a lower
+       * confidence than the evidence supports, and nothing anywhere says so.
+       */
+      const next = withFileLock(`${path}.lock`, () => {
+        let text = readFileSync(path, 'utf8')
+        const previous = clampConfidence(text.match(/^confidence:\s*(.+)$/mu)?.[1])
+        const nextConfidence = outcome === 'positive' ? Math.min(1, Math.round((previous + 0.05) * 100) / 100) : Math.max(0.2, Math.round((previous - 0.1) * 100) / 100)
+        text = /^confidence:/mu.test(text)
+          ? text.replace(/^confidence:.*$/mu, `confidence: ${nextConfidence.toFixed(2)}`)
+          : text.replace(/^(name:.*)$/mu, `$1\nconfidence: ${nextConfidence.toFixed(2)}`)
+        text = /^last_feedback:/mu.test(text)
+          ? text.replace(/^last_feedback:.*$/mu, `last_feedback: ${outcome}`)
+          : text.replace(/^(name:.*)$/mu, `$1\nlast_feedback: ${outcome}`)
+        if (outcome === 'positive') {
+          // Confirmed in use = validated now; this restarts the decay clock.
+          text = /^last_validated:/mu.test(text)
+            ? text.replace(/^last_validated:.*$/mu, `last_validated: ${stamp}`)
+            : text.replace(/^(name:.*)$/mu, `$1\nlast_validated: ${stamp}`)
+        }
+        atomicWrite(path, text)
+        return nextConfidence
+      })
       updated.push({ name, outcome, confidence: next })
     } catch {
       missing.push(name)

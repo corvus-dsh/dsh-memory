@@ -46,7 +46,16 @@ function writeSkill(skillsDir, name, { generation, lastUsed = '', sources = 1 })
       'provenance: tool',
       'evidence: sess-a@1',
       `sources: ${sources}`,
-      ...(lastUsed.length === 0 ? [] : [`last_used: ${lastUsed}`]),
+      /**
+       * ── A10 (B4-0b-1) CHANGED WHAT THIS LINE HAS TO BE ─────────────────────────────────────────
+       *
+       * `renderSkill` now writes `last_used:` EMPTY for a brand-new skill (created ≠ used), and
+       * `documents.ts` distinguishes "field present but empty" (a real FALSE — eligible for downgrade)
+       * from "field absent" (an old file — UNKNOWN, never downgraded). This fixture used to OMIT the
+       * line for a never-used skill, which under the new rule is the OLD-file shape; the never-used
+       * skill this file means to build is the present-and-empty one. `v254 ③` pins the absent case.
+       */
+      `last_used: ${lastUsed}`,
       ...(generation === undefined ? [] : [`generation: ${generation}`]),
       'valid_at: 2026-01-01',
       '---',
