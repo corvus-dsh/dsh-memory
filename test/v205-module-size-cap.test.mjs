@@ -143,14 +143,18 @@ const EXEMPT = new Map([
      * 天花板的规则是「今天多大就是多大」，所以它必须跟着实测走；不允许的是**留虚高配额**（实测 1900
      * 却登记 2009）。这一条下次仍按实测收紧，不因为「这次是加功能」就放宽。
      */
-    ceiling: 2531,
+    ceiling: 2606,
     reason:
       'dsh-memory 的插件入口：applyInner 一个函数 1362 行（占 58%），加上工具注册、console 网络端、'
       + 'harvest 编排与 33 个导出。它是整个重构的**目标文件**，拆它需要先拆它依赖的 store/retrieve'
       + '（已完成 store 的 A1；retrieve 尚未开始）。在拆完之前把它排除在门禁之外等于开一个 2361 行的洞，'
       + '所以登记为天花板：尺寸可见、不可增长。'
       + '（2026-11-18 B3/F6：2467，因 memory_contribute + flywheel 落进同一个闭包；B3 收口/TD-M6：'
-      + '2478，`DEFAULT_RETRIEVAL_FLOOR` 改为从 thresholds.ts 取值；理由见上方注释。）',
+      + '2478，`DEFAULT_RETRIEVAL_FLOOR` 改为从 thresholds.ts 取值；理由见上方注释。'
+      + '**B4-0a②：2606（+128）**：`forgetSkill` 从「join → rmSync(recursive)」改成「同一份 name 校验 + '
+      + '改名进 `_quarantine-<ts>/` + 三种结局都写审计行」，并因此多一个 `memoryDir` 参数与一个带 '
+      + '`reason` / `quarantinedTo` 的返回体；工具面把这三样都回显。删掉的那条递归删除本身就是零行的，'
+      + '所以这 128 行全是**判据与回执**，不是新机制。）',
   }],
   ['retrieve.ts', {
     ceiling: 1181,
@@ -194,12 +198,15 @@ const EXEMPT = new Map([
      *
      * 这是**修复**，不是膨胀：棘轮按实测收紧到 999（它仍然只能降）。
      */
-    ceiling: 999,
+    ceiling: 1023,
     reason:
       'A1 的产物：SKILL.md 的读与写两半现在同处一文件（renderSkill/parseSkillFile 共用一个格式契约，'
       + '分开住会让读者与写者漂移）。985 行里约 150 行是分步搬移时写的分节说明注释。'
       + '若将来要压到 800 以内，第一步是精简那些注释，第二步才是拆分（拆分会重新引入格式契约分裂的风险）。'
-      + '（2026-11-18 TD-M1：985 → 999，`readSkillValidity` 的空字段跨行缺陷修复，见上方注释。）',
+      + '（2026-11-18 TD-M1：985 → 999，`readSkillValidity` 的空字段跨行缺陷修复，见上方注释。'
+      + '**B4-0a②：999 → 1023（+24）**：`assertSafeSkillName` 搬到这里成为**唯一**的 name 判据'
+      + '（`readSkillBody` 与 `forgetSkill` 共用；两份守卫是「读的安全、删的不安全」的由来），'
+      + '并附带它为什么必须返回原因而不是抛异常。这是判据，不是新机制。）',
   }],
 ])
 

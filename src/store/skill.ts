@@ -35,6 +35,30 @@ export function skillPath(skillsDir: string, name: string): string {
 }
 
 /**
+ * ── B4-0a②: IS THIS A LEGAL SKILL NAME? (one answer, used by BOTH the reader and the deleter) ──
+ *
+ * The read path has always refused to escape `skillsDir` (`readSkillBody`). The DELETE path did not:
+ * `forgetSkill` joined the tool's raw `name` and ran `rmSync(recursive: true)`, so `name: '../..'`
+ * deleted a directory the caller never named — a path traversal with a recursive delete at the end
+ * of it.
+ *
+ * The rule lives here, once, because two copies of one guard is how the weaker copy survives: the
+ * reader was safe and the deleter was not, and nothing compared them.
+ *
+ * Returns `undefined` when the name is safe, or a short reason when it is not (never throws: a
+ * refusal is a value the caller must report, not an exception that can escape into a tool boundary).
+ */
+export function assertSafeSkillName(name: string): string | undefined {
+  if (typeof name !== 'string' || name.trim().length === 0) return 'empty name'
+  if (name.includes('/') || name.includes('\\')) return 'path separator'
+  if (name.includes('..')) return 'parent reference'
+  if (name.includes(':')) return 'absolute or drive path'
+  /** A skill name is a directory name: NUL and control characters have no business in it. */
+  if (/[\u0000-\u001f]/u.test(name)) return 'control character'
+  return undefined
+}
+
+/**
  * v0.8: the recorded workspace of an on-disk SKILL.md, canonicalized. Empty means
  * the file predates the isolation guard (or was written without provenance), and
  * retrieval treats that as "cannot prove it belongs here" — refused unless the
@@ -968,7 +992,7 @@ function parseEvidenceList(raw: string, field: string): Array<{ sourceSessionId:
 export function readSkillBody(skillsDir: string, name: string): SkillBody | undefined {
   // The name is a directory under skillsDir; refuse anything that could escape it.
   if (typeof name !== 'string' || name.length === 0) return undefined
-  if (name.includes('/') || name.includes('\\') || name.includes('..')) return undefined
+  if (assertSafeSkillName(name) !== undefined) return undefined
   const path = skillPath(skillsDir, name)
   let text = ''
   try {

@@ -43,7 +43,7 @@ import { equal, deepEqual } from 'node:assert'
 const EXPECTED_BUSINESS_NAMES = [
   'AUDIT_KEEP', 'AUDIT_ROTATE_BYTES', 'MAX_LAYER_RECORDS', 'MAX_NEGATIVES', 'NEGATIVE_ARCHIVE_FILE',
   'StoreWriteRejected', 'appendExperiences', 'appendFacts', 'appendMemoryAudit', 'appendNegatives',
-  'applySkillFeedback', 'applySupersede', 'asVocab', 'atomicWrite', 'clampConfidence',
+  'applySkillFeedback', 'applySupersede', 'asVocab', 'assertSafeSkillName', 'atomicWrite', 'clampConfidence',
   'clearSkillShapeCache', 'conflictStrength', 'defaultSkillsDir', 'environmentDivergence',
   'environmentTokensOf', 'findConflicts', 'invalidateSkillShape', 'isConflictingSkill', 'isProcessed',
   'isValidAt', 'linkConflictBack', 'listSkillRecords', 'markProcessed', 'markSkillValidated',
@@ -54,7 +54,7 @@ const EXPECTED_BUSINESS_NAMES = [
   'touchSkillUsage', 'writeSkill',
 ]
 
-const EXPECTED_BUSINESS_COUNT = 51
+const EXPECTED_BUSINESS_COUNT = 52
 
 /**
  * 已登记接缝：名字 → 为什么必须从 `store.js` 导出。

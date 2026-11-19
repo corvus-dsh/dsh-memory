@@ -10,7 +10,7 @@
  * ONE sentence; it is a hint, never a gate.
  */
 
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -27,7 +27,7 @@ import { applySkillArchive, listSkillSummaries, planSkillArchive, DEFAULT_SKILL_
 /** TD-M6: the recall floor's value — imported from its ONE home, never declared here. */
 import { FLOOR } from './thresholds.js'
 import { currentWorkspaceOf, memoryAllowsWorkspace, workspaceOfSession } from './workspace.js'
-import { applySupersede, listSkillRecords, quarantineWorkspaceMemory, readSkillBody } from './store.js'
+import { appendMemoryAudit, applySupersede, assertSafeSkillName, listSkillRecords, quarantineWorkspaceMemory, readSkillBody } from './store.js'
 import { installLedgerExitFlush, startLedgerFlushTimer } from './ledger-cache.js'
 import {
   defaultKnowledgeDir,
@@ -915,11 +915,72 @@ export function searchSkills(skillsDir: string, query: string, limit = 5): Array
   return hits.slice(0, limit)
 }
 
-export function forgetSkill(skillsDir: string, name: string): boolean {
+/**
+ * ── B4-0a②: FORGET IS A QUARANTINE, NOT A RECURSIVE DELETE ─────────────────────────────────────
+ *
+ * The audit's P0: `name: '../..'` used to delete a directory the caller never named. Three changes,
+ * and each one is load-bearing:
+ *
+ *   1. the name is validated by the SAME `assertSafeSkillName` the read path uses (one guard, one
+ *      answer — the reader was safe and the deleter was not, which is exactly how two copies of a
+ *      guard drift);
+ *   2. the directory is RENAMED into `<memoryDir>/_quarantine-<stamp>/` instead of deleted, so a
+ *      mistaken forget is recoverable by moving it back — the same "archived, never deleted" rule
+ *      the skill archive already follows;
+ *   3. every path — including a REFUSAL — writes an audit line. README claimed forget was
+ *      「显式、可审计」 while the function wrote nothing; that sentence is now backed by the ledger.
+ */
+export function forgetSkill(
+  skillsDir: string,
+  memoryDir: string,
+  name: string,
+): { removed: boolean; reason?: string; quarantinedTo?: string } {
+  const unsafe = assertSafeSkillName(name)
+  if (unsafe !== undefined) {
+    appendMemoryAudit(memoryDir, {
+      at: new Date().toISOString(),
+      kind: 'forget-refused',
+      loser: name,
+      reason: unsafe,
+      source: 'forgetSkill',
+    })
+    return { removed: false, reason: `unsafe name: ${unsafe}` }
+  }
   const path = join(skillsDir, name)
-  if (!existsSync(path)) return false
-  rmSync(path, { recursive: true, force: true })
-  return true
+  if (!existsSync(path)) {
+    appendMemoryAudit(memoryDir, {
+      at: new Date().toISOString(),
+      kind: 'forget-refused',
+      loser: name,
+      reason: 'not found',
+      source: 'forgetSkill',
+    })
+    return { removed: false, reason: 'not found' }
+  }
+  const quarantine = join(memoryDir, `_quarantine-${new Date().toISOString().replace(/[:.]/gu, '-')}`)
+  try {
+    mkdirSync(quarantine, { recursive: true })
+    const destination = join(quarantine, name)
+    renameSync(path, destination)
+    appendMemoryAudit(memoryDir, {
+      at: new Date().toISOString(),
+      kind: 'forget',
+      winner: name,
+      loser: destination,
+      reason: 'quarantined (recoverable: move the directory back)',
+      source: 'forgetSkill',
+    })
+    return { removed: true, quarantinedTo: destination }
+  } catch (error) {
+    appendMemoryAudit(memoryDir, {
+      at: new Date().toISOString(),
+      kind: 'forget-refused',
+      loser: name,
+      reason: `quarantine failed: ${String((error as any)?.message ?? error)}`,
+      source: 'forgetSkill',
+    })
+    return { removed: false, reason: `quarantine failed: ${String((error as any)?.message ?? error)}` }
+  }
 }
 
 function lastUserText(messages: unknown): string | undefined {
@@ -1420,7 +1481,21 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
     description: 'Delete one stored skill by name. Explicit, auditable, never automatic.',
     parameters: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'], additionalProperties: false },
     output: textOutput(),
-    execute: async (args: { name: string }) => ({ removed: forgetSkill(resolved.skillsDir, String(args.name ?? '')) }),
+    execute: async (args: { name: string }) => {
+      /**
+       * ── B4-0a② ────────────────────────────────────────────────────────────────────────────────
+       *
+       * The return shape keeps `removed` (callers and tests read it) and ADDS the fact that was
+       * missing: a refusal now says WHY, and a deletion says WHERE the directory went. A `false`
+       * with no reason is the same silent failure the whole batch is about.
+       */
+      const outcome = forgetSkill(resolved.skillsDir, resolved.memoryDir, String(args.name ?? ''))
+      return {
+        removed: outcome.removed,
+        ...(outcome.reason === undefined ? {} : { reason: outcome.reason }),
+        ...(outcome.quarantinedTo === undefined ? {} : { quarantinedTo: outcome.quarantinedTo }),
+      }
+    },
   })
 
   /**

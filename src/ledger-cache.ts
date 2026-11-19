@@ -97,6 +97,19 @@ interface LedgerState {
    * See `commitLedger` for the durability window this implies.
    */
   walBuffer: string[]
+  /**
+   * ── B4-0a③: rows another process wrote that THIS flush found on disk and kept ───────────────
+   *
+   * The flush used to rewrite the main file from `records` — this process's snapshot — and then
+   * delete the WAL. Under the supported two-process deployment (two windows, one profile) that is
+   * a data-loss window: process B appends a row, process A's 5 s timer writes its stale array over
+   * it, B's row is gone after the persistence boundary, and the WAL that could have replayed it is
+   * deleted too. `NODE_TEST_CONTEXT` forces a flush per write, so the suite never saw it.
+   *
+   * The counter is reported (not silently absorbed): a merge means the two processes disagreed
+   * about the file, which is a fact an operator may need.
+   */
+  mergedOnLastFlush: number
 }
 
 const cache = new Map<string, LedgerState>()
@@ -161,7 +174,43 @@ export function flushLedger(path: string, force = false): boolean {
       /* the main rewrite below still makes the rows durable */
     }
   }
-  const body = state.records.length === 0 ? '' : `${state.records.map((record) => JSON.stringify(record)).join('\n')}\n`
+  const body = (() => {
+    /**
+     * ── B4-0a③: RE-READ BEFORE OVERWRITING ────────────────────────────────────────────────────
+     *
+     * Two facts decide this: (1) the main file is a SHARED file under a supported deployment, and
+     * (2) this function is the only writer that replaces it wholesale. So before the rewrite we
+     * check whether the file moved since our snapshot was taken; if it did, the rows we do not
+     * already hold are folded in (identity = the exact serialised row) instead of being erased.
+     *
+     * WHAT THIS DOES NOT SOLVE, stated rather than implied: two processes PATCHING the same row
+     * concurrently are still last-writer-wins, and both versions may survive as two rows. That is
+     * TD-M8's documented read-decide-write window, and closing it needs a lock, not a merge.
+     * Losing a whole row that another process wrote is a different, cheaper-to-fix failure — and
+     * this is about that one.
+     */
+    const external = statOr(path)
+    const changed =
+      external !== undefined && (external.mtimeMs !== state.mainMtimeMs || external.size !== state.mainSize)
+    state.mergedOnLastFlush = 0
+    if (changed) {
+      let onDisk: Array<Record<string, unknown>> = []
+      try {
+        onDisk = parseLines(readFileSync(path, 'utf8').replace(/\r\n/gu, '\n'))
+      } catch {
+        onDisk = []
+      }
+      const known = new Set(state.records.map((record) => JSON.stringify(record)))
+      const extras = onDisk.filter((record) => !known.has(JSON.stringify(record)))
+      if (extras.length > 0) {
+        /** Newest-first is how `readLedger` orders the file, so the extras go in at the front. */
+        state.records.unshift(...extras)
+        state.version += 1
+        state.mergedOnLastFlush = extras.length
+      }
+    }
+    return state.records.length === 0 ? '' : `${state.records.map((record) => JSON.stringify(record)).join('\n')}\n`
+  })()
   writeFileSync(path, body, 'utf8')
   try {
     rmSync(walPathOf(path), { force: true })
@@ -258,6 +307,8 @@ export function readLedger(path: string): LedgerSnapshot {
      */
     patchCount: (cache.get(path)?.patchCount ?? 0) + 1,
     walBuffer: [],
+    /** B4-0a③: a fresh load has not merged anything yet. */
+    mergedOnLastFlush: 0,
     /** After a reload the in-memory view matches what is on disk. */
     syncedWalBytes: walOnDisk,
   }
@@ -419,6 +470,8 @@ export function replaceRecords(path: string, records: ReadonlyArray<Record<strin
     version: (cache.get(path)?.version ?? 0) + 1,
     /** A wholesale replace invalidates every derived document. */
     patchCount: (cache.get(path)?.patchCount ?? 0) + 1,
+    /** B4-0a③: a replace is an intentional overwrite, not a merge of foreign rows. */
+    mergedOnLastFlush: 0,
   })
 }
 
@@ -462,6 +515,17 @@ export function ledgerVersion(path: string): number {
  */
 export function ledgerPatchCount(path: string): number {
   return cache.get(path)?.patchCount ?? 0
+}
+
+/**
+ * ── B4-0a③: rows the LAST flush found on disk and kept instead of overwriting ──────────────────
+ *
+ * Exported so the fact is testable and reportable: a non-zero value means another writer touched
+ * the file between this process's snapshot and its rewrite. Silently merging would hide a
+ * deployment-level disagreement; refusing to merge would lose a row. It does both loudly.
+ */
+export function lastFlushMergeCount(path: string): number {
+  return cache.get(path)?.mergedOnLastFlush ?? 0
 }
 
 /* ── background flush ─────────────────────────────────────────────────────────────────── */

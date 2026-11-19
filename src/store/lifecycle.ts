@@ -119,8 +119,12 @@ export interface MemoryAuditEntry {
    * `merge` is TD-M1's line: a compaction that moved evidence between two skills is as auditable
    * as an invalidation — "which record absorbed which, and what came with it" has to be answerable
    * from the ledger, not from a diff nobody kept.
+   *
+   * `forget` / `forget-refused` are B4-0a②: README claimed forget was 「显式、可审计」 while the
+   * function wrote nothing and deleted recursively. A refusal is as interesting as a deletion — it
+   * is the guard firing, and it is exactly the line an operator needs after a typo.
    */
-  kind: 'supersede' | 'supersede-refused' | 'merge'
+  kind: 'supersede' | 'supersede-refused' | 'merge' | 'forget' | 'forget-refused'
   winner?: string
   loser?: string
   reason?: string
