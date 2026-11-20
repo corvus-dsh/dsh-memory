@@ -60,13 +60,45 @@ export function assertSafeSkillName(name: string): string | undefined {
 }
 
 /**
+ * ── THE ONE FRONTMATTER FIELD READER (W1-9b / W5-2 升级) ────────────────────────────────────────
+ *
+ * `\s` MATCHES A NEWLINE. Written as `^key:\s*(.+)` with the `m` flag, an EMPTY field
+ * (`aliases:` with nothing after it — what a hand-edited file looks like, and what old code produced)
+ * lets `\s*` eat the line break and `(.+)` captures the NEXT line's `key: value`. The value then enters
+ * a real data path: A10 measured `supersedes:` coming back as `valid_at:,2026-01-01`, and W1-9b measured
+ * `aliases:` coming back as `tags: alpha`, which then propagated into every later merge.
+ *
+ * `[ \t]*` is the fix: a horizontal gap belongs to the field, a line break never does.
+ *
+ * ── WHY THIS IS A HELPER AND NOT A FIXED COPY ──────────────────────────────────────────────────
+ *
+ * A10 fixed five reads inside `readSkillValidity`. W1-9 then introduced a sixth copy of the same regex
+ * in `merge.ts` — corrected by the same review that found it. Twice is enough to conclude that the
+ * per-copy fix does not hold: the shape regrows wherever someone writes "just parse this one field".
+ *
+ * So the rule is `[ \t]*` in ONE place, and every caller goes through it. `test/v270` proves the
+ * behaviour; `scripts/check-frontmatter-reads.mjs` proves nobody wrote a new copy.
+ */
+export function readFrontmatterField(text: string, key: string): string {
+  return (text.match(new RegExp(`^${key}:[ \\t]*(.+)$`, 'mu'))?.[1] ?? '').trim()
+}
+
+/** The same read, split into a trimmed list on commas. Empty in ⇒ empty out (never the next line). */
+export function readFrontmatterList(text: string, key: string): string[] {
+  return readFrontmatterField(text, key)
+    .split(',')
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0)
+}
+
+/**
  * v0.8: the recorded workspace of an on-disk SKILL.md, canonicalized. Empty means
  * the file predates the isolation guard (or was written without provenance), and
  * retrieval treats that as "cannot prove it belongs here" — refused unless the
  * skill declares `scope: global`.
  */
 export function readSkillWorkspace(text: string): string {
-  return normalizeWorkspace(text.match(/^workspace:\s*(.+)$/mu)?.[1] ?? '')
+  return normalizeWorkspace(readFrontmatterField(text, 'workspace'))
 }
 
 /**
@@ -98,10 +130,9 @@ export function readSkillValidity(text: string): SkillValidity {
    * `valid_at:,2026-01-01` — two fields of the following lines, laundered into a real supersession
    * chain. A merge would then copy that invented chain onto the keeper.
    *
-   * `[ \t]*` is the fix: a horizontal gap belongs to the field, a line break never does.
+   * W1-9b: the reasoning moved into `readFrontmatterField` so there is ONE place to hold it.
    */
-  const read = (key: string): string =>
-    (text.match(new RegExp(`^${key}:[ \\t]*(.+)$`, 'mu'))?.[1] ?? '').trim()
+  const read = (key: string): string => readFrontmatterField(text, key)
   const provenanceText = read('provenance').toLowerCase()
   return {
     validAt: read('valid_at'),

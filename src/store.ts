@@ -116,7 +116,7 @@ export function defaultSkillsDir(): string {
  */
 export { scanThreat } from './threat.js'
 
-import { clampConfidence, environmentTokensOf, findConflicts, frontmatter, invalidateSkillShape, isConflictingSkill, listSkillFiles, methodSimilarity, normalizeSkill, parseEvidenceField, parseSkillFile, purposeTokens, readSkillValidity, readSkillWorkspace, renderSkill, skillPath, triggerSimilarity } from './store/skill.js'
+import { clampConfidence, environmentTokensOf, findConflicts, frontmatter, invalidateSkillShape, isConflictingSkill, listSkillFiles, methodSimilarity, normalizeSkill, parseEvidenceField, parseSkillFile, purposeTokens, readFrontmatterField, readFrontmatterList, readSkillValidity, readSkillWorkspace, renderSkill, skillPath, triggerSimilarity } from './store/skill.js'
 import type { EnvironmentDivergence, SkillBody, SkillConflict, SkillInput } from './store/skill.js'
 
 /**
@@ -130,7 +130,7 @@ import type { EnvironmentDivergence, SkillBody, SkillConflict, SkillInput } from
  * ⚠️ 用 `export { … }`（不带 from）复用上面的 import 绑定：
  * 若写 `export { … } from './store/skill.js'`，同一个名字就有两处来源绑定。
  */
-export { clampConfidence, environmentTokensOf, findConflicts, invalidateSkillShape, isConflictingSkill, normalizeSkill, parseSkillFile, readSkillValidity, readSkillWorkspace, skillPath }
+export { clampConfidence, environmentTokensOf, findConflicts, invalidateSkillShape, isConflictingSkill, normalizeSkill, parseSkillFile, readFrontmatterField, readFrontmatterList, readSkillValidity, readSkillWorkspace, skillPath }
 /**
  * A1-5：`SkillBody` 随 `readSkillBody` 进了 `store/skill.ts`。
  *

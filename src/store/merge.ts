@@ -43,7 +43,7 @@ import { getNeighbors, removeEdgesFor, writeEdge } from '../edges.js'
 import { invalidateSkillDocs } from '../skill-cache.js'
 import { appendMemoryAudit } from './lifecycle.js'
 import { atomicWrite } from './io.js'
-import { invalidateSkillShape, parseEvidenceField, readSkillValidity, skillPath } from './skill.js'
+import { invalidateSkillShape, parseEvidenceField, readFrontmatterList, readSkillValidity, skillPath } from './skill.js'
 
 export interface MergeResult {
   ok: boolean
@@ -100,18 +100,23 @@ const RECALL_FIELDS = [
   { key: 'counter_evidence', resultKey: 'counterEvidence' },
 ] as const
 
-/** Read one comma-joined frontmatter field as a trimmed, de-duplicated list. */
+/**
+ * Read one comma-joined frontmatter field as a trimmed, de-duplicated list.
+ *
+ * ── W1-9b: THIS WAS THE SIXTH COPY OF THE SAME REGEX, AND THAT IS THE REAL DEFECT ──────────────
+ *
+ * The first version of this function wrote `^${key}:\s*(.*)$`. `\s` matches a newline, so an EMPTY
+ * field (`aliases: ` with nothing after it — what a hand edit produces) swallowed the line break and
+ * `(.*)` captured the NEXT line. Reproduced through the shipped library: a keeper with `aliases: `
+ * followed by `tags: alpha` merged to `aliases: tags: alpha,<absorbed alias>` — a fake alias, in the
+ * recall text, propagating into every later merge.
+ *
+ * A10 had already fixed five copies of exactly this inside `readSkillValidity`, with a comment saying
+ * so. W1-9 then wrote a sixth. Twice is enough: the read now goes through `readFrontmatterList`, whose
+ * `[ \t]*` is the one place the rule lives.
+ */
 function frontmatterList(text: string, key: string): string[] {
-  const line = new RegExp(`^${key}:\\s*(.*)$`, 'mu').exec(text)
-  if (line === null) return []
-  return [
-    ...new Set(
-      String(line[1] ?? '')
-        .split(',')
-        .map((item) => item.trim())
-        .filter((item) => item.length > 0),
-    ),
-  ]
+  return [...new Set(readFrontmatterList(text, key))]
 }
 
 /** `sessionId@seq`, or `@seq` for a legacy ref with no session (which is still one identity). */

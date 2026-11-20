@@ -49,12 +49,26 @@ const EXPECTED_BUSINESS_NAMES = [
   'isValidAt', 'linkConflictBack', 'listSkillRecords', 'markProcessed', 'markSkillValidated',
   'memoryAuditPath', 'mergeSkills', 'migrateBareEvidence', 'monotonicTimestamp', 'normalizeSkill', 'parseInstant',
   'parseSkillFile', 'planNegativeArchive', 'processedKey', 'quarantineWorkspaceMemory',
+  'readFrontmatterField', 'readFrontmatterList',
   'readProcessed', 'readSkillBody', 'readSkillValidity', 'readSkillWorkspace', 'rebuildConflictLinks',
   'recordCounterEvidence', 'rotateAuditIfNeeded', 'scanThreat', 'skillPath', 'stats',
   'touchSkillUsage', 'writeSkill',
 ]
 
-const EXPECTED_BUSINESS_COUNT = 52
+/**
+ * ── W1-9b: 业务面 52 → 54，新增两个名字，理由是「它们必须能被测试直接驱动」 ─────────────────────
+ *
+ * `readFrontmatterField` / `readFrontmatterList` 是 frontmatter 读取的**唯一合法入口**。
+ * 它们之所以必须在业务面上，不是为了让调用方方便，而是因为判据本身是关于**它们的行为**的：
+ *
+ *   · `v270 ③` 断言「字段为空 + 下一行非空 ⇒ 返回空列表」，这是唯一能钉住 `\s*` 那个 bug 的形态；
+ *   · `scripts/check-frontmatter-reads.mjs` 断言「别处不许再写第 36 份副本」——它检查的是
+ *     helper 的**函数体**，而不是一个恰好叫这个名字的字符串。
+ *
+ * 如果把它们藏成内部私有函数，就只能靠间接推断（读某个更高层的输出），而那种断言在「读取器
+ * 忽略该字段」时会照样通过 —— 这正是 `v269 ④` 已经拒绝过的形状。
+ */
+const EXPECTED_BUSINESS_COUNT = 54
 
 /**
  * 已登记接缝：名字 → 为什么必须从 `store.js` 导出。
