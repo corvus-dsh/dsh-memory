@@ -34,6 +34,7 @@
     "check": "node scripts/build.mjs && node scripts/check-cycles.mjs && node scripts/run-gate.mjs scripts/type-budget.mjs && node scripts/check-readme-counts.mjs && node scripts/check-frontmatter-reads.mjs && node --test test/*.test.mjs && npm run test:concurrency",
     "test": "node --test test/*.test.mjs",
     "burn-in": "node scripts/burn-in.mjs",
+    "baseline:retrieval": "node scripts/retrieval-baseline.mjs",
     "test:concurrency": "node --test --test-concurrency=1 test-concurrency/*.test.mjs",
     "harvest": "node scripts/harvest.mjs",
     "prepare": "node scripts/build.mjs"
