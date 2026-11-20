@@ -133,9 +133,32 @@ const BASELINE_LINES = new Map([
   ]],
 ])
 
-/** file → Set(normalised line texts), built once. */
+/**
+ * ── W5-2c: A SET CANNOT SEE MULTIPLICITY — SO THE BASELINE IS A MULTISET ────────────────────────
+ *
+ * W5-2b replaced a per-file COUNT with a Set of normalised line texts, which closed the swap ("remove
+ * one different one, add one"). Reproduced immediately afterwards (probe, then `v272 ①`): the most natural
+ * way to create a new read is to COPY AN EXISTING LINE — same template, same field — and a copied line is
+ * byte-identical to one already in the baseline. The count rose 33 → 34 and the gate stayed GREEN, because
+ * `Set.has` answers "does this text appear at all", not "how many times".
+ *
+ * So the baseline is now `Map<normalisedLine, count>` — a MULTISET. Both directions are still honest:
+ *
+ *   observed > baseline  ⇒ RED   (a duplicate is a new copy, whatever its text)
+ *   observed < baseline  ⇒ GREEN + "baseline can go DOWN" (fixing one is good news)
+ *
+ * This is the third shape of the same baseline (count → set → multiset), and each step was found by
+ * asking "what does this comparison NOT see" rather than by waiting for a failure.
+ */
 const BASELINE = new Map(
-  [...BASELINE_LINES].map(([file, lines]) => [file, new Set(lines.map(normaliseLine))]),
+  [...BASELINE_LINES].map(([file, lines]) => {
+    const counts = new Map()
+    for (const line of lines) {
+      const key = normaliseLine(line)
+      counts.set(key, (counts.get(key) ?? 0) + 1)
+    }
+    return [file, counts]
+  }),
 )
 
 function walk(dir, out = []) {
@@ -253,13 +276,16 @@ if (!helperUsesHorizontalGap || helperUsesWhitespaceGap) {
 }
 
 /**
- * ── THE COMPARISON: SET MEMBERSHIP, NOT ARITHMETIC ─────────────────────────────────────────────
+ * ── THE COMPARISON: MULTIPLICITY, NOT MEMBERSHIP ───────────────────────────────────────────────
  *
- * `violations` = a normalised line that is NOT in the file's baseline set. This is what catches the swap
- * (W5-2b): removing one line and adding another changes the SET even when the COUNT is identical.
+ * `violations` = a line observed MORE TIMES than the baseline records it for. This is what catches both
+ * shapes the two earlier baselines missed:
  *
- * `improveable` = a baseline line that no longer occurs. That is GOOD NEWS — the file got fixed — and the
- * script says so instead of failing, because failing would punish the person who removed the defect.
+ *   · a DIFFERENT new line (W5-2b) — its text is not in the baseline at all, observed 1 > 0;
+ *   · a COPIED line (W5-2c) — its text IS in the baseline, but observed 2 > 1.
+ *
+ * `improveable` = a line observed FEWER times than recorded. That is GOOD NEWS — the file got fixed — and
+ * the script says so instead of failing, because failing would punish the person who removed the defect.
  */
 const observedByFile = new Map()
 for (const finding of findings) {
@@ -269,40 +295,64 @@ for (const finding of findings) {
 
 const violations = []
 for (const [file, observed] of observedByFile) {
-  const allowed = BASELINE.get(file) ?? new Set()
+  const allowed = BASELINE.get(file) ?? new Map()
+  const seen = new Map()
   for (const finding of observed) {
-    if (!allowed.has(normaliseLine(finding.text))) {
-      violations.push({ file, line: finding.line, text: finding.text })
+    const key = normaliseLine(finding.text)
+    const count = (seen.get(key) ?? 0) + 1
+    seen.set(key, count)
+    const permitted = allowed.get(key) ?? 0
+    if (count > permitted) {
+      violations.push({
+        file,
+        line: finding.line,
+        text: finding.text,
+        observed: count,
+        permitted,
+      })
     }
   }
 }
 
 const improveable = []
 for (const [file, allowed] of BASELINE) {
-  const seen = new Set((observedByFile.get(file) ?? []).map((finding) => normaliseLine(finding.text)))
-  const gone = [...allowed].filter((line) => !seen.has(line))
+  const seen = new Map()
+  for (const finding of observedByFile.get(file) ?? []) {
+    const key = normaliseLine(finding.text)
+    seen.set(key, (seen.get(key) ?? 0) + 1)
+  }
+  const gone = []
+  for (const [line, permitted] of allowed) {
+    const observedCount = seen.get(line) ?? 0
+    if (observedCount < permitted) gone.push({ line, observed: observedCount, permitted })
+  }
   if (gone.length > 0) improveable.push({ file, gone })
 }
 
 if (process.argv.includes('--json')) {
   process.stdout.write(JSON.stringify({ findings, violations, improveable }, null, 2) + '\n')
 } else if (violations.length > 0) {
-  process.stdout.write('frontmatter-reads: FAILED — frontmatter read(s) NOT in the baseline\n')
+  process.stdout.write('frontmatter-reads: FAILED — frontmatter read(s) beyond the recorded multiplicity\n')
   for (const violation of violations) {
-    process.stdout.write(`  ${violation.file}:${violation.line}\n`)
+    process.stdout.write(
+      `  ${violation.file}:${violation.line}  ` +
+        `(this line now occurs ${violation.observed}×, baseline ${violation.permitted}×)\n`,
+    )
     process.stdout.write(`    ${violation.text.slice(0, 120)}\n`)
   }
   process.stdout.write('\n')
   process.stdout.write(`The rule: read through readFrontmatterField (${HELPER_FILE}), which uses [ \\t]*.\n`)
-  process.stdout.write('The baseline is a SET of lines: removing one old read does not license a new one.\n')
+  process.stdout.write('The baseline is a MULTISET: copying an existing read is still a new read.\n')
 } else {
   process.stdout.write(
     `frontmatter-reads: OK — ${findings.length} known read(s) across ${observedByFile.size} file(s), none new\n`,
   )
   if (improveable.length > 0) {
-    process.stdout.write('  (baseline can go DOWN — these recorded lines are gone; delete them from BASELINE_LINES)\n')
+    process.stdout.write('  (baseline can go DOWN — these recorded reads are gone; delete them from BASELINE_LINES)\n')
     for (const item of improveable) {
-      for (const line of item.gone) process.stdout.write(`    ${item.file}: ${line.slice(0, 100)}\n`)
+      for (const gone of item.gone) {
+        process.stdout.write(`    ${item.file}: ${gone.line.slice(0, 90)} (${gone.permitted}× → ${gone.observed}×)\n`)
+      }
     }
   }
 }

@@ -87,7 +87,18 @@ test('v271 ①: SWAPPING one read for another changes the count by zero and must
     writeFileSync(path, patched, 'utf8')
   })
   assert.equal(result.code, 1, `the swap must be RED; got exit ${result.code}:\n${result.out.slice(0, 600)}`)
-  assert.match(result.out, /NOT in the baseline/u, 'and it must say the line is not in the baseline')
+  /**
+   * ── W5-2c CHANGED THE WORDING, SO THIS ASSERTION CHANGED WITH IT ─────────────────────────────
+   *
+   * The old assertion was `/NOT in the baseline/`, which was TRUE for a swap (the new line's text really
+   * is absent) and is FALSE for a duplicate (its text IS in the baseline, once). W5-2c replaced the message
+   * with one that states the MULTIPLICITY (`this line now occurs N×, baseline M×`) because that sentence is
+   * true for both shapes — and a message that misdescribes why it failed sends the reader looking for the
+   * wrong thing.
+   *
+   * The BEHAVIOUR this test guards (a swap must be red) is unchanged; only the sentence it matches moved.
+   */
+  assert.match(result.out, /multiplicity|baseline \d+×/u, 'the message must state the multiplicity')
   assert.match(result.out, /SWAPPED_READ/u, 'and NAME the new line')
 })
 
