@@ -157,34 +157,114 @@ test('v284 ③: 记录必须写明观测缓存是 warm 还是 cold（两者相�
   }
 })
 
-// ── ④ the count-witness allowance cannot swallow a real failure ─────────────────────────
+// ── ④ the count-witness allowance must be BEHAVIOUR, not a name in the source ───────────
 
-test('v284 ④: 「移走文件导致计数不符」可被解释；真失败不行', () => {
+test('v284 ④: 「移走文件导致计数不符」可被解释；同一次运行里有真失败就不行（行为，不是源码）', () => {
   /**
-   * `failureIsExplainedByRemoval` is the one place where a non-zero exclusion run is still accepted as
-   * a base. It must be narrow: a count witness AND no real test failure. This case drives the real
-   * script with a `check` that prints ONLY the count witness (so the allowance applies), and with one
-   * that prints a failing test as well (so it must not).
+   * ── THE OLD VERSION OF THIS CASE WAS A LIE, AND IT WAS MY LIE (W4-2e) ────────────────────────
+   *
+   * It ran the skeleton with `--skip-exclusion` — which never produces an exclusion run at all — and
+   * then asserted `assert.match(source, /failureIsExplainedByRemoval/)`, `/COUNT_WITNESS/`,
+   * `/ℹ fail 0/`. The test's own comment admitted 「this case can only confirm that the predicate
+   * EXISTS」. Consequence: changing the predicate to `return true` (accept ANY non-zero exclusion run
+   * as explained) left all three strings in place ⇒ this case stayed GREEN.
+   *
+   * The repair is behavioural, and it needs the script to REALLY take the exclusion path. That means
+   * the skeleton must contain a file whose name matches the `V208` constant, so `measureWithAndWithout`
+   * parks it, runs `check` without it, and consults the predicate on a REAL failed run.
+   *
+   * Two variants, two runs:
+   *
+   *   A. witness + `ℹ fail 0`   ⇒ explained   ⇒ criterion is COMPUTABLE (a threshold exists)
+   *   B. witness + `ℹ fail 1`   ⇒ NOT explained ⇒ criterion is REFUSED (`computable:false`)
+   *
+   * can-red: make the predicate `return true` ⇒ B stops refusing ⇒ B's assertion fails.
    */
-  const witness = '  FAIL L106 README 声明测试数 685 / 685，实测 684'
+  const V208_NAME = readFileSync(join(REPO, 'scripts', 'perf-record.mjs'), 'utf8')
+  const parkedName = /const V208 = '([^']+)'/u.exec(V208_NAME)?.[1]
+  assert.ok(parkedName !== undefined, '前提：脚本里必须有 V208 常量，否则骨架无法触发排除法')
 
-  const onlyWitness = skeleton({
-    checkBody: ["console.log('ℹ tests 7')", "console.log('ℹ fail 0')", `console.log(${JSON.stringify(witness)})`].join('\n'),
-    checkExitCode: 1,
-  })
-  try {
-    const result = runRecord(onlyWitness, ['--json', '--skip-exclusion'])
+  /**
+   * ── THE STUB MUST SUCCEED WHEN THE FILE IS PRESENT AND FAIL WHEN IT IS PARKED ────────────────
+   *
+   * Variant A needs the criterion to be COMPUTABLE, which requires `check (含)` to exit 0: a passing
+   * run is the base's numerator. Only the EXCLUSION run may fail, and only because of the count
+   * witness. A stub that always exits 1 tests nothing about the allowance — it just refuses earlier,
+   * at the `check (含)` gate. (Measured: that is exactly how the first attempt failed.)
+   *
+   * So the stub inspects the filesystem: if the parked test file is gone, the counts no longer match
+   * and it reports the witness and exits 1; otherwise it exits 0 with a green summary.
+   */
+  const witnessCheck = (suiteFailLine) =>
+    [
+      "import { existsSync } from 'node:fs'",
+      "import { join } from 'node:path'",
+      `const parked = join(process.cwd(), 'test', ${JSON.stringify(parkedName)})`,
+      'const missing = !existsSync(parked)',
+      "console.log('ℹ tests 7')",
+      "console.log('ℹ pass 7')",
+      `console.log(missing ? ${JSON.stringify(suiteFailLine)} : 'ℹ fail 0')`,
+      "if (!missing) process.exit(0)",
+      /**
+       * The witness is printed near the END, after the suite summary — deliberately, because that is
+       * the layout that broke the old `slice(-1200)` tail: summary early, witness late.
+       */
+      "for (let i = 0; i < 400; i += 1) console.log('padding line to push the summary out of a 1200-char tail ' + i)",
+      "console.log('  FAIL L106 README 声明测试数 689 / 689，实测 688')",
+      'process.exit(1)',
+    ].join('\n')
+
+  const runSkeleton = (suiteFailLine) => {
     /**
-     * `--skip-exclusion` never produces an exclusion run, so this case can only confirm that the
-     * underlying predicate exists in the source. The behavioural half (allowance applied or not) is
-     * covered by the pattern below, which is read from the shipped script rather than assumed.
+     * `checkExitCode: 0` — the stub sets its OWN exit code from whether the parked file exists.
+     * The skeleton's blanket `process.exitCode = N` would override that line, so it is left at 0.
      */
-    const source = readFileSync(SCRIPT, 'utf8')
-    assert.match(source, /failureIsExplainedByRemoval/u, '这个豁免必须是一个具名函数，不是散落的 if')
-    assert.match(source, /COUNT_WITNESS/u, '见证模式必须是具名的，便于审计')
-    assert.match(source, /ℹ fail 0/u, '豁免必须同时要求「套件里没有真失败」')
-    assert.equal(result.code, 0, '本脚本自身不该因为骨架的 check 失败而崩')
-  } finally {
-    rmSync(onlyWitness, { recursive: true, force: true })
+    const root = skeleton({ checkBody: witnessCheck(suiteFailLine), checkExitCode: 0 })
+    try {
+      /**
+       * The parked file must be NAMED like V208 so the exclusion path triggers. It is not a real
+       * test: the stub `check` decides what the run reports.
+       */
+      writeFileSync(join(root, 'test', parkedName), '// parked by the exclusion measurement\n', 'utf8')
+      return runRecord(root, ['--json'])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   }
+
+  // ── A: the only failure is our own accounting ⇒ the base is still usable
+  const explained = runSkeleton('ℹ fail 0')
+  const explainedRecord = JSON.parse(explained.out.slice(explained.out.indexOf('{')))
+  assert.equal(
+    explainedRecord.exclusionFailureExplained,
+    true,
+    `「只有计数见证 + 套件绿」必须被解释为测量自身造成的失败；actual: ${JSON.stringify(explainedRecord.criterion)}`,
+  )
+  assert.equal(
+    explainedRecord.criterion.thresholdMs !== undefined,
+    true,
+    `被解释的排除法运行必须能建立阈值（否则判据永远算不出来）；actual: ${JSON.stringify(explainedRecord.criterion)}`,
+  )
+  /**
+   * The record omits `computable` when the criterion IS computable — its presence is what marks a
+   * refusal. Asserting on the field's absence would be asserting on JSON shape rather than behaviour,
+   * so the positive evidence (`thresholdMs` exists and a verdict was reached) is what is checked.
+   */
+  assert.equal(explainedRecord.criterion.computable, undefined, '可计算时不该出现 computable:false 的标记')
+  assert.equal(typeof explainedRecord.criterion.met, 'boolean', '必须给出结论')
+
+  // ── B: the SAME run also has a real test failure ⇒ nothing may be explained
+  const refused = runSkeleton('ℹ fail 1')
+  const refusedRecord = JSON.parse(refused.out.slice(refused.out.indexOf('{')))
+  assert.equal(
+    refusedRecord.exclusionFailureExplained,
+    false,
+    '同一次运行里有真失败时，绝不许把整次运行说成「测量自己造成的」',
+  )
+  assert.equal(
+    refusedRecord.criterion.computable,
+    false,
+    `有真失败时判据必须拒绝计算；actual: ${JSON.stringify(refusedRecord.criterion)}`,
+  )
+  assert.equal(refusedRecord.criterion.thresholdMs, undefined, '拒绝时不许留下看似可用的阈值')
 })

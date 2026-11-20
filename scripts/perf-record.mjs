@@ -109,10 +109,24 @@ function timedNpm(label, args, cwd) {
       label,
       ms: Math.round(Number(process.hrtime.bigint() - startedAt) / 1e6),
       code: error.status,
+      /**
+       * A TRUNCATED TAIL IS FOR HUMANS; `summary` IS FOR THE CODE (W4-2e).
+       *
+       * The diagnostic tail stays short (a 200 KB log in an error message helps nobody), but the two
+       * facts the logic needs are extracted from the FULL output first. Nothing downstream may search
+       * `tail` for a fact — that is what let a real failure look explained.
+       */
       tail: captured.slice(-1200),
+      summary: summariseCheckOutput(captured),
     }
   }
-  return { label, ms: Math.round(Number(process.hrtime.bigint() - startedAt) / 1e6), code: 0, tail: captured.slice(-1200) }
+  return {
+    label,
+    ms: Math.round(Number(process.hrtime.bigint() - startedAt) / 1e6),
+    code: 0,
+    tail: captured.slice(-1200),
+    summary: summariseCheckOutput(captured),
+  }
 }
 
 /** Run a command and time it. Never throws: a non-zero exit is still a duration worth recording. */
@@ -253,19 +267,69 @@ for (const [label, script, args] of GATES) {
  * Refusing every non-zero exclusion run would mean the criterion can NEVER be computed — that is not
  * safety, it is a check that has quietly stopped answering.
  */
-const COUNT_WITNESS = /README 声明测试数 \d+ \/ \d+，实测 \d+/gu
-
-/** True when the ONLY reason this run failed is our own file removal changing the test count. */
+/**
+ * True when the ONLY reason this run failed is our own file removal changing the test count.
+ *
+ * Reads the STRUCTURED summary, never a truncated log tail (see `summariseCheckOutput`). The three
+ * conditions are all required:
+ *
+ *   1. the run failed (a passing run needs no explanation);
+ *   2. at least one count witness is present;
+ *   3. the suite summary says `fail 0` **explicitly** — `suiteGreen === undefined` (no summary found)
+ *      is NOT green. That distinction is the whole point: 「I could not see a failure」 ≠ 「there was
+ *      no failure」, and this batch has paid for that confusion three times.
+ */
 function failureIsExplainedByRemoval(run) {
   if (run === undefined || run.code === 0) return false
-  const tail = String(run.tail ?? '')
-  const witnesses = tail.match(COUNT_WITNESS) ?? []
-  if (witnesses.length === 0) return false
+  const summary = run.summary ?? summariseCheckOutput(run.tail)
+  if (summary.countWitnesses.length === 0) return false
+  return summary.suiteGreen === true
+}
+
+/**
+ * ── TWO FACTS ARE EXTRACTED FROM THE OUTPUT, NOT FOUND BY SCANNING A TRUNCATED TAIL (W4-2e) ─────
+ *
+ * `failureIsExplainedByRemoval` needs two things that live in DIFFERENT PARTS of a `check` log:
+ *
+ *   · the suite summary (`ℹ fail 0`) — printed by the test step, before the gate verdicts;
+ *   · the count witness (`README 声明测试数 685 / 685，实测 684`) — printed BY a gate, near the end.
+ *
+ * The first version kept a `slice(-1200)` tail and searched it for both. With a real `check` log the
+ * summary can easily fall outside 1200 characters of the end, and the failure mode is the dangerous
+ * one: 「the witness is there, `ℹ fail 0` is truncated away」 makes the fallback
+ * `|| !/ℹ fail \d+/` treat a REAL failure as explained. A 1200-character window is not a contract.
+ *
+ * So both facts are parsed out of the FULL captured output, once, at the point where the output is
+ * available. Downstream code reads booleans and counts, never a substring of a log.
+ */
+function summariseCheckOutput(output) {
+  const text = String(output ?? '')
   /**
-   * The suite itself must be GREEN. If a real test failed, the count is different for a second,
-   * legitimate reason and this allowance must not swallow it.
+   * The suite summary. `tests`/`fail` may appear more than once if npm echoes child output, so the
+   * LAST occurrence wins — that is the final summary the runner printed.
    */
-  return /ℹ fail 0/u.test(tail) || !/ℹ fail \d+/u.test(tail)
+  const failMatches = [...text.matchAll(/^ℹ fail (\d+)$/gmu)]
+  const passMatches = [...text.matchAll(/^ℹ pass (\d+)$/gmu)]
+  const suiteFail = failMatches.length > 0 ? Number(failMatches[failMatches.length - 1][1]) : undefined
+  const suitePass = passMatches.length > 0 ? Number(passMatches[passMatches.length - 1][1]) : undefined
+  /** Every count witness line, so a reader can see WHICH gate complained and by how much. */
+  const witnesses = [...text.matchAll(/README 声明测试数 (\d+) \/ (\d+)，实测 (\d+)/gu)].map((match) => ({
+    declared: Number(match[1]),
+    declaredTotal: Number(match[2]),
+    measured: Number(match[3]),
+    raw: match[0],
+  }))
+  return {
+    /**
+     * `true` / `false` / `undefined`. **`undefined` is not `true`**: 「we could not see the summary」
+     * must never be read as 「the suite was green」.
+     */
+    suiteGreen: suiteFail === undefined ? undefined : suiteFail === 0,
+    suiteFail,
+    suitePass,
+    countWitnesses: witnesses,
+    bytes: text.length,
+  }
 }
 const gateStepsOk = gateSteps.filter((step) => step.ms !== undefined && step.code === 0)
 const gateStepsFailed = gateSteps.filter((step) => step.ms === undefined || step.code !== 0)
