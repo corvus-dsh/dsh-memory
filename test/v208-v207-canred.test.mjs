@@ -101,9 +101,48 @@ const mirror = () => {
   return root
 }
 
-const runV207In = (root) => {
+/**
+ * ── W4-2b: EACH INJECTION ONLY NEEDS THE TEST IT SHOULD BREAK (measured) ──────────────────────
+ *
+ * Measured 2026-11-20: this file took **97–102 s** — the single largest item in the memory suite.
+ * The cause is arithmetic, not a clumsy test: `runV207In` spawns the WHOLE v207 file (15.8 s) and it
+ * is called SIX times (baseline + four injections + restore) ⇒ ≈95 s.
+ *
+ * ── WHY THE OBVIOUS FIX (MERGE THE FOUR INJECTIONS INTO ONE RUN) IS NOT AVAILABLE ───────────────
+ *
+ * Two of the four cases inject into the SAME file (`families.mjs`) and expect the SAME test to go
+ * red (`v207 ⑤`, cases ① and ④ in `CASES`). Merging them would still produce one red — and the
+ * assertion could no longer say WHICH injection caused it, which is the entire value of a can-red:
+ * 「if I break X, test Y notices」. A merged red proves only that something in the pile mattered.
+ *
+ * ── WHAT IS ACTUALLY REDUNDANT: THE SCOPE OF EACH RUN ─────────────────────────────────────────
+ *
+ * Every injection only needs the ONE test it is supposed to break. What must not regress — that the
+ * rest of v207 still passes — is guaranteed by the BASELINE and the RESTORE, both of which still run
+ * the full file. So the middle four narrow to `--test-name-pattern` and the guarantees stay:
+ *
+ *   baseline (full, green)         proves v207 is healthy before we touch anything
+ *   4 × narrowed (one test each)   proves each injection breaks the test it claims to break
+ *   restore (full, green)          proves the reds came from the injections, not from a broken mirror
+ *
+ * Measured: the narrowed runs cost 2–7 s each (module load dominates), so the file goes from ≈95 s
+ * of child time to ≈35 s.
+ *
+ * ── AND THE THING THAT MUST NOT BE DONE FOR SPEED ────────────────────────────────────────────
+ *
+ * The injections stay REAL edits to a real copy that a real compiler re-reads. Turning them into
+ * "assume this would fail" would replace a proof with a 0.00 s reading — the exact defect W4-3 and
+ * W4-5 both had to be repaired for.
+ */
+const runV207In = (root, namePattern) => {
   try {
-    const out = execFileSync(process.execPath, ['--test', 'test/v207-retrieve-six-numbers.test.mjs'],
+    /**
+     * `--test-name-pattern` narrows the run. It is passed ONLY where a single named test is expected
+     * to go red; the baseline and the restore pass nothing, so they still exercise the whole file.
+     */
+    const args = ['--test', 'test/v207-retrieve-six-numbers.test.mjs']
+    if (namePattern !== undefined) args.splice(1, 0, '--test-name-pattern', namePattern)
+    const out = execFileSync(process.execPath, args,
       { cwd: root, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, timeout: 300000, env: childEnv() })
     return { code: 0, out }
   } catch (error) {
@@ -219,7 +258,12 @@ test('v208 can-red：v207 的四组注入都必须变红（在仓内临时副本
     for (const c of CASES) {
       const restore = inject(root, c.file, c.pairs)
       try {
-        const r = runV207In(root)
+        /**
+         * W4-2b: narrow to the test this injection is supposed to break. The `expect` id is exactly
+         * the name pattern, so the run and the assertion agree by construction — a mismatch would
+         * surface as `r.code === 0` (nothing ran red) rather than as a silent pass.
+         */
+        const r = runV207In(root, c.expect)
         const n = counts(r.out)
         const ids = failedIds(r.out)
         assert.equal(r.code, 1, `「${c.label}」应当让 v207 失败（exit 1），实测 exit ${r.code}`)
