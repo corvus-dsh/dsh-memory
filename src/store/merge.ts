@@ -58,8 +58,60 @@ export interface MergeResult {
   conflictsMoved: number
   provenance: { keeper: string; absorbed: string }
   supersedes: string[]
+  /**
+   * ── W1-9 (B4-0b-2): THE RECALL FIELDS, WIDENED BY THE UNION ────────────────────────────────────
+   *
+   * The merge used to carry only `evidence` and the conflict edges. It left these four behind:
+   *
+   *   · `aliases`                  — RECALL FUEL. `retrieve/documents.ts` joins it into the scan text, so
+   *                                 "连数据库" finds a skill whose trigger line says it. Dropping it at merge
+   *                                 time means the keeper LOSES SEARCHABILITY for everything the absorbed
+   *                                 skill was findable by — a silent retrieval regression dressed as a
+   *                                 housekeeping operation.
+   *   · `tags`                     — the cross-workspace retrieval index key.
+   *   · `applicable_node_types`    — when the skill applies (phase keys).
+   *   · `counter_evidence`         — the refs that argue AGAINST the skill. Losing those is worse than
+   *                                 losing support: it makes a contested lesson look unanimous.
+   *
+   * The dispatch's judgement is `memory_search("连数据库")` must still hit after the merge. So this result
+   * reports the four unions, and the writer below puts them on the keeper.
+   */
+  recallFields: {
+    aliases: number
+    tags: number
+    applicableNodeTypes: number
+    counterEvidence: number
+  }
   /** False only when the caller supplied no `memoryDir` (there is nowhere to write the line). */
   audited: boolean
+}
+
+/**
+ * The four frontmatter fields the merge must widen (W1-9). All comma-joined, all additive.
+ *
+ * `counter_evidence` is additive too, and deliberately NOT "keeper wins": it lists refs that argue
+ * against the skill, and dropping the absorbed skill's objections because the keeper is the survivor is
+ * how a contested lesson comes to look unanimous.
+ */
+const RECALL_FIELDS = [
+  { key: 'aliases', resultKey: 'aliases' },
+  { key: 'tags', resultKey: 'tags' },
+  { key: 'applicable_node_types', resultKey: 'applicableNodeTypes' },
+  { key: 'counter_evidence', resultKey: 'counterEvidence' },
+] as const
+
+/** Read one comma-joined frontmatter field as a trimmed, de-duplicated list. */
+function frontmatterList(text: string, key: string): string[] {
+  const line = new RegExp(`^${key}:\\s*(.*)$`, 'mu').exec(text)
+  if (line === null) return []
+  return [
+    ...new Set(
+      String(line[1] ?? '')
+        .split(',')
+        .map((item) => item.trim())
+        .filter((item) => item.length > 0),
+    ),
+  ]
 }
 
 /** `sessionId@seq`, or `@seq` for a legacy ref with no session (which is still one identity). */
@@ -97,6 +149,7 @@ export function mergeSkills(
     conflictsMoved: 0,
     provenance: { keeper: '', absorbed: '' },
     supersedes: [],
+    recallFields: { aliases: 0, tags: 0, applicableNodeTypes: 0, counterEvidence: 0 },
     audited: false,
   }
   if (keeperName.length === 0 || absorbedName.length === 0) {
@@ -185,6 +238,26 @@ export function mergeSkills(
   if (supersedes.length > 0) nextKeeper = rewriteFrontmatterLine(nextKeeper, 'supersedes', supersedes.join(','))
   nextKeeper = rewriteFrontmatterLine(nextKeeper, 'merged_from', absorbedName)
 
+  /**
+   * ── W1-9: WIDEN THE FOUR RECALL FIELDS ON THE KEEPER ──────────────────────────────────────────
+   *
+   * Union, not replacement: the keeper's own entries come first (its file, its order), then whatever only
+   * the absorbed skill had. `aliases` is the one with a measured consequence — `retrieve/documents.ts`
+   * joins it into the scan text, so anything dropped here stops being findable.
+   *
+   * A field that NEITHER skill declared stays absent: writing `aliases:` with an empty tail would claim
+   * the field exists, and the recall reader treats a present-but-empty value the same as absent — so the
+   * only effect would be a frontmatter line that says nothing.
+   */
+  for (const { key, resultKey } of RECALL_FIELDS) {
+    const union = [
+      ...frontmatterList(keeperText, key),
+      ...frontmatterList(absorbedText, key).filter((item) => !frontmatterList(keeperText, key).includes(item)),
+    ]
+    result.recallFields[resultKey] = union.length
+    if (union.length > 0) nextKeeper = rewriteFrontmatterLine(nextKeeper, key, union.join(','))
+  }
+
   let nextAbsorbed = rewriteFrontmatterLine(absorbedText, 'archived', 'true')
   nextAbsorbed = rewriteFrontmatterLine(nextAbsorbed, 'merged_into', keeperName)
 
@@ -209,7 +282,9 @@ export function mergeSkills(
         `evidence ${result.evidenceBefore.keeper} + ${result.evidenceBefore.absorbed} = ${result.evidence}` +
         `${result.evidenceBefore.shared > 0 ? ` (${result.evidenceBefore.shared} shared pointer(s) deduplicated)` : ''}; ` +
         `edges re-pointed ${result.conflictsMoved}; provenance ${result.provenance.keeper}/${result.provenance.absorbed}; ` +
-        `supersedes ${result.supersedes.join(',') || '-'}`,
+        `supersedes ${result.supersedes.join(',') || '-'}; ` +
+        `recall fields widened: aliases ${result.recallFields.aliases}, tags ${result.recallFields.tags}, ` +
+        `applicable_node_types ${result.recallFields.applicableNodeTypes}, counter_evidence ${result.recallFields.counterEvidence}`,
       source: 'mergeSkills',
     })
     result.audited = true
