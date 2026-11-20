@@ -66,22 +66,77 @@ const FORBIDDEN = /:\\s\*\(/u
 const isCommentLine = (line) => /^\s*(?:\/\/|\/\*|\*)/u.test(line)
 
 /**
- * ── THE EXISTING COPIES (mechanically listed, never hand-typed) ───────────────────────────────
+ * ── W5-2b: THE BASELINE IS A SET OF LINES, NOT A COUNT ─────────────────────────────────────────
  *
- * Every entry is `file:line-count`, and the counts were produced by running this script with `--list`.
- * They may only go DOWN: a file that grows is a new copy, which is exactly what this gate exists to catch.
+ * The first version recorded `file → count` and compared `observed > allowed`. Reproduced through this
+ * very script (probe, then `v271`): DELETE one old read from `store/skill.ts` and ADD a different new one
+ * — the count is unchanged, and the gate stays GREEN while a brand-new defect just landed.
  *
- * The entries that remain are all the same defect, and each is a future W5 item's job. Listing them here
- * is the honest alternative to either fixing dozens of reads in one go or pretending they are fine.
+ * That is the same shape as A6: **a baseline that shrinks with the data cannot tell 「原班人马」 from
+ * 「走一个来一个」**. It is also the shape the review named first for this batch, so the baseline is now
+ * the SET OF NORMALISED LINE TEXTS per file:
+ *
+ *   · a line NOT in the set ⇒ RED (a new copy, even if a different line disappeared);
+ *   · a line in the set that no longer exists ⇒ reported as "baseline can go DOWN", which is a prompt,
+ *     not a failure (a fixed read SHOULD be removed from the baseline).
+ *
+ * Normalisation collapses runs of whitespace and trims, so re-indenting a line is not a "new" copy —
+ * the identity of a read is its code, not its column.
  */
-const BASELINE = new Map([
-  ['dedupe.ts', 1],
-  ['edges.ts', 1],
-  ['retrieve/documents.ts', 12],
-  ['retrieve/interning.ts', 1],
-  ['store/lifecycle.ts', 3],
-  ['store/skill.ts', 15],
+const normaliseLine = (text) => String(text).replace(/\s+/gu, ' ').trim()
+
+const BASELINE_LINES = new Map([
+  ['dedupe.ts', [
+    "return text.match(/^(?:when_to_use|when):\\s*(.+)$/mu)?.[1] ?? ''",
+  ]],
+  ['edges.ts', [
+    "const line = text.match(/^conflicts_with:\\s*(.+)$/mu)?.[1]",
+  ]],
+  ['retrieve/documents.ts', [
+    "const sources = Number(text.match(/^sources:\\s*(\\d+)$/mu)?.[1] ?? '1')",
+    "const updated = text.match(/^updated:\\s*(.+)$/mu)?.[1] ?? text.match(/^created:\\s*(.+)$/mu)?.[1]",
+    "const inlineConflicts = (text.match(/^conflicts_with:\\s*(.+)$/mu)?.[1] ?? '')",
+    "const scopeText = (text.match(/^scope:\\s*(.+)$/mu)?.[1] ?? '').trim().toLowerCase()",
+    "const workspace = normalizeWorkspace(text.match(/^workspace:\\s*(.+)$/mu)?.[1] ?? '')",
+    "const domainText = (text.match(/^domain:\\s*(.+)$/mu)?.[1] ?? '').trim().toLowerCase()",
+    "const lastValidated = text.match(/^last_validated:\\s*(.+)$/mu)?.[1]",
+    "const sceneText = (text.match(/^scene:\\s*(.+)$/mu)?.[1] ?? '').trim().toLowerCase()",
+    "const confidenceValue = Number(text.match(/^confidence:\\s*(.+)$/mu)?.[1] ?? '1')",
+    "const generationValue = Number(text.match(/^generation:\\s*(\\d+)$/mu)?.[1] ?? '')",
+    "const commitText = (text.match(/^commitHash:\\s*([0-9a-f]{7,40})$/mu)?.[1] ?? '').trim()",
+    "const evidenceRaw = text.match(/^evidence:\\s*(.+)$/mu)?.[1] ?? ''",
+  ]],
+  ['retrieve/interning.ts', [
+    "return text.match(/^when_to_use:\\s*(.+)$/mu)?.[1] ?? text.match(/^when:\\s*(.+)$/mu)?.[1] ?? ''",
+  ]],
+  ['store/lifecycle.ts', [
+    "const scope = (text.match(/^scope:\\s*(.+)$/mu)?.[1] ?? 'project').trim().toLowerCase()",
+    "const previous = clampConfidence(text.match(/^confidence:\\s*(.+)$/mu)?.[1])",
+    "const line = text.match(/^evidence:\\s*(.+)$/mu)",
+  ]],
+  ['store/skill.ts', [
+    "const when = text.match(/^when_to_use:\\s*(.+)$/mu)?.[1] ?? text.match(/^when:\\s*(.+)$/mu)?.[1] ?? ''",
+    "const description = text.match(/^description:\\s*(.+)$/mu)?.[1] ?? when",
+    "const evidence = parseEvidenceField(text.match(/^evidence:\\s*(.+)$/mu)?.[1] ?? '', '')",
+    "const scopeText = (text.match(/^scope:\\s*(.+)$/mu)?.[1] ?? '').trim().toLowerCase()",
+    "const sceneText = (text.match(/^scene:\\s*(.+)$/mu)?.[1] ?? '').trim().toLowerCase()",
+    "const domainText = (text.match(/^domain:\\s*(.+)$/mu)?.[1] ?? '').trim().toLowerCase()",
+    "const confidence = clampConfidence(text.match(/^confidence:\\s*(.+)$/mu)?.[1])",
+    "const aliases = (text.match(/^aliases:\\s*(.+)$/mu)?.[1] ?? '').split(/,/u).map((item) => item.trim()).filter(Boolean)",
+    "const tags = asVocab(text.match(/^tags:\\s*(.+)$/mu)?.[1] ?? '')",
+    "const nodeTypes = asVocab(text.match(/^applicable_node_types:\\s*(.+)$/mu)?.[1] ?? '')",
+    "const previousEvidence = parseEvidenceField(previousText.match(/^evidence:\\s*(.+)$/mu)?.[1] ?? '', meta.sessionId)",
+    "const sources = Number(previousText.match(/^sources:\\s*(\\d+)$/mu)?.[1] ?? '1')",
+    "const created = previousText.match(/^created:\\s*(.+)$/mu)?.[1] ?? ''",
+    "const lastUsed = previousText.match(/^last_used:\\s*(.+)$/mu)?.[1] ?? undefined",
+    "const lastValidated = previousText.match(/^last_validated:\\s*(.+)$/mu)?.[1] ?? undefined",
+  ]],
 ])
+
+/** file → Set(normalised line texts), built once. */
+const BASELINE = new Map(
+  [...BASELINE_LINES].map(([file, lines]) => [file, new Set(lines.map(normaliseLine))]),
+)
 
 function walk(dir, out = []) {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -197,35 +252,58 @@ if (!helperUsesHorizontalGap || helperUsesWhitespaceGap) {
   process.exit(2)
 }
 
-const violations = []
-for (const [file, observed] of counts) {
-  const allowed = BASELINE.get(file) ?? 0
-  if (observed > allowed) violations.push({ file, observed, allowed })
+/**
+ * ── THE COMPARISON: SET MEMBERSHIP, NOT ARITHMETIC ─────────────────────────────────────────────
+ *
+ * `violations` = a normalised line that is NOT in the file's baseline set. This is what catches the swap
+ * (W5-2b): removing one line and adding another changes the SET even when the COUNT is identical.
+ *
+ * `improveable` = a baseline line that no longer occurs. That is GOOD NEWS — the file got fixed — and the
+ * script says so instead of failing, because failing would punish the person who removed the defect.
+ */
+const observedByFile = new Map()
+for (const finding of findings) {
+  if (!observedByFile.has(finding.file)) observedByFile.set(finding.file, [])
+  observedByFile.get(finding.file).push(finding)
 }
-const missing = []
+
+const violations = []
+for (const [file, observed] of observedByFile) {
+  const allowed = BASELINE.get(file) ?? new Set()
+  for (const finding of observed) {
+    if (!allowed.has(normaliseLine(finding.text))) {
+      violations.push({ file, line: finding.line, text: finding.text })
+    }
+  }
+}
+
+const improveable = []
 for (const [file, allowed] of BASELINE) {
-  const observed = counts.get(file) ?? 0
-  if (observed < allowed) missing.push({ file, observed, allowed })
+  const seen = new Set((observedByFile.get(file) ?? []).map((finding) => normaliseLine(finding.text)))
+  const gone = [...allowed].filter((line) => !seen.has(line))
+  if (gone.length > 0) improveable.push({ file, gone })
 }
 
 if (process.argv.includes('--json')) {
-  process.stdout.write(JSON.stringify({ findings, violations, improveable: missing }, null, 2) + '\n')
+  process.stdout.write(JSON.stringify({ findings, violations, improveable }, null, 2) + '\n')
 } else if (violations.length > 0) {
-  process.stdout.write('frontmatter-reads: FAILED — new `\\s*` frontmatter read(s)\n')
+  process.stdout.write('frontmatter-reads: FAILED — frontmatter read(s) NOT in the baseline\n')
   for (const violation of violations) {
-    process.stdout.write(`  ${violation.file}: ${violation.observed} (allowed ${violation.allowed})\n`)
-    for (const finding of findings.filter((item) => item.file === violation.file)) {
-      process.stdout.write(`    :${finding.line}  ${finding.text.slice(0, 110)}\n`)
-    }
+    process.stdout.write(`  ${violation.file}:${violation.line}\n`)
+    process.stdout.write(`    ${violation.text.slice(0, 120)}\n`)
   }
-  process.stdout.write(`\\nThe rule: read through readFrontmatterField (${HELPER_FILE}), which uses '${HELPER_PATTERN}'.\n`)
-  process.stdout.write('`\\s` matches a newline, so `key:\\s*(.+)` captures the NEXT line when the field is empty.\n')
+  process.stdout.write('\n')
+  process.stdout.write(`The rule: read through readFrontmatterField (${HELPER_FILE}), which uses [ \\t]*.\n`)
+  process.stdout.write('The baseline is a SET of lines: removing one old read does not license a new one.\n')
 } else {
-  const total = [...counts.values()].reduce((sum, value) => sum + value, 0)
-  process.stdout.write(`frontmatter-reads: OK — ${total} known read(s) across ${counts.size} file(s), none new\n`)
-  if (missing.length > 0) {
-    process.stdout.write('  (baseline can go DOWN: these files now have fewer than recorded — update BASELINE)\n')
-    for (const item of missing) process.stdout.write(`    ${item.file}: ${item.observed} < ${item.allowed}\n`)
+  process.stdout.write(
+    `frontmatter-reads: OK — ${findings.length} known read(s) across ${observedByFile.size} file(s), none new\n`,
+  )
+  if (improveable.length > 0) {
+    process.stdout.write('  (baseline can go DOWN — these recorded lines are gone; delete them from BASELINE_LINES)\n')
+    for (const item of improveable) {
+      for (const line of item.gone) process.stdout.write(`    ${item.file}: ${line.slice(0, 100)}\n`)
+    }
   }
 }
 process.exitCode = violations.length === 0 ? 0 : 1
