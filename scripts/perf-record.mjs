@@ -85,8 +85,9 @@ function parseArgs(argv) {
  */
 function timedNpm(label, args, cwd) {
   const startedAt = process.hrtime.bigint()
+  let captured = ''
   try {
-    execFileSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', args, {
+    captured = execFileSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', args, {
       cwd,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -102,9 +103,16 @@ function timedNpm(label, args, cwd) {
     if (error?.status === null || error?.status === undefined) {
       return { label, ms: undefined, code: -1, failedToStart: String(error?.message ?? error).slice(0, 160) }
     }
-    return { label, ms: Math.round(Number(process.hrtime.bigint() - startedAt) / 1e6), code: error.status }
+    /** stdout matters on the failure path: it is how a known-failure is told from a real one. */
+    captured = `${error.stdout ?? ''}${error.stderr ?? ''}`
+    return {
+      label,
+      ms: Math.round(Number(process.hrtime.bigint() - startedAt) / 1e6),
+      code: error.status,
+      tail: captured.slice(-1200),
+    }
   }
-  return { label, ms: Math.round(Number(process.hrtime.bigint() - startedAt) / 1e6), code: 0 }
+  return { label, ms: Math.round(Number(process.hrtime.bigint() - startedAt) / 1e6), code: 0, tail: captured.slice(-1200) }
 }
 
 /** Run a command and time it. Never throws: a non-zero exit is still a duration worth recording. */
@@ -183,6 +191,36 @@ const GATES = [
   ['test:concurrency', undefined, []],
 ]
 
+/**
+ * ── `check-readme-counts` HAS A COLD AND A WARM COST, AND THEY DIFFER BY 1000× (W4-2d) ──────────
+ *
+ * Measured twice by the reviewer: 111.8 s in one run, 0.1 s in another. The difference is NOT noise.
+ * Since W4-1 that gate reads a SHARED suite observation; on a cache miss it measures the whole suite
+ * itself (~110 s), on a hit it reads a file (~0.1 s). Both numbers are true about different states.
+ *
+ * Discipline 9 says cold and warm must never be mixed. So this step is WARMED FIRST — one untimed run
+ * that populates the cache — and then timed. The report labels it warm, because that is what `check`
+ * actually experiences after the first run on a tree.
+ *
+ * If the warm-up itself fails, the step is still timed and its exit code is what the table shows;
+ * failing to warm is not allowed to silently become a fast reading.
+ */
+function warmSharedObservation() {
+  try {
+    execFileSync(process.execPath, ['scripts/check-readme-counts.mjs'], {
+      cwd: REPO,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      maxBuffer: 256 * 1024 * 1024,
+    })
+    return { warmed: true }
+  } catch (error) {
+    return { warmed: false, detail: String(error?.message ?? error).slice(0, 160) }
+  }
+}
+
+const warmup = warmSharedObservation()
+
 const gateSteps = []
 for (const [label, script, args] of GATES) {
   if (script === undefined) {
@@ -200,11 +238,70 @@ for (const [label, script, args] of GATES) {
    */
   gateSteps.push(timed(label, process.execPath, [script, ...args], REPO))
 }
-const gateTotalMs = gateSteps.reduce((sum, step) => sum + (step.ms ?? 0), 0)
+/**
+ * ── THE EXCLUSION RUN IS EXPECTED TO TRIP THE COUNT GATE (W4-2d, measured) ──────────────────────
+ *
+ * Moving `v208` out makes `check` exit 1: two gates assert the README's declared test count equals
+ * the measured one, and the measurement removed a test file — 685 declared, 684 measured. The failure
+ * is PRODUCED BY THE MEASUREMENT, not by a defect.
+ *
+ * The DURATION is still valid (the suite ran, the gates ran, and this is exactly what `check` costs
+ * without v208). What is not valid is treating that run as a PASS. So a non-zero exclusion run is
+ * accepted as a base ONLY when every failure line matches the count witness our own removal caused,
+ * and when it does, the record says so explicitly.
+ *
+ * Refusing every non-zero exclusion run would mean the criterion can NEVER be computed — that is not
+ * safety, it is a check that has quietly stopped answering.
+ */
+const COUNT_WITNESS = /README 声明测试数 \d+ \/ \d+，实测 \d+/gu
+
+/** True when the ONLY reason this run failed is our own file removal changing the test count. */
+function failureIsExplainedByRemoval(run) {
+  if (run === undefined || run.code === 0) return false
+  const tail = String(run.tail ?? '')
+  const witnesses = tail.match(COUNT_WITNESS) ?? []
+  if (witnesses.length === 0) return false
+  /**
+   * The suite itself must be GREEN. If a real test failed, the count is different for a second,
+   * legitimate reason and this allowance must not swallow it.
+   */
+  return /ℹ fail 0/u.test(tail) || !/ℹ fail \d+/u.test(tail)
+}
+const gateStepsOk = gateSteps.filter((step) => step.ms !== undefined && step.code === 0)
+const gateStepsFailed = gateSteps.filter((step) => step.ms === undefined || step.code !== 0)
+const gateTotalMs = gateStepsOk.reduce((sum, step) => sum + step.ms, 0)
 
 const check = options.skipExclusion
   ? { withIt: timedNpm('check (含)', ['run', 'check', '--silent'], REPO), withoutIt: undefined }
   : measureWithAndWithout(V208, 'check', 'npm', ['run', 'check', '--silent'])
+
+/** Which of the two required runs cannot be trusted as a base, and why. `[]` means computable. */
+const blockingRuns = []
+if (check.withIt?.code !== 0) {
+  blockingRuns.push({
+    run: 'check (含)',
+    code: check.withIt?.code,
+    detail: check.withIt?.failedToStart ?? 'exited non-zero; its duration describes a FAILED check, not a cost',
+  })
+}
+let exclusionExplained = false
+if (check.withoutIt === undefined) {
+  blockingRuns.push({ run: 'check (不含)', code: undefined, detail: 'exclusion not measured' })
+} else if (check.withoutIt.code !== 0) {
+  if (failureIsExplainedByRemoval(check.withoutIt)) {
+    /**
+     * EXPECTED: our own file removal changed the declared/measured count. The duration stands; the
+     * run is simply not a "pass", and that fact travels in the record rather than being smoothed away.
+     */
+    exclusionExplained = true
+  } else {
+    blockingRuns.push({
+      run: 'check (不含)',
+      code: check.withoutIt.code,
+      detail: check.withoutIt.failedToStart ?? 'exited non-zero for a reason other than the file removal',
+    })
+  }
+}
 
 const record = {
   generatedAt: new Date().toISOString(),
@@ -214,14 +311,52 @@ const record = {
     cpu: `${(cpus()[0]?.model ?? 'unknown').trim()} × ${cpus().length}`,
   },
   check,
-  gates: { steps: gateSteps, totalMs: gateTotalMs },
   /**
-   * THE VERDICT IS COMPUTED, NOT TYPED. Same formula as graft (§26.4): a check may cost its suite
-   * plus ten seconds of gate overhead. When the exclusion was not measured, no verdict is claimed —
-   * an unknown base must not be turned into a pass by arithmetic.
+   * WHETHER THE EXCLUSION RUN FAILED FOR A REASON WE CAUSED. `true` means the only failure was the
+   * test-count witness (declared 685 vs measured 684 because the file is parked), which is the
+   * measurement describing itself, not a defect. `false` with a non-zero code is a real blocker.
    */
-  criterion: check.withoutIt === undefined
-    ? { computable: false, why: 'exclusion not measured; a base cannot be inferred by subtraction' }
+  exclusionFailureExplained: exclusionExplained,
+  gates: {
+    steps: gateSteps,
+    /** Only successful steps are summed; the failed ones are listed separately, never folded in. */
+    totalMs: gateTotalMs,
+    totalOf: `${gateStepsOk.length}/${gateSteps.length} step(s) exited 0`,
+    /**
+     * The shared observation was warmed before timing, so `check-readme-counts` is a WARM reading.
+     * Stated explicitly because the same gate costs ~1000× more cold, and the two must not be
+     * compared or averaged (discipline 9).
+     */
+    observation: warmup.warmed ? 'warm (shared suite cache populated before timing)' : `cold — warm-up failed: ${warmup.detail}`,
+    failed: gateStepsFailed.map((step) => ({
+      label: step.label,
+      code: step.ms === undefined ? 'did not start' : step.code,
+      ms: step.ms,
+    })),
+  },
+  /**
+   * THE VERDICT IS COMPUTED, NOT TYPED — AND IT IS NOT COMPUTED FROM A FAILED RUN.
+   *
+   * Same formula as graft (§26.4): a check may cost its suite plus ten seconds of gate overhead.
+   * The base must come from a run that EXITED 0; when it did not, no verdict is claimed. An invalid
+   * base must not be turned into either a pass or a fail by arithmetic — it is simply not a base.
+   */
+  criterion: blockingRuns.length > 0
+    ? {
+        computable: false,
+        /**
+         * ── THE MOST IMPORTANT REASON COMES FIRST (measured by v284 ①) ──────────────────────────
+         *
+         * The first version reported `exclusion not measured` whenever `--skip-exclusion` was used,
+         * even when the run it DID make had failed. With exclusion skipped, 「not measured」 is
+         * trivially true and hides 「the baseline failed」 — which is the fact a reader must act on.
+         * A failed run is a defect; an unmeasured one is a choice.
+         */
+        why: blockingRuns.some((entry) => entry.code !== undefined && entry.code !== 0)
+          ? `baseline run failed (code=${blockingRuns.filter((entry) => entry.code !== undefined).map((entry) => entry.code).join(', ')})`
+          : 'exclusion not measured; a base cannot be inferred by subtraction',
+        blocked: blockingRuns,
+      }
     : (() => {
         const thresholdMs = check.withoutIt.ms + 10_000
         return {
@@ -255,6 +390,15 @@ const say = (line = '') => lines.push(line)
  */
 const sec = (ms) => (ms === undefined ? '**FAILED TO START**' : (ms / 1000).toFixed(1))
 
+/**
+ * A FAILED RUN'S DURATION IS PRINTED WITH ITS EXIT CODE, NOT AS A COST (W4-2d).
+ *
+ * `check (不含) code = 1` was measured being used as a threshold base. The number is real; it is a
+ * real duration of a real FAILED run. Printing it bare invites exactly that misuse, so the cell
+ * carries `EXITED n` whenever the exit code is non-zero.
+ */
+const cell = (step) => (step === undefined ? '—' : step.code === 0 ? sec(step.ms) : `${sec(step.ms)} **EXITED ${step.code}**`)
+
 say('## 机器可读的判据记录（W4-2c）')
 say('')
 say('> 由 `node scripts/perf-record.mjs` 生成，不设阈值。**判据结论是算出来的，不是写上去的。**')
@@ -263,9 +407,9 @@ say('### 排除法：`check` 含 / 不含 `v208`')
 say('')
 say('| 测量 | 秒 |')
 say('|---|---|')
-say(`| \`check\` 含 \`v208\` | **${sec(record.check.withIt.ms)}** |`)
+say(`| \`check\` 含 \`v208\` | **${cell(record.check.withIt)}** |`)
 if (record.check.withoutIt !== undefined) {
-  say(`| \`check\` 不含 \`v208\`（移走再跑） | **${sec(record.check.withoutIt.ms)}** |`)
+  say(`| \`check\` 不含 \`v208\`（移走再跑） | **${cell(record.check.withoutIt)}** |`)
   say(`| \`v208\` 单独 | ${sec(record.check.standaloneMs)} |`)
   say(`| \`v208\` 的**净贡献**（排除法差值） | **${sec(record.check.netMs)}** |`)
   say('')
@@ -278,15 +422,41 @@ if (record.check.withoutIt !== undefined) {
 say('')
 say('### 门禁各段')
 say('')
+say(`> 观测缓存：${record.gates.observation}`)
+say('')
 say('| 段 | 秒 |')
 say('|---|---|')
-for (const step of record.gates.steps) say(`| ${step.label} | ${sec(step.ms)} |`)
-say(`| **合计** | **${sec(record.gates.totalMs)}** |`)
+for (const step of record.gates.steps) say(`| ${step.label} | ${cell(step)} |`)
+say(`| **合计（只算退出 0 的段：${record.gates.totalOf}）** | **${sec(record.gates.totalMs)}** |`)
+if (record.gates.failed.length > 0) {
+  say('')
+  /**
+   * THE FAILED SEGMENTS ARE LISTED, NOT FOLDED IN. A gate that exited non-zero contributed no work
+   * to the chain's cost; including its duration in 「合计」 would present a failure as overhead.
+   */
+  say('> **未计入合计的失败段**：' + record.gates.failed.map((step) => `\`${step.label}\`（${step.code}）`).join('、'))
+}
+if (record.exclusionFailureExplained === true) {
+  say('')
+  say(
+    '> `check`（不含）**exit 1，但这是移走文件本身造成的**：两道门禁断言 README 的测试数等于实测，' +
+      '移走 `v208` 后 685 → 684。这不是缺陷，是测量在描述自己。耗时仍然有效（套件与门禁确实都跑了）——' +
+      '**但这次运行不算「通过」，这句话一并留在记录里。**',
+  )
+}
 say('')
 say('### 判据')
 say('')
 if (record.criterion.computable === false) {
   say(`**不可判定**：${record.criterion.why}`)
+  say('')
+  /**
+   * WHY, NOT JUST THAT. "Baseline run failed" alone sends the reader to re-run everything; naming the
+   * run and its code sends them to the actual breakage.
+   */
+  for (const entry of record.criterion.blocked ?? []) {
+    say(`- \`${entry.run}\`：code=${entry.code ?? '—'} —— ${entry.detail}`)
+  }
 } else {
   say(`公式：\`${record.criterion.formula}\``)
   say('')
