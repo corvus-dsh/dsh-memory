@@ -157,7 +157,70 @@ test('v284 ③: 记录必须写明观测缓存是 warm 还是 cold（两者相�
   }
 })
 
-// ── ④ the count-witness allowance must be BEHAVIOUR, not a name in the source ───────────
+// ── ⑤ 「唯一失败是计数见证」必须可复核，不是脚本自己相信 ────────────────────────────────
+
+test('v284 ⑤: 计数见证 + 另一道门禁也失败 ⇒ 不可解释（「有见证」≠「只有见证」）', () => {
+  /**
+   * ── THE HOLE THIS CLOSES (W4-2f, reviewer's P3) ──────────────────────────────────────────────
+   *
+   * The previous predicate accepted a run whenever a count witness existed and the suite was green.
+   * But a run can ALSO fail because a different gate broke — a docs mismatch, a type-budget complaint —
+   * and that run was still treated as explained: the witness was present and the tests passed.
+   *
+   * `countWitnesses.length > 0` and 「every failure is a count witness」 are different statements.
+   * This case constructs the difference: the same run prints the witness AND another gate's FAIL line.
+   *
+   * The record must then report the observed kinds and refuse the base.
+   */
+  const scriptSource = readFileSync(SCRIPT, 'utf8')
+  const parkedName = /const V208 = '([^']+)'/u.exec(scriptSource)?.[1]
+  assert.ok(parkedName !== undefined, '前提：脚本里必须有 V208 常量')
+
+  /**
+   * A stub that, when the file is parked, prints the count witness **and** an unrelated gate failure.
+   * The suite itself stays green — so a predicate keyed only on 「witness + green suite」 accepts it,
+   * and a predicate keyed on 「every failure is a witness」 rejects it.
+   */
+  const checkBody = [
+    "import { existsSync } from 'node:fs'",
+    "import { join } from 'node:path'",
+    `const parked = join(process.cwd(), 'test', ${JSON.stringify(parkedName)})`,
+    'const missing = !existsSync(parked)',
+    "console.log('ℹ tests 7')",
+    "console.log('ℹ pass 7')",
+    "console.log('ℹ fail 0')",
+    "if (!missing) process.exit(0)",
+    "console.log('  FAIL L106 README 声明测试数 689 / 689，实测 688')",
+    "console.log('  FAIL docs: a documented claim disagrees with the code')",
+    'process.exit(1)',
+  ].join('\n')
+
+  const root = skeleton({ checkBody, checkExitCode: 0 })
+  try {
+    writeFileSync(join(root, 'test', parkedName), '// parked\n', 'utf8')
+    const result = runRecord(root, ['--json'])
+    const record = JSON.parse(result.out.slice(result.out.indexOf('{')))
+
+    assert.equal(
+      record.exclusionFailureExplained,
+      false,
+      `「有见证 + 套件绿」但还有别的门禁失败 ⇒ 不许说成可解释；actual: ${JSON.stringify(record.exclusionFailureKinds)}`,
+    )
+    assert.equal(record.criterion.computable, false, '不可解释的失败不得作为判据基数')
+    assert.equal(record.criterion.thresholdMs, undefined, '拒绝时不许留下阈值')
+
+    /** AND THE EVIDENCE TRAVELS: a reader must be able to see WHICH kinds were observed. */
+    const kinds = record.exclusionFailureKinds ?? []
+    assert.ok(kinds.includes('count-witness'), `必须记录到计数见证；actual: ${JSON.stringify(kinds)}`)
+    assert.ok(kinds.includes('other-gate'), `必须记录到「另一道门禁」；actual: ${JSON.stringify(kinds)}`)
+    assert.ok(
+      (record.exclusionFailureLines ?? []).some((line) => /a documented claim disagrees/u.test(line)),
+      '必须把那行失败原文带出来，便于复核',
+    )
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
 
 test('v284 ④: 「移走文件导致计数不符」可被解释；同一次运行里有真失败就不行（行为，不是源码）', () => {
   /**

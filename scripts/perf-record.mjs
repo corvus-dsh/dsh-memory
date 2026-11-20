@@ -118,6 +118,8 @@ function timedNpm(label, args, cwd) {
        */
       tail: captured.slice(-1200),
       summary: summariseCheckOutput(captured),
+      /** The FAIL/✖ lines, parsed once here so the allowance never re-scans a truncated tail. */
+      failures: collectFailureLines(captured),
     }
   }
   return {
@@ -126,6 +128,7 @@ function timedNpm(label, args, cwd) {
     code: 0,
     tail: captured.slice(-1200),
     summary: summariseCheckOutput(captured),
+    failures: collectFailureLines(captured),
   }
 }
 
@@ -279,11 +282,57 @@ for (const [label, script, args] of GATES) {
  *      is NOT green. That distinction is the whole point: 「I could not see a failure」 ≠ 「there was
  *      no failure」, and this batch has paid for that confusion three times.
  */
-function failureIsExplainedByRemoval(run) {
-  if (run === undefined || run.code === 0) return false
-  const summary = run.summary ?? summariseCheckOutput(run.tail)
-  if (summary.countWitnesses.length === 0) return false
-  return summary.suiteGreen === true
+/** One line of the count witness a README gate prints. Anchored to the line, not the tail. */
+const COUNT_WITNESS_LINE = /README 声明测试数 \d+ \/ \d+，实测 \d+/u
+
+/**
+ * Every `FAIL` line a `check` run printed, so 「the only failure is our own removal」 can be CHECKED
+ * rather than assumed.
+ *
+ * Measured shape (dsh-memory, count witness): `  FAIL L106 README 声明测试数 689 / 689，实测 688`.
+ * A different gate failing produces a different line (a `✖` test name, a docs mismatch, a type-budget
+ * complaint), and every such line must count as an UNEXPLAINED failure.
+ */
+function collectFailureLines(output) {
+  const text = String(output ?? '')
+  return text
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter((line) => /^FAIL\b/u.test(line) || /^✖\s/u.test(line))
+    .filter((line) => !/^✖\s*failing tests:$/u.test(line))
+}
+
+/**
+ * True when the ONLY reason this run failed is our own file removal changing the test count.
+ *
+ * ── 「ONLY」 MUST BE CHECKED, NOT ASSUMED (W4-2f, reviewer's P3) ────────────────────────────────
+ *
+ * The previous version accepted a run whenever a count witness existed and the suite was green. But
+ * a run can ALSO fail because a DIFFERENT gate broke (a docs mismatch, a type-budget complaint) —
+ * and that run was still treated as explained, because the witness was present and the tests passed.
+ * `countWitnesses.length > 0` is not the same statement as 「every failure is a count witness」.
+ *
+ * So every failure line is classified: the count witness lines are recognised, and ANY other failure
+ * line blocks the allowance. The classification is returned rather than discarded, so the record can
+ * show a reader what was actually seen (`exclusionFailureKinds`).
+ */
+function classifyExclusionFailures(run) {
+  const summary = run?.summary ?? summariseCheckOutput(run?.tail)
+  const lines = run?.failures ?? collectFailureLines(run?.tail)
+  const witnessed = lines.filter((line) => COUNT_WITNESS_LINE.test(line))
+  const unexplained = lines.filter((line) => !COUNT_WITNESS_LINE.test(line))
+  return {
+    /** What kinds of failure were seen. Empty when the run passed or produced no failure lines. */
+    kinds: [
+      ...(summary.countWitnesses.length > 0 ? ['count-witness'] : []),
+      ...(summary.suiteGreen === false ? ['suite-failure'] : []),
+      ...(unexplained.length > 0 ? ['other-gate'] : []),
+    ],
+    lines,
+    witnessed,
+    unexplained,
+    summary,
+  }
 }
 
 /**
@@ -349,20 +398,40 @@ if (check.withIt?.code !== 0) {
   })
 }
 let exclusionExplained = false
+/**
+ * WHAT WAS ACTUALLY SEEN in the exclusion run's failures. Empty when the run passed.
+ * Recorded so 「the only failure is a count witness」 is REVIEWABLE, not something the script asserts
+ * about itself (W4-2f).
+ */
+let exclusionFailureKinds = []
+let exclusionFailureLines = []
 if (check.withoutIt === undefined) {
   blockingRuns.push({ run: 'check (不含)', code: undefined, detail: 'exclusion not measured' })
 } else if (check.withoutIt.code !== 0) {
-  if (failureIsExplainedByRemoval(check.withoutIt)) {
-    /**
-     * EXPECTED: our own file removal changed the declared/measured count. The duration stands; the
-     * run is simply not a "pass", and that fact travels in the record rather than being smoothed away.
-     */
+  const classification = classifyExclusionFailures(check.withoutIt)
+  exclusionFailureKinds = classification.kinds
+  exclusionFailureLines = classification.lines
+  /**
+   * EXPLAINED ONLY WHEN **EVERY** FAILURE IS THE COUNT WITNESS AND THE SUITE IS GREEN.
+   *
+   * `kinds` is built from three independent facts; the allowance requires exactly one of them —
+   * `count-witness` — and the absence of `other-gate` and `suite-failure`. A run that also broke a
+   * different gate is NOT explained, even though a witness is present: 「a witness exists」 and
+   * 「every failure is a witness」 are different statements.
+   */
+  const onlyCountWitness =
+    classification.kinds.length === 1 &&
+    classification.kinds[0] === 'count-witness' &&
+    classification.unexplained.length === 0
+  if (onlyCountWitness) {
     exclusionExplained = true
   } else {
     blockingRuns.push({
       run: 'check (不含)',
       code: check.withoutIt.code,
-      detail: check.withoutIt.failedToStart ?? 'exited non-zero for a reason other than the file removal',
+      detail:
+        check.withoutIt.failedToStart ??
+        `exited non-zero for a reason other than the file removal; failure kind(s): ${classification.kinds.join(', ') || 'unknown'}`,
     })
   }
 }
@@ -381,6 +450,12 @@ const record = {
    * measurement describing itself, not a defect. `false` with a non-zero code is a real blocker.
    */
   exclusionFailureExplained: exclusionExplained,
+  /**
+   * The failure kind(s) actually observed in the exclusion run, plus the lines that produced them.
+   * A reader can now check 「only a count witness」 instead of taking the script's word for it.
+   */
+  exclusionFailureKinds,
+  exclusionFailureLines,
   gates: {
     steps: gateSteps,
     /** Only successful steps are summed; the failed ones are listed separately, never folded in. */
@@ -504,9 +579,20 @@ if (record.exclusionFailureExplained === true) {
   say('')
   say(
     '> `check`（不含）**exit 1，但这是移走文件本身造成的**：两道门禁断言 README 的测试数等于实测，' +
-      '移走 `v208` 后 685 → 684。这不是缺陷，是测量在描述自己。耗时仍然有效（套件与门禁确实都跑了）——' +
+      '移走 `v208` 后计数不符。这不是缺陷，是测量在描述自己。耗时仍然有效（套件与门禁确实都跑了）——' +
       '**但这次运行不算「通过」，这句话一并留在记录里。**',
   )
+  say(`>`)
+  say(`> 判据只接受**唯一**的失败类型是 \`count-witness\` 的情况；本次观测到的类型：\`${record.exclusionFailureKinds.join(', ')}\``)
+  for (const line of record.exclusionFailureLines ?? []) say(`>   · \`${line}\``)
+}
+if (record.exclusionFailureExplained === false && (record.exclusionFailureKinds ?? []).length > 0) {
+  say('')
+  say(
+    `> **排除法运行失败且不可解释**：观测到的失败类型 \`${record.exclusionFailureKinds.join(', ')}\` —— ` +
+      '不止「计数见证」一种，所以它不能当基数。',
+  )
+  for (const line of record.exclusionFailureLines ?? []) say(`>   · \`${line}\``)
 }
 say('')
 say('### 判据')
