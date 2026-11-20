@@ -35,6 +35,7 @@
     "test": "node --test test/*.test.mjs",
     "burn-in": "node scripts/burn-in.mjs",
     "baseline:retrieval": "node scripts/retrieval-baseline.mjs",
+    "perf:record": "node scripts/perf-record.mjs",
     "test:concurrency": "node --test --test-concurrency=1 test-concurrency/*.test.mjs",
     "harvest": "node scripts/harvest.mjs",
     "prepare": "node scripts/build.mjs"
