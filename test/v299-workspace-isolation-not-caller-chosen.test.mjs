@@ -41,6 +41,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { apply } from '../lib/index.js'
+/**
+ * `readSkillBody` is imported from its OWN module, not the business barrel: `v202` holds the business
+ * surface at exactly 54 names, and this test needs the FUNCTION (to prove it carries provenance), not
+ * another public name for it.
+ */
+import { readSkillBody } from '../lib/store/skill.js'
 
 /**
  * Boot the plugin the way the probe did: services on the context, `ctx.get(name)` as the accessor
@@ -114,7 +120,9 @@ function makeEnv(options = {}) {
     root,
     workspaceA,
     workspaceB,
+    skillsDir,
     tools,
+    readSkillBody,
     exec: { agent: { id: 'session-in-a' } },
     cleanup: () => rmSync(root, { recursive: true, force: true }),
   }
@@ -197,6 +205,39 @@ test('v299 ⑤: 负向 —— scope: global 的技能跨工作区仍然可读', 
     const reply = await env.tools.get('skill_read').execute({ name: 'delta-anywhere' }, env.exec)
     assert.equal(reply.error, undefined, `global 技能必须能跨工作区读，实测 ${String(reply.error ?? '')}`)
     assert.match(String(reply.body ?? ''), /DELTA-ANYWHERE-BODY/u)
+  } finally {
+    env.cleanup()
+  }
+})
+
+test('v299 ⑦: TD-M21 的探测器 —— 工具层已隔离，函数层仍无门禁（分层记录，不是一句「已隔离」）', async () => {
+  /**
+   * WHY THIS CASE EXISTS AND WHAT IT IS NOT.
+   *
+   * It is not a defence of the tool — ③ already proves the refusal. It is the RECORD of a layered
+   * truth: `readSkillBody(skillsDir, name)` has no workspace in its signature, so each call site
+   * decides whether to check. `skill_read` checks (this file's ③/⑤). `fileCausalSource().skillBody`
+   * (`causal.ts:139`) does not — and that is acceptable TODAY only because `causalChain` and friends
+   * are exported LIBRARY functions, not registered tools.
+   *
+   * The day one of them becomes a tool, this case goes red and the TD-M21 exit condition is due. A
+   * test that records a gap is worth more than a test that routes around it.
+   */
+  const env = makeEnv()
+  try {
+    // ① B7's contribution: the loader now carries the provenance the gate needs.
+    const body = env.readSkillBody(env.skillsDir, 'alpha-b')
+    assert.ok(body !== undefined, '技能必须能读出来（否则下面的断言测的是别的失败）')
+    assert.equal(body.workspace, env.workspaceB, 'SkillBody 必须带回写入时的 workspace —— 否则读取方无从判断')
+    assert.equal(body.scope, 'project', 'SkillBody 必须带回 scope —— 没写时按 project，与门禁同一默认')
+
+    /**
+     * ② TODAY `skill_read` IS THE ONLY MODEL-FACING READER. If the tool list ever gains a second one
+     * (or a `causal*` tool appears), this assertion fails and names the reason.
+     */
+    const toolNames = [...env.tools.keys()]
+    const readers = toolNames.filter((name) => /skill|body|skill_read/u.test(name))
+    assert.deepEqual(readers, ['skill_read'], `模型可见的技能正文读取工具应只有 skill_read，实测：${readers.join(', ')}`)
   } finally {
     env.cleanup()
   }

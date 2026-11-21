@@ -277,6 +277,27 @@ B5 的「真实剩余项」以下面各条的当前状态为准，不以旧计�
 
 ---
 
+### TD-M21 `skill_read` 已加域授权，但**函数层仍无门禁**：`readSkillBody` 的每条调用路径各自决定要不要查（P2，2026-11-21 登记）
+
+| 项 | 内容 |
+|---|---|
+| 现状（**工具层已修**） | B4-B B7 之前，`skill_read` 按名字读任何工作区的技能正文，**完全没有工作区门禁** —— 而且它当时**加不上去**：`readSkillBody` 的返回体没有 `scope`/`workspace`，读取方没有可比对的东西。B7 把这两个字段补进 `SkillBody`，并在 `skill_read` 里调用与检索**同一个** `memoryAllowsWorkspace`。判据：`v299 ③`（越界被拒并点名它属于哪个工作区）、`v299 ⑤`（`scope: global` 仍可跨）。 |
+| 现状（**函数层仍未修**） | `readSkillBody(skillsDir, name)` 本身没有、也不该有「当前工作区」概念 —— 它的签名里没有工作区。所以「有没有门禁」由**每条调用路径**各自决定：`skill_read`（`src/index.ts:1900`）决定查；`causal.ts:139` 的 `fileCausalSource().skillBody` 决定不查。 |
+| 可达性（**这是它为什么是 P2 而不是 P0**） | `causalChain` / `recursiveCausalChain` / `describeCausalChain` 是 `src/index.ts:170` **导出的库函数，不是注册的工具** —— 模型无法直接调用它们。今天唯一的模型可见读法是 `skill_read`，它已经查了。 |
+| 已知限制，写死在这里 | **一旦 `causalChain` 系列被做成工具**（或任何调用方把模型给的名字传给 `fileCausalSource`），`readSkillBody` 就成了一扇无门禁的读取路径。那时必须把「当前工作区」注入 `CausalRecordSource`，而不是在工具里再判一次。 |
+| 为什么现在不动 | 给 `CausalRecordSource` 加工作区参数是一次**接口变更**（`causal.ts:126-142` 的接口 + 至少 `:224`、`:498` 两处构造点），而它换来的安全性在「不是工具」这一前提下是零。为一个不可达的路径改公共接口，正好是本批反复禁止的「顺手扩大」的反面形态：**该登记就登记，不该顺手改就不改**。 |
+| 退出条件（可验收） | ① `CausalRecordSource` 携带 `workspace`，`fileCausalSource` 接受它；② `causalChain` 读技能正文时与 `skill_read` 用**同一个**判定函数；③ 一条测试：会话在 A、技能在 B ⇒ `causalChain` 不把它算进链里；④ can-red：把 `causal.ts:139` 改回无门禁 ⇒ ③ 红。 |
+
+**为什么这条必须写成「工具已隔离 / 函数未隔离」两条，而不是一句「已隔离」**：本批的起点正是
+「门禁的判定逻辑都对，错的是它拿来比较的那个值」（B6/B7/B8/B9 四条同一形状）。所以状态栏写
+「已隔离」会把一条**分层的**事实压成一句**看起来完整**的话 —— 这正是本批要消灭的表述。
+
+**`v299 ⑦` 是这条的探测器**：它断言 `readSkillBody` 的返回体**带着** `scope`/`workspace`（B7 的
+贡献），并断言 `skill_read` 是唯一注册的工具 —— 若将来 `causalChain` 被做成工具，⑦ 会红并要求
+把上面那条退出条件做完。
+
+---
+
 ### TD-M18 `knowledge_harvest` 的拒收语没说它真正执行的规则，且超限 tag 被**静默丢弃**（P2，2026-11-18 登记 —— **已关闭 2026-11-18**）
 
 | 项 | 内容 |
