@@ -1544,15 +1544,37 @@ window.__ModuleLoader__.load({
                   return h('p', { key: 'e', className: 'mc-sub', style: { margin: 0 } },
                     '还没有建过任务图（只有固定的开始节点）。用 memory_graph_update 的 bootstrap 或 add 建一条。')
                 }
+                /**
+                 * ── W6-1c: NAME EVERY ACTIVE NODE, NOT JUST THE FIRST ──────────────────────────
+                 *
+                 * Measured by the user on a live 23-node graph: the card said 「进行中 2」 and named
+                 * ONE node. The count and the list came from two different computations — the count
+                 * from counting all active nodes, the name from `find(...)`. A number the reader
+                 * cannot expand is the same disease as a number without a denominator.
+                 *
+                 * `activeNodes` is shipped by the Host (`memoryConsoleState.graph`), capped at 8 with
+                 * an explicit 「还有 N 个」 tail, so the list can never silently disagree with the
+                 * count the line above shows.
+                 */
+                const activeNodes = Array.isArray(graph.activeNodes) ? graph.activeNodes : []
+                const notShown = num0(graph.activeNotShown)
                 return [
                   h('p', { key: 'c', className: 'mc-sub', style: { margin: '0 0 6px' } },
                     `共 ${total} 个节点（进行中 ${num0(gc.active)} / 待开始 ${num0(gc.pending)}` +
                       ` / 已完成 ${num0(gc.done)} / 已放弃 ${num0(gc.abandoned)}）` +
                       ` · 目标${graph.goalLocked === true ? '已锁定' : '未锁定'}`),
-                  graph.activeBanner
-                    ? h('p', { key: 'a', className: 'mc-sub', style: { margin: 0 } }, graph.activeBanner)
-                    : h('p', { key: 'a', className: 'mc-sub', style: { margin: 0 } },
-                        '当前没有进行中的节点 —— 没有「当前节点」不是错误，但下一位读者会不知道从哪继续。'),
+                  activeNodes.length === 0
+                    ? h('p', { key: 'a', className: 'mc-sub', style: { margin: 0 } },
+                        '当前没有进行中的节点 —— 没有「当前节点」不是错误，但下一位读者会不知道从哪继续。')
+                    : h('div', { key: 'a', className: 'mc-sub', style: { margin: 0 } }, [
+                        ...activeNodes.map((node, index) =>
+                          h('p', { key: `a${index}`, style: { margin: index === 0 ? 0 : '4px 0 0' } },
+                            String(node && node.banner ? node.banner : (node && node.id) || ''))),
+                        notShown > 0
+                          ? h('p', { key: 'more', style: { margin: '4px 0 0', opacity: 0.8 } },
+                              `还有 ${notShown} 个进行中的节点未列出（面板最多列 8 个；用 memory_graph_read 看全部）。`)
+                          : null,
+                      ]),
                 ]
               })(),
         ]),

@@ -2446,13 +2446,33 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
         try {
           const entries = readKnowledge(resolved.knowledgeDir)
           const described = describeGraph(resolved.memoryDir, entries)
-          const activeNode = described.nodes.find((node) => node.status === 'active')
+          /**
+           * ── W6-1c (B4-B): THE FIRST CUT REPORTED A COUNT IT DID NOT SHOW ───────────────────────
+           *
+           * The panel printed 「进行中 2」 and rendered ONE banner (`goal`), because this shipped
+           * `activeNodeId = nodes.find(status === 'active')` — a single node — while `counts.active`
+           * came from counting ALL of them. Measured by the user on a live 23-node graph: the card
+           * said 2 active and named 1. **A number the reader cannot expand is the same disease as a
+           * number without a denominator.**
+           *
+           * So every active node is shipped, not just the first. The cap is deliberate and stated: a
+           * graph with 40 active nodes would otherwise push everything else off the panel, and the
+           * 「还有 N 个」 tail keeps the total honest.
+           */
+          const activeNodes = described.nodes.filter((node) => node.status === 'active')
           return {
             graphId: described.graph.id,
             goalLocked: described.graph.goalLockedAt.length > 0,
             counts: described.counts,
-            activeNodeId: activeNode?.id ?? '',
-            activeBanner: renderNodeBanner(activeNode) ?? '',
+            /** Every active node, in graph order, capped for the panel. */
+            activeNodes: activeNodes.slice(0, 8).map((node) => ({
+              id: node.id,
+              banner: renderNodeBanner(node) ?? node.id,
+            })),
+            activeNodeId: activeNodes[0]?.id ?? '',
+            activeBanner: renderNodeBanner(activeNodes[0]) ?? '',
+            /** How many active nodes exist BEYOND what was shipped — 0 means the list is complete. */
+            activeNotShown: Math.max(0, activeNodes.length - 8),
           }
         } catch (error) {
           /**
