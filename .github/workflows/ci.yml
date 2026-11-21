@@ -247,6 +247,20 @@ jobs:
       - name: Test numbers unique within this repository (no NEW collision)
         run: node scripts/check-test-numbers.mjs
 
+      # ── BOOKKEEPING BEFORE FACT ────────────────────────────────────────────────────────────────
+      #
+      # 五形态之四「记账先于事实」. The literal judgement (`state.X += 1` before `await execute`) would
+      # flag 279 counting sites in this repository, almost none of them IO — a to-read list nobody
+      # reads. This implements the decidable core, which is the shape the batch actually paid for:
+      #
+      #   写一条知识 → 报告写进去了多少条 → 只有写了才盖 harvestedAt 章
+      #
+      # Two gates are accepted (an inline ternary and an `if … return` guard). Comments are blanked
+      # before any decision is looked for: the can-red proved that the prose explaining the rule
+      # otherwise satisfies the check for the rule.
+      - name: A stamp sits behind the write's own answer
+        run: node scripts/check-stamp-after-write.mjs
+
       # ── EVERY SCAN VERDICT CARRIES ITS DENOMINATOR ─────────────────────────────────────────────
       #
       # 五形态之三「保证语不实」. 「全绿」 prints identically for three different situations — scanned
