@@ -1422,6 +1422,27 @@ window.__ModuleLoader__.load({
             onChange: (next) => write('taskAlignment', next),
             disabled: !canWrite,
           }),
+          /**
+           * ── W6-1: `autoApprove` WAS WRITABLE AND NOT ADJUSTABLE ───────────────────────────────
+           *
+           * Measured 2026-11-21: `MEMORY_CONSOLE_KEYS` accepts five keys and the Host reports all
+           * five in `config`, but this panel rendered FOUR toggles — `autoApprove` was missing. So
+           * the only way to change it was to type `/memory-console-set autoApprove true` by hand,
+           * while the panel showed its current value and offered no way to act on it. A readout next
+           * to a control panel that cannot operate it is worse than neither: the user concludes the
+           * switch is broken rather than absent.
+           *
+           * The hint states the consequence, because this one WRITES WITHOUT ASKING: with it on, the
+           * next extraction lands in the store instead of the review queue (`memory_suggestions`).
+           */
+          h(Toggle, {
+            key: 'aa',
+            label: '抽取即写入（autoApprove）',
+            hint: '关（默认）：抽出来的记忆先进待审队列，用 memory_suggestions 逐条过；开：直接落盘，不再有确认这一步',
+            checked: config ? config.autoApprove === true : false,
+            onChange: (next) => write('autoApprove', next),
+            disabled: !canWrite,
+          }),
           // v0.20: the gate's own refusals, so "it did not recall" is explainable
           // from the panel instead of requiring the log.
           num0(state && state.blockedByTask) > 0
@@ -1486,6 +1507,52 @@ window.__ModuleLoader__.load({
                         `有 ${pending} 个已完成节点还没有贡献过知识 —— 这是「飞轮空转」的唯一读数，` +
                           '不是失败：下一次 harvest 会提示，也可以用 memory_contribute 指定节点写一条。')
                     : h('p', { key: 'p', className: 'mc-sub', style: { margin: 0 } }, '没有待提炼的已完成节点。'),
+                ]
+              })(),
+        ]),
+        /**
+         * ── W6-1 (B4-0b-1 C-6 判据③): 任务图视图 ───────────────────────────────────────────────
+         *
+         * `memory_graph_read` has shipped since v0.9.1 and this file had ZERO occurrences of
+         * `memory_graph`: the panel could not say what phase the project was in, although the tool
+         * could. The numbers here are the Host's — `memoryConsoleState` calls the SAME
+         * `describeGraph` that the tool's `execute` calls, so a disagreement between the two readouts
+         * would be a bug in one function, not a drift between two.
+         *
+         * 「空图」 and 「读不出来」 are rendered as DIFFERENT sentences on purpose: they call for
+         * opposite actions (build one / look at the file). The Host reports the second as
+         * `graph.unreadable`, so the panel never has to guess which it is looking at.
+         */
+        h('div', { key: 'graph', className: 'mc-card' }, [
+          h('h3', { key: 'h', className: 'mc-h' }, '任务图（DAG）'),
+          state === null || state === undefined || state.graph === undefined
+            ? h('p', { key: 's', className: 'mc-sub' }, '正在读取…')
+            : (() => {
+                const graph = state.graph || {}
+                if (graph.unreadable !== undefined) {
+                  return h('p', { key: 'u', className: 'mc-sub', style: { color: '#b45309', margin: 0 } },
+                    `任务图读不出来：${String(graph.unreadable)} —— 这是读取失败，不是「没有任务图」。`)
+                }
+                const gc = graph.counts || {}
+                const total = num0(gc.total)
+                if (total <= 1) {
+                  /**
+                   * `START_NODE_ID` is fixed and always exists, so total <= 1 means "no phase nodes
+                   * were ever added" — not "the graph is broken". Saying which one it is matters:
+                   * TD-M12 was exactly this state for many sessions and nobody could see it.
+                   */
+                  return h('p', { key: 'e', className: 'mc-sub', style: { margin: 0 } },
+                    '还没有建过任务图（只有固定的开始节点）。用 memory_graph_update 的 bootstrap 或 add 建一条。')
+                }
+                return [
+                  h('p', { key: 'c', className: 'mc-sub', style: { margin: '0 0 6px' } },
+                    `共 ${total} 个节点（进行中 ${num0(gc.active)} / 待开始 ${num0(gc.pending)}` +
+                      ` / 已完成 ${num0(gc.done)} / 已放弃 ${num0(gc.abandoned)}）` +
+                      ` · 目标${graph.goalLocked === true ? '已锁定' : '未锁定'}`),
+                  graph.activeBanner
+                    ? h('p', { key: 'a', className: 'mc-sub', style: { margin: 0 } }, graph.activeBanner)
+                    : h('p', { key: 'a', className: 'mc-sub', style: { margin: 0 } },
+                        '当前没有进行中的节点 —— 没有「当前节点」不是错误，但下一位读者会不知道从哪继续。'),
                 ]
               })(),
         ]),

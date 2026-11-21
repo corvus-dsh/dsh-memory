@@ -143,7 +143,7 @@ const EXEMPT = new Map([
      * 天花板的规则是「今天多大就是多大」，所以它必须跟着实测走；不允许的是**留虚高配额**（实测 1900
      * 却登记 2009）。这一条下次仍按实测收紧，不因为「这次是加功能」就放宽。
      */
-    ceiling: 2628,
+    ceiling: 2665,
     reason:
       'dsh-memory 的插件入口：applyInner 一个函数 1362 行（占 58%），加上工具注册、console 网络端、'
       + 'harvest 编排与 33 个导出。它是整个重构的**目标文件**，拆它需要先拆它依赖的 store/retrieve'
@@ -156,7 +156,11 @@ const EXEMPT = new Map([
       + '`reason` / `quarantinedTo` 的返回体；工具面把这三样都回显。删掉的那条递归删除本身就是零行的，'
       + '所以这 128 行全是**判据与回执**，不是新机制。'
       + '**B4-0b-1 C-6：2628（+22）**：`flywheelStatsOf` 从 `memory_stats` 的 IIFE 里提成函数，'
-      + '让面板与工具读同一份数字（口径分裂判据 ③）；面板读数本身零行。' + '）',
+      + '让面板与工具读同一份数字（口径分裂判据 ③）；面板读数本身零行。'
+      + '**B4-0b-2 W6-1：2665（+37）**：`memoryConsoleState` 新增 `graph` 字段，调用的正是 '
+      + '`memory_graph_read.execute` 用的 `readKnowledge` + `describeGraph`（一个生产者，两个出口）。'
+      + '37 行里约 34 行是那条判据的说明，代码本体是 3 行；面板侧（`client.js`）另加视图，不在本文件。'
+      + '**这一条与 C-6 ③ 同族**：面板缺视图不是样式问题，是「工具能回答、窗口看不到」。' + '）',
   }],
   ['retrieve.ts', {
     ceiling: 1181,
