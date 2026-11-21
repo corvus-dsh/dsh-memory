@@ -215,7 +215,7 @@ const EXEMPT = new Map([
      * `check-frontmatter-reads.mjs` 当时只匹配单反斜杠的写法。+7 行全部是那段说明（代码本体 1 行），
      * 所以棘轮按实测收紧到 1125。
      */
-    ceiling: 1125,
+    ceiling: 1173,
     reason:
       'A1 的产物：SKILL.md 的读与写两半现在同处一文件（renderSkill/parseSkillFile 共用一个格式契约，'
       + '分开住会让读者与写者漂移）。985 行里约 150 行是分步搬移时写的分节说明注释。'
@@ -233,7 +233,11 @@ const EXEMPT = new Map([
       + '是唯一让「第 36 份副本」不可能出现的做法（由 `scripts/check-frontmatter-reads.mjs` 机械执行）。'
       + '31 行里约 22 行是那条判据的说明，代码本体是 4 行。**W5-2b / 20.4：1118（+23）**：key 现在必须匹配 [A-Za-z_][A-Za-z0-9_]*，因为它是被拼进 RegExp 的 —— 一个元字符不会抛错，只会**悄悄构造出另一个模式**（同 \\s* 吞行一族：读取成功但拿到别的东西）。'
       + '**B4-0b-2 W5-2：1125（+7）**：`readSkillBody` 的 `field` 闭包——同一缺陷的第五份拷贝、也是'
-      + '静态门禁当时**看不见**的那一份（模板字面量写法）——改用 `readFrontmatterField`；+7 行是说明。',
+      + '静态门禁当时**看不见**的那一份（模板字面量写法）——改用 `readFrontmatterField`；+7 行是说明。'
+      + '**B4-B B2：1173（+48）**：`readFrontmatterField` 原本在**整个文件**上匹配 `^key:`，于是正文里一行 '
+      + '`workspace: global` 会被读成字段值 —— 一个「正文决定自己被注入到哪些工作区」的逃逸。'
+      + '新增 `frontmatterBlockOf`（首个 `---` 到下一个 `---`，处理 BOM 与 CRLF），48 行里约 42 行是那条'
+      + '判据的说明，代码本体 6 行。这与 `readSkillBody` 那次同族：**读取范围比它声称的更宽**。',
   }],
 ])
 

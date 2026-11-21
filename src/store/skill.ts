@@ -103,7 +103,55 @@ export function readFrontmatterField(text: string, key: string): string {
         'keys are interpolated into a RegExp, so a metacharacter would build a different pattern instead of failing',
     )
   }
-  return (text.match(new RegExp(`^${key}:[ \\t]*(.+)$`, 'mu'))?.[1] ?? '').trim()
+  /**
+   * ── B4-B B2: THE READ USED TO SEARCH THE WHOLE FILE, SO THE BODY COULD FORGE A FIELD ────────
+   *
+   * This matched `^key:[ \t]*(.+)$` against the ENTIRE document. A SKILL.md whose body contains a line
+   * `workspace: global` therefore answered `global` — measured: a file with NO `workspace:` in its
+   * frontmatter returned `"global"` from the body, and `readSkillWorkspace` returned
+   * `"global"` too. That is a workspace-isolation escape: **the body of a document decided which
+   * workspaces the document may be injected into.**
+   *
+   * The rule is now explicit: a frontmatter field is read ONLY between the first `---` line and the
+   * next `---` line. The body never participates.
+   *
+   * ── WHY THE BOUNDARY IS COMPUTED HERE AND NOT WITH A LAZY REGEX ─────────────────────────────
+   *
+   * `/^---\n([\s\S]*?)\n---/` looks right and fails on two shapes that occur in this store:
+   *   · CRLF line endings (the file may have been written on Windows and read on POSIX);
+   *   · a BOM at the start of the file.
+   * Both are handled by normalising the head of the document first. A document with NO opening fence
+   * returns `''` for every key — which is the honest answer: it has no frontmatter, so it declares
+   * nothing, and 「declares nothing」 must not silently become 「declares whatever the body says」.
+   */
+  const body = frontmatterBlockOf(text)
+  if (body === '') return ''
+  return (body.match(new RegExp(`^${key}:[ \\t]*(.+)$`, 'mu'))?.[1] ?? '').trim()
+}
+
+/**
+ * The text BETWEEN the opening and closing `---` fences, or `''` when the document has no frontmatter.
+ *
+ * Exported (not private) because `readSkillValidity` and the writers need the SAME boundary — two
+ * copies of 「where does the frontmatter end」 is the shape this repository keeps paying for.
+ */
+export function frontmatterBlockOf(text: string): string {
+  if (typeof text !== 'string' || text.length === 0) return ''
+  /** A BOM would sit before the opening fence and make `startsWith('---')` false. */
+  const normalized = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text
+  /** The opening fence must be the FIRST line: `---` on line 40 is a horizontal rule, not frontmatter. */
+  const opening = /^---[ \t]*\r?\n/u.exec(normalized)
+  if (opening === null) return ''
+  const start = opening[0].length
+  /**
+   * The closing fence is the next line that is exactly `---` (allowing trailing spaces). The search is
+   * done on the SLICE so the returned text is already the block body — no index arithmetic to get
+   * wrong.
+   */
+  const rest = normalized.slice(start)
+  const found = /^---[ \t]*(?:\r?\n|$)/mu.exec(rest)
+  if (found === null) return ''
+  return rest.slice(0, found.index)
 }
 
 /** The same read, split into a trimmed list on commas. Empty in ⇒ empty out (never the next line). */
