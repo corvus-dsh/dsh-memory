@@ -35,12 +35,13 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { skillDocsKey } from '../lib/skill-cache.js'
 import { skillDocuments } from '../lib/retrieve/documents.js'
+import { mtimeChangeAfter } from './helpers/fs-settle.mjs'
 
 const HOUR = 3_600_000
 const DAY = 86_400_000
@@ -183,12 +184,29 @@ test('v293 ④: 桶的**理由**部分成立 —— 新增技能被发现，**�
     const initial = skillDocuments(skills, base)
     assert.equal(initial.length, 5)
 
-    /** (a) ADD a skill without calling the invalidation: the parent mtime moves, so this IS noticed. */
-    mkdirSync(join(skills, 'skill-900'), { recursive: true })
-    writeFileSync(
-      join(skills, 'skill-900', 'SKILL.md'),
-      ['---', 'name: skill-900', 'when_to_use: a brand new skill added by a foreign writer', 'scene: general', '---', '', '# new', ''].join('\n'),
-      'utf8',
+    /**
+     * ── THE PAUSE GOES BEFORE THE MKDIR, NOT AFTER IT (B4-0b-2 §40) ─────────────────────────────
+     *
+     * This case used to `mkdirSync(...)` and then immediately ask whether the parent mtime had moved —
+     * 18/20 stale on this machine. Polling AFTER the mkdir does not fix it either: 7/20 still saw no
+     * change after 400 ms, with every sample identical, because the timestamp was already committed.
+     *
+     * Measured (20 trials per row): with a 0 ms pause before the mkdir the parent mtime is unchanged in
+     * **20/20** — and still unchanged after 250 ms; with 1 ms it is unchanged in **0/20**. So the pause
+     * must precede the mutation, and the poll afterwards is a VERIFICATION rather than the fix.
+     */
+    const settled = mtimeChangeAfter(skills, () => {
+      mkdirSync(join(skills, 'skill-900'), { recursive: true })
+      writeFileSync(
+        join(skills, 'skill-900', 'SKILL.md'),
+        ['---', 'name: skill-900', 'when_to_use: a brand new skill added by a foreign writer', 'scene: general', '---', '', '# new', ''].join('\n'),
+        'utf8',
+      )
+    })
+    assert.ok(
+      settled.ok,
+      `父目录 mtime 在 ${settled.waitedMs} ms 内没有变化（${settled.before} 起）—— ` +
+        `这是文件系统层面，不是缓存。观测序列：${JSON.stringify(settled.samples.slice(0, 4))}`,
     )
     const afterAdd = skillDocuments(skills, base)
     assert.equal(afterAdd.length, 6, '新增技能没有被发现 —— 键的第一半（父目录 mtime）失效了')
