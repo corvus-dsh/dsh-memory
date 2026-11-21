@@ -247,6 +247,19 @@ jobs:
       - name: Test numbers unique within this repository (no NEW collision)
         run: node scripts/check-test-numbers.mjs
 
+      # ── NO NEW SILENT CATCH ─────────────────────────────────────────────────────────────────────
+      #
+      # 五形态之五「静默丢弃」. Measured on first run: 37 of 134 catch bodies have no statement and only
+      # a short comment. Each is defensible in place, and rewriting all 37 to satisfy a length rule
+      # would produce comments written for the checker — so the stock is baselined (as a MULTISET per
+      # file, because copying an existing `/* ignore */` into a new catch is the natural way to add
+      # one) and the growth is refused.
+      #
+      # This is the shape that cost this project most: a caught error turned into an empty value, and
+      # the caller could not tell 「读到了空的」 from 「读失败了」.
+      - name: No new silent catch block
+        run: node scripts/check-silent-catch.mjs
+
       # ── FRONTMATTER READS HAVE ONE HOME ─────────────────────────────────────────────────────────
       #
       # This gate ran in `npm run check` and NEVER on a push — measured 2026-11-21 by
