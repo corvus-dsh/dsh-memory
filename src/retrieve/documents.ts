@@ -1,4 +1,22 @@
 /**
+ * ── ONE DAY, AS THE CACHE BUCKET (B4-0b-2, measured 2026-11-21) ────────────────────────────────
+ *
+ * Three caches in this file used to bucket on the HOUR, and every one of them paid a full rebuild at
+ * each hour boundary on an unchanged tree. Measured (skills store, same tree, nothing else moving):
+ *
+ *     skills   warm read   first call after the boundary   ratio
+ *        6      0.075 ms          1.160 ms                   15x
+ *       50      0.094 ms          6.943 ms                   74x
+ *      200      0.059 ms         25.467 ms                  434x
+ *      800      0.061 ms        104.634 ms                 1724x
+ *
+ * Every `now`-derived field in this file goes through `ageDaysOf` and feeds a DAY threshold (14 for
+ * staleness, 30 for unknown), so an hourly bucket rebuilt the world to answer a question that cannot
+ * change within an hour. A day is the granularity the design already claims.
+ */
+const DAY_MS = 86_400_000
+
+/**
  * ── 取数层：把各种持久化形态转成检索用的 Document ──────────────────────────────────────────────
  *
  * 从 `retrieve.ts` 搬出的 8 个声明（L4 层，236 行）。它们做同一件事：
@@ -267,12 +285,26 @@ export function negativeDocuments(memoryDir: string, now: number): Document[] {
   const records = readRecords(path)
   const version = ledgerVersion(path)
   const patchCount = ledgerPatchCount(path)
-  const hour = Math.floor(now / 3_600_000)
+  /**
+   * ── THE HOUR BUCKET WAS A CLIFF HERE TOO (B4-0b-2, measured 2026-11-21) ─────────────────────
+   *
+   * Same defect, same measurement, second cache. `negativeDocumentOf` reads `now` ONLY through
+   * `ageDaysOf(...)` — the 14-day staleness threshold — so an hourly bucket rebuilt the whole
+   * negative corpus at every hour boundary while the answer could not have changed.
+   *
+   * Measured on `skillDocuments` (the same shape, 800 skills): warm 0.061 ms, first call after the
+   * boundary 104.6 ms — a 1724x cliff that scales with the store. Removing the hour bucket from THAT
+   * key took the second call from 94.6 ms to 0.064 ms on an unchanged tree.
+   *
+   * The bucket's PURPOSE — noticing a foreign writer that never calls the invalidation — is served
+   * just as well by a day, because every field derived from `now` here is day-granular.
+   */
+  const day = Math.floor(now / DAY_MS)
   const cached = documentCache.get(path)
   if (
     cached !== undefined &&
     cached.version === version &&
-    cached.hour === hour
+    cached.hour === day
   ) {
     return cached.docs
   }
@@ -280,7 +312,7 @@ export function negativeDocuments(memoryDir: string, now: number): Document[] {
   if (
     cached !== undefined &&
     cached.patchCount === patchCount &&
-    cached.hour === hour &&
+    cached.hour === day &&
     records.length >= cached.built
   ) {
     for (let index = cached.built; index < records.length; index += 1) {
@@ -296,7 +328,7 @@ export function negativeDocuments(memoryDir: string, now: number): Document[] {
     const doc = negativeDocumentOf(records[index], index, now)
     if (doc !== undefined) out.push(doc)
   }
-  documentCache.set(path, { version, patchCount, built: records.length, hour, docs: out })
+  documentCache.set(path, { version, patchCount, built: records.length, hour: day, docs: out })
   return out
 }
 
@@ -307,14 +339,15 @@ export function layerDocuments(memoryDir: string, file: string, kind: 'fact' | '
   const records = readRecords(path)
   const version = ledgerVersion(path)
   const patchCount = ledgerPatchCount(path)
-  const hour = Math.floor(now / 3_600_000)
+  /** Same day bucket as the two caches above, for the same measured reason (see `negativeDocuments`). */
+  const day = Math.floor(now / DAY_MS)
   const cached = documentCache.get(path)
-  if (cached !== undefined && cached.version === version && cached.hour === hour) return cached.docs
+  if (cached !== undefined && cached.version === version && cached.hour === day) return cached.docs
   /** Incremental path: no patch, rows only added. */
   if (
     cached !== undefined &&
     cached.patchCount === patchCount &&
-    cached.hour === hour &&
+    cached.hour === day &&
     records.length >= cached.built
   ) {
     for (let index = cached.built; index < records.length; index += 1) {
@@ -330,6 +363,6 @@ export function layerDocuments(memoryDir: string, file: string, kind: 'fact' | '
     const doc = layerDocumentOf(records[index], index, kind, now)
     if (doc !== undefined) out.push(doc)
   }
-  documentCache.set(path, { version, patchCount, built: records.length, hour, docs: out })
+  documentCache.set(path, { version, patchCount, built: records.length, hour: day, docs: out })
   return out
 }
