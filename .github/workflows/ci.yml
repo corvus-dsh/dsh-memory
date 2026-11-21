@@ -247,6 +247,37 @@ jobs:
       - name: Test numbers unique within this repository (no NEW collision)
         run: node scripts/check-test-numbers.mjs
 
+      # ── FRONTMATTER READS HAVE ONE HOME ─────────────────────────────────────────────────────────
+      #
+      # This gate ran in `npm run check` and NEVER on a push — measured 2026-11-21 by
+      # `scripts/check-check-parity.mjs`, which reported exactly two gaps (`check-cycles` and this
+      # one). The consequence was specific: B4-0b-2 W5-2 fixed three copies of `^key:\s*(` that the
+      # gate had been unable to see (template literals spell `\s` with two backslashes), and the
+      # guard against a FOURTH copy was itself unwired. A fix whose guard never runs is a fix with an
+      # expiry date.
+      - name: Frontmatter reads go through the single reader
+        run: node scripts/check-frontmatter-reads.mjs
+
+      # ── DEPENDENCY CYCLES ───────────────────────────────────────────────────────────────────────
+      #
+      # Also local-only until 2026-11-21 (`check-check-parity.mjs` named it first). `check-cycles`
+      # exits non-zero on a real cycle, so it needs no wrapper — unlike `type-budget`, which goes
+      # through `run-gate.mjs` because a missing compiler is a RESOURCE condition, not a failure.
+      - name: No dependency cycles
+        run: node scripts/check-cycles.mjs
+
+      # ── THE TWO LISTS MUST NOT DRIFT AGAIN ──────────────────────────────────────────────────────
+      #
+      # The defect this step prevents is the one that created this section: `package.json`'s `check`
+      # and this file are two lists, maintained separately, and the repository had already paid for
+      # the drift twice. The gate compares them; the build steps are exempt BY NAME (both repositories
+      # build in their own CI step, which is the same module).
+      #
+      # It runs LAST among the gates on purpose: it should report on a complete answer, not race the
+      # steps it is checking.
+      - name: check parity (every local gate is also a CI step)
+        run: node scripts/check-check-parity.mjs
+
       # ── THE TYPE BUDGET, WHICH THIS REPO'S CI NEVER RAN AT ALL ──────────────────────────────────
       #
       # Measured 2026-11-16: `npm run check` called `node scripts/type-budget.mjs` BARE, and ci.yml
