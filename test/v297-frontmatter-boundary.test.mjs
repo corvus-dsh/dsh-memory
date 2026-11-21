@@ -31,7 +31,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { readFrontmatterField, readSkillWorkspace, listSkillRecords } from '../lib/store.js'
+import { readFrontmatterField, readSkillValidity, readSkillWorkspace, listSkillRecords } from '../lib/store.js'
 /**
  * `frontmatterBlockOf` is NOT on the business surface — it is the boundary `readFrontmatterField`
  * computes internally, and `v202` requires the business surface to stay at exactly 54 names. A helper
@@ -131,6 +131,53 @@ test('v297 ④: 正常文件逐字不变（负向半边：不许「一律返回�
   assert.equal(readFrontmatterField(normal, 'when_to_use'), '处理编号 0 的独立任务时')
   assert.equal(readFrontmatterField(normal, 'workspace'), 'D:/持久层能力架构')
   assert.equal(readFrontmatterField(normal, 'scene'), 'general')
+})
+
+test('v297 ⑥: `readSkillValidity` 也自动获得了同一边界（它走的是同一个函数）', () => {
+  /**
+   * ── WHY THIS CASE EXISTS ────────────────────────────────────────────────────────────────────
+   *
+   * `frontmatterBlockOf`'s docstring originally claimed 「`readSkillValidity` and the writers need the
+   * SAME boundary」 — they did not, yet, and saying so was writing the INTENDED FUTURE as if it were
+   * the present. The corrected comment says the truth: one caller today.
+   *
+   * But the future is already partly true, from the other direction: `readSkillValidity` reads through
+   * `readFrontmatterField`, so it inherits the boundary WITHOUT calling `frontmatterBlockOf` itself.
+   * That is the right shape — one boundary, reached by every reader — and this case pins it so a future
+   * edit cannot quietly give `readSkillValidity` its own whole-file search.
+   */
+  const forged = [
+    '---',
+    'name: forged-validity',
+    'when_to_use: a trigger',
+    '---',
+    '',
+    '# forged-validity',
+    '',
+    'superseded_by: some-other-skill',
+    'valid_at: 2020-01-01',
+    '',
+  ].join('\n')
+
+  const validity = readSkillValidity(forged)
+  assert.equal(validity.supersededBy, '', '正文里的 superseded_by 被读成了字段值 —— 有效性判定被正文伪造')
+  assert.equal(validity.validAt, '', '正文里的 valid_at 被读成了字段值')
+
+  /** And a REAL frontmatter field still comes through, so ⑥ is not 「always empty」. */
+  const real = [
+    '---',
+    'name: real-validity',
+    'when_to_use: a trigger',
+    'superseded_by: newer-skill',
+    'valid_at: 2026-01-01',
+    '---',
+    '',
+    'body',
+    '',
+  ].join('\n')
+  const realValidity = readSkillValidity(real)
+  assert.equal(realValidity.supersededBy, 'newer-skill')
+  assert.equal(realValidity.validAt, '2026-01-01')
 })
 
 test('v297 ⑤: CRLF 与 BOM 都不能让 frontmatter 消失', () => {

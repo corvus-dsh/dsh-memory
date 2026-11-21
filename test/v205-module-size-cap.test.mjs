@@ -215,7 +215,7 @@ const EXEMPT = new Map([
      * `check-frontmatter-reads.mjs` 当时只匹配单反斜杠的写法。+7 行全部是那段说明（代码本体 1 行），
      * 所以棘轮按实测收紧到 1125。
      */
-    ceiling: 1173,
+    ceiling: 1193,
     reason:
       'A1 的产物：SKILL.md 的读与写两半现在同处一文件（renderSkill/parseSkillFile 共用一个格式契约，'
       + '分开住会让读者与写者漂移）。985 行里约 150 行是分步搬移时写的分节说明注释。'
@@ -237,7 +237,10 @@ const EXEMPT = new Map([
       + '**B4-B B2：1173（+48）**：`readFrontmatterField` 原本在**整个文件**上匹配 `^key:`，于是正文里一行 '
       + '`workspace: global` 会被读成字段值 —— 一个「正文决定自己被注入到哪些工作区」的逃逸。'
       + '新增 `frontmatterBlockOf`（首个 `---` 到下一个 `---`，处理 BOM 与 CRLF），48 行里约 42 行是那条'
-      + '判据的说明，代码本体 6 行。这与 `readSkillBody` 那次同族：**读取范围比它声称的更宽**。',
+      + '判据的说明，代码本体 6 行。这与 `readSkillBody` 那次同族：**读取范围比它声称的更宽**。'
+      + '**B4-B B2b：1193（+20）**：`frontmatterBlockOf` 的 docstring 原写「`readSkillValidity` 与写作者'
+      + '需要同一边界」—— 那不是事实（当时只有一个调用者），把**打算做的事写成了已经做的事**。'
+      + '改正并写清「模块级 export ≠ 公开面（barrel 才是）」，+20 行全是说明。',
   }],
 ])
 
