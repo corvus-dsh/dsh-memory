@@ -28,7 +28,7 @@ import {
   isArchivedSkill,
   listSkillSummaries,
   planSkillArchive,
-  whenSimilarity,
+  whenSimilarityDigitsMatter,
 } from '../lib/archive.js'
 import {
   NEGATIVE_STALE_DAYS,
@@ -289,7 +289,8 @@ test('v0.21 P1: a fresh negative is rendered without the anecdote label', () => 
 })
 
 test('v0.21 P1: similarity is a real measure, not a stub', () => {
-  assert.ok(whenSimilarity('当需要写 SKILL.md 的 frontmatter 时', '当需要写 SKILL.md 的 frontmatter 时') > MERGE_SIMILARITY)
-  assert.ok(whenSimilarity('当需要写 frontmatter 时', '数据库连接池要设置超时') < MERGE_SIMILARITY)
-  assert.equal(whenSimilarity('', '任何东西'), 0)
+  /** W6-1c: renamed — this is the ARCHIVE measure, where digits distinguish tasks. */
+  assert.ok(whenSimilarityDigitsMatter('当需要写 SKILL.md 的 frontmatter 时', '当需要写 SKILL.md 的 frontmatter 时') > MERGE_SIMILARITY)
+  assert.ok(whenSimilarityDigitsMatter('当需要写 frontmatter 时', '数据库连接池要设置超时') < MERGE_SIMILARITY)
+  assert.equal(whenSimilarityDigitsMatter('', '任何东西'), 0)
 })

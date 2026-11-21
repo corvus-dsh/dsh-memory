@@ -247,6 +247,18 @@ jobs:
       - name: Test numbers unique within this repository (no NEW collision)
         run: node scripts/check-test-numbers.mjs
 
+      # ── ONE NAME, ONE QUESTION ──────────────────────────────────────────────────────────────────
+      #
+      # 五形态之一「判据分裂」. Measured 2026-11-21: `src/archive.ts` and `src/dedupe.ts` BOTH exported
+      # `whenSimilarity` — same signature, same stated purpose — and answered 0.000 vs 0.909 for the
+      # same pair of sentences. Both answers were right in their own context (archive ABSORBS a skill,
+      # so digits must distinguish; dedupe LINKS records, where digits are noise), which is why the
+      # fix was to let the NAME say which question it answers, not to merge them.
+      #
+      # This gate refuses a name defined in two modules. Re-exports are not definitions.
+      - name: No exported name defined in more than one module
+        run: node scripts/check-duplicate-export-names.mjs
+
       # ── NO NEW SILENT CATCH ─────────────────────────────────────────────────────────────────────
       #
       # 五形态之五「静默丢弃」. Measured on first run: 37 of 134 catch bodies have no statement and only
