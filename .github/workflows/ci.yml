@@ -247,6 +247,18 @@ jobs:
       - name: Test numbers unique within this repository (no NEW collision)
         run: node scripts/check-test-numbers.mjs
 
+      # ── EVERY SCAN VERDICT CARRIES ITS DENOMINATOR ─────────────────────────────────────────────
+      #
+      # 五形态之三「保证语不实」. 「全绿」 prints identically for three different situations — scanned
+      # N things / scanned ZERO things / scanned the WRONG place (§〇 17) — and the denominator is the
+      # only thing that separates them.
+      #
+      # Scope is deliberate: only sentences whose subject is a SCAN. A per-case `PASS <name>` line and
+      # a `built N module(s)` line are not scan verdicts, and demanding a number there is noise that
+      # gets the gate switched off.
+      - name: Every scan verdict carries its denominator
+        run: node scripts/check-guarantee-denominators.mjs
+
       # ── ONE NAME, ONE QUESTION ──────────────────────────────────────────────────────────────────
       #
       # 五形态之一「判据分裂」. Measured 2026-11-21: `src/archive.ts` and `src/dedupe.ts` BOTH exported
