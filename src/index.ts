@@ -2069,11 +2069,57 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
       const banner = renderPhaseHint(active.nodeType, result)
       if (banner === undefined) return undefined
       lastPhaseKey.set(agentId, key)
-      const requirements = active.requirements.length === 0 ? '' : `\n本阶段要求：${active.requirements.slice(0, 3).join('；')}`
+      /**
+       * ── B4-B B3: THE PHASE BANNER BYPASSED THE INJECTION DEFENCE ──────────────────────────────
+       *
+       * `renderPhaseHint` returns a string that ALREADY starts with `[系统提示]`, and it interpolates
+       * the titles of up to three knowledge entries (`names`). Those titles come from the knowledge
+       * FILE, i.e. from data — and data can carry a heading, a fence, or a `---`. Meanwhile the
+       * retrieval hint three hundred lines below goes through `isolateHint`. So the one message that
+       * quotes foreign text was the one NOT isolated.
+       *
+       * `requirements` was the same story one step further: `active.requirements.slice(0, 3)` bounds
+       * the COUNT of items, never their LENGTH, so one 5,000-character requirement reached the target
+       * in full — and a requirement is the model's own prose, which may legitimately contain `##`.
+       *
+       * ── WHY THE PREFIX IS NOT DUPLICATED ────────────────────────────────────────────────────────
+       *
+       * `renderPhaseHint` already emits `[系统提示]` at the START of what it returns. Adding another
+       * would produce two openers, and isolateHint's own comment says why that is worse than none:
+       * an unbalanced envelope is one a reader cannot use. So the prefix stays where it is, and only
+       * the quoting/truncation layers are added here.
+       */
+      const REQUIREMENT_CHARS = 200
+      const BANNER_TOTAL_CHARS = 1200
+      const items = active.requirements.slice(0, 3)
+      const clippedCount = items.filter((item) => String(item ?? '').length > REQUIREMENT_CHARS).length
+      const requirementText = items
+        .map((item) => {
+          const text = String(item ?? '')
+          return text.length <= REQUIREMENT_CHARS ? text : `${text.slice(0, REQUIREMENT_CHARS)}…`
+        })
+        .join('；')
+      const raw = items.length === 0 ? banner : `${banner}\n本阶段要求：${requirementText}`
+      const omitted = active.requirements.length - items.length
+      const notes = [
+        clippedCount === 0 ? '' : `${clippedCount} 条要求超过 ${REQUIREMENT_CHARS} 字已截断`,
+        omitted <= 0 ? '' : `另有 ${omitted} 条未列出`,
+      ].filter((part) => part.length > 0)
+      const noted = notes.length === 0 ? raw : `${raw}（${notes.join('；')}）`
+      /** The whole message is capped, and the cap SAYS SO rather than being applied in silence. */
+      const capped =
+        noted.length > BANNER_TOTAL_CHARS
+          ? `${noted.slice(0, BANNER_TOTAL_CHARS)}…（已截断到 ${BANNER_TOTAL_CHARS} 字）`
+          : noted
+      /**
+       * `isolateHint` wraps the body in the memory envelope and defangs an early `</system_meta_memory>`,
+       * which is what makes a quoted title data rather than layout. It is applied to the WHOLE message
+       * (prefix included) because a prefix is text like any other once the body can contain one.
+       */
       return {
         id: `memory-phase-${agentId || 'session'}-${active.id}`,
         role: 'user',
-        content: [{ type: 'text', text: `${banner}${requirements}` }],
+        content: [{ type: 'text', text: isolateHint(capped) }],
         source: { kind: 'plugin:dsh-memory' },
       }
     } catch {
