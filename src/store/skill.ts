@@ -1119,6 +1119,19 @@ export interface SkillBody {
   dependencies?: Array<{ sourceSessionId: string; seq: number }>
   /** v0.32: the state the procedure is expected to produce, from frontmatter `target_effect`. */
   targetEffect?: string
+  /**
+   * B4-B B7 — PROVENANCE, so the reader can apply the workspace gate.
+   *
+   * `skill_read` returns the body of a skill BY NAME, and before these two fields travelled with it the
+   * caller had nothing to compare against — which is why that path had no workspace gate at all (a
+   * session in workspace A could read workspace B's procedure verbatim).
+   *
+   * `scope` defaults to `project` when the frontmatter is silent, matching `memoryAllowsWorkspace`, so
+   * an unlabelled skill is judged the same way by the reader and by retrieval.
+   */
+  scope: string
+  /** The workspace recorded when the skill was written; `''` when it was never recorded. */
+  workspace: string
 }
 
 /**
@@ -1181,6 +1194,22 @@ export function readSkillBody(skillsDir: string, name: string): SkillBody | unde
     when: field('when_to_use') || field('when'),
     body,
     chars: body.length,
+    /**
+     * B4-B B7 — PROVENANCE THE READER NEEDS TO GATE ON.
+     *
+     * `skill_read` returned the body of ANY skill by name, from any workspace, with no workspace gate
+     * at all — the isolation rule that retrieval enforces was simply absent on the by-name path. It
+     * could not have been enforced there either: the loader did not hand back the two fields the
+     * decision needs. So they travel WITH the body now, read from the same file, and the caller does
+     * the check.
+     *
+     * `scope` defaults to `project` when the frontmatter is silent — the same default
+     * `memoryAllowsWorkspace` applies, so the reader and the gate cannot disagree about an unlabelled
+     * skill. `workspace` stays empty when it was never recorded, which the gate reads as 「unscoped
+     * legacy record」 ⇒ refuse.
+     */
+    scope: field('scope') || 'project',
+    workspace: field('workspace'),
     /**
      * v0.32: the causal fields, read back from the SAME file. Only included when actually present, so a
      * legacy SKILL.md returns exactly the shape it always did — no invented keys, no fake defaults.

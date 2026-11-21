@@ -26,7 +26,7 @@ import { readCurrentGeneration } from './generation.js'
 import { applySkillArchive, listSkillSummaries, planSkillArchive, DEFAULT_SKILL_LIMIT } from './archive.js'
 /** TD-M6: the recall floor's value — imported from its ONE home, never declared here. */
 import { FLOOR } from './thresholds.js'
-import { currentWorkspaceOf, memoryAllowsWorkspace, workspaceOfSession } from './workspace.js'
+import { currentWorkspaceOf, memoryAllowsWorkspace, sameWorkspace, workspaceOfSession } from './workspace.js'
 import { appendMemoryAudit, applySupersede, assertSafeSkillName, listSkillRecords, quarantineWorkspaceMemory, readSkillBody } from './store.js'
 import { installLedgerExitFlush, startLedgerFlushTimer } from './ledger-cache.js'
 import {
@@ -1446,17 +1446,38 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
     execute: async (args: { query: string; threshold?: number; semantic?: boolean; workspace?: string }, exec?: { agent?: { id?: string } }) => {
       const query = String(args.query ?? '')
       const explicitThreshold = Number.isFinite(Number(args.threshold)) ? Number(args.threshold) : undefined
-      // v0.8: a manual search is still a read of memory, so it obeys the same
-      // gate. The caller may name the workspace explicitly; otherwise the answer is
-      // the CALLING session's directory (v0.32 — it used to be `process.cwd()`,
-      // which is the app directory and matched no memory at all).
+      /**
+       * ── B4-B B7: THE CALLER MAY NOT CHOOSE WHICH WORKSPACE IT IS ────────────────────────────────
+       *
+       * `args.workspace` used to WIN over the calling session's own directory (measured: a session in
+       * workspace A that passed `workspace: <B>` retrieved B's skill, while the same call without the
+       * argument correctly returned nothing). That made the whole isolation gate advisory: it
+       * compared the record against a value the caller supplied, so 「is this mine?」 was answered by
+       * the party it protects everyone from.
+       *
+       * The session's OWN directory is provenance — it comes from the log header, never from the
+       * request. So it is resolved first, and the argument is only usable when the session cannot be
+       * located at all (a host that exposes no `workingDirectory`/`sessions.get`). That keeps the
+       * documented reason the parameter exists — 「workspace to search as」, for a caller with no
+       * session — while removing the ability to point it at somebody else's data.
+       *
+       * The refusal is an ERROR, not a silent fallback to the caller's own workspace: a caller that
+       * asked to read B and silently received A would draw conclusions from the wrong corpus.
+       */
+      const sessionWorkspace = sessionWorkspaceOf(typeof exec?.agent?.id === 'string' ? exec.agent.id : '')
       const explicitWorkspace =
         typeof args.workspace === 'string' && args.workspace.trim().length > 0 ? args.workspace : undefined
+      if (explicitWorkspace !== undefined && sessionWorkspace.length > 0 && !sameWorkspace(explicitWorkspace, sessionWorkspace)) {
+        return {
+          hint:
+            `拒绝：本会话属于 ${sessionWorkspace}，但请求的 workspace 是 ${explicitWorkspace}。` +
+            '工作区隔离不允许调用方指定别人的工作区 —— 记忆的 workspace 是写它那一刻的会话目录，' +
+            '不是调用参数。要去那个工作区检索，请在那个工作区里开会话。',
+        }
+      }
       const gate = resolved.workspaceIsolation
         ? {
-            workspace:
-              explicitWorkspace ??
-              (sessionWorkspaceOf(typeof exec?.agent?.id === 'string' ? exec.agent.id : '') || currentWorkspaceOf(undefined)),
+            workspace: sessionWorkspace || explicitWorkspace || currentWorkspaceOf(undefined),
           }
         : {}
       // Default is the two-stage pipeline; `semantic:false` is the offline escape hatch.
@@ -1873,7 +1894,7 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
       additionalProperties: false,
     },
     output: textOutput(),
-    execute: async (args: { name?: string } = {}) => {
+    execute: async (args: { name?: string } = {}, exec?: { agent?: { id?: string } }) => {
       const name = String(args.name ?? '').trim()
       if (name.length === 0) return { error: 'name is required' }
       const body = readSkillBody(resolved.skillsDir, name)
@@ -1887,6 +1908,42 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
             records === undefined
               ? `no skill named "${name}" in ${resolved.skillsDir}`
               : `skill "${name}" exists but its text was refused by the injection scan and cannot be read`,
+        }
+      }
+      /**
+       * ── B4-B B7: THE BY-NAME PATH HAD NO WORKSPACE GATE AT ALL ──────────────────────────────────
+       *
+       * Measured before this fix: a session in workspace A called `skill_read {name:'b7-secret'}` and
+       * received the FULL body of a skill recorded in workspace B. Not a hint, not metadata — the body.
+       * Retrieval's isolation gate was irrelevant here because this path never consulted it.
+       *
+       * The check is the SAME function retrieval uses (`memoryAllowsWorkspace`), given the SAME kind of
+       * facts — so the two paths cannot drift into different answers about the same file. `global`
+       * scope still passes: that is the one deliberate way a memory escapes its workspace.
+       *
+       * WHAT IS DELIBERATELY *NOT* DONE: no 「the hint named it」 trust. A name is model output, and
+       * the whole point of the boundary is that model output cannot authorize a read. A caller that
+       * legitimately needs another workspace's skill is running in that workspace.
+       */
+      if (resolved.workspaceIsolation) {
+        const sessionWorkspace = sessionWorkspaceOf(typeof exec?.agent?.id === 'string' ? exec.agent.id : '')
+        const allowed = memoryAllowsWorkspace({
+          scope: body.scope,
+          workspace: body.workspace,
+          current: sessionWorkspace,
+        })
+        if (!allowed) {
+          /**
+           * The refusal names WHERE the skill lives and WHY it is refused, because the two failures it
+           * might be confused with are both actionable: 「no such skill」 (typo) and 「the scan refused
+           * it」 (poisoned). This one says: it exists, it is not yours.
+           */
+          return {
+            error:
+              `skill "${name}" 属于工作区 ${body.workspace.length > 0 ? body.workspace : '（未记录）'}` +
+              `（scope=${body.scope}），而本会话在 ${sessionWorkspace.length > 0 ? sessionWorkspace : '（无法定位）'}。` +
+              '工作区隔离不允许按名字读别人的技能正文：请在那个工作区里开会话，或确认该技能是 scope: global。',
+          }
         }
       }
       return {
