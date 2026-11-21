@@ -1098,7 +1098,14 @@ export function readSkillBody(skillsDir: string, name: string): SkillBody | unde
   // The same rule the write gate and the retrieval gate apply: stored memory is DATA,
   // and text that tries to rewrite the reader's rules is refused at THIS boundary too.
   if (scanThreat(text) !== undefined) return undefined
-  const field = (key: string): string => (text.match(new RegExp(`^${key}:\\s*(.+)$`, 'mu'))?.[1] ?? '').trim()
+  /**
+   * W5-2: this closure was the FIFTH copy — and the one that proves why a mechanical check needs to
+   * cover both spellings. `scripts/check-frontmatter-reads.mjs` was green here because the regex is
+   * built from a template literal (`:\\s*` in source) while the gate matched only the literal form.
+   * `readSkillBody` is the reader used when a skill's body is re-read, so an empty `when_to_use:`
+   * would have returned the NEXT line as the trigger.
+   */
+  const field = (key: string): string => readFrontmatterField(text, key)
   const body = text.replace(/^---[\s\S]*?---\u0000?/u, '').replace(/^---[\s\S]*?---\r?\n/u, '').trim()
   return {
     name,

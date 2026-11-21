@@ -103,7 +103,7 @@ npm 上的**裸名** `dsh-memory` 和 `dsh-observer` 已被第三方注册，包
 >
 > **核心功能**：消费交接台账，从已完成的会话中抽取四层认知（带 seq 指针的事实、经验、负路径、结构化 SKILL.md 技能），用一次廉价的 LLM 相关性裁决过滤检索结果，且永不 import 切片插件。
 >
-> **状态**：690 / 690 测试全绿（**本地口径**；CI 上 13 条因无编译器走 `RESOURCE` skip，判据按 `pass + skipped` 读数，见 `ARCHITECTURE.md` TD-M15）；工作区硬隔离（`workspaceIsolation`）与双时态有效性在注入路径上生效；跨进程互斥已由彼岸层租约提供（v0.30）。
+> **状态**：700 / 700 测试全绿（**本地口径**；CI 上 13 条因无编译器走 `RESOURCE` skip，判据按 `pass + skipped` 读数，见 `ARCHITECTURE.md` TD-M15）；工作区硬隔离（`workspaceIsolation`）与双时态有效性在注入路径上生效；跨进程互斥已由彼岸层租约提供（v0.30）。
 >
 > **已知结构性限制**：与副脑插件同源 —— 宿主不提供「插件自有 Remote」，客户端无法静默请求本插件做事，因此所有触发点都在模型工具侧（`memory_harvest` / `memory_search` 等）。
 
@@ -526,7 +526,7 @@ CLI 直接用**本仓库自带的 zstd 读取器**读会话文件（DSH 的 v4 �
 - ✅ v0.6.0：scene 场景路由 / 复合证据 sid@seq / 强反查（拒绝纯叙述）/ Fact·Experience 接入检索
 - ✅ v0.8.x：工作区物理隔离（写入记 `workspace`，读取端池级门禁，fail closed）+ 注入前 `scanThreat` 防污染
 - ✅ v0.15.0：**双时态有效性**（`valid_at` / `invalid_at` / `superseded_by`）+ **取代裁决**（LLM 判定 + 互链 + 审计）+ **来源分级**（human / tool / inferred）
-- ⏳ M4：飞轮计分（提示后成功加权、误命中降权）
+- ✅ M4：飞轮计分（提示后成功加权、误命中降权）—— `applySkillFeedback` 落地；`memory_stats.flywheel` 与面板读**同一个** `flywheelStatsOf`（B4-0b-1 C-6 ③，两个消费者一个生产者）。**2026-11-21（W5-7）订正**：这一行长期写着 `⏳`，而功能早已在跑 —— 计划符号没随实现更新，属「登记落后于事实」。
 
 ## 测试
 
@@ -534,7 +534,7 @@ CLI 直接用**本仓库自带的 zstd 读取器**读会话文件（DSH 的 v4 �
 npm run build && npm test
 ```
 
-**当前：690 / 690（本地口径；CI 上 13 条 `RESOURCE` skip 也计入此总数，见 `ARCHITECTURE.md` TD-M15）。**
+**当前：700 / 700（本地口径；CI 上 13 条 `RESOURCE` skip 也计入此总数，见 `ARCHITECTURE.md` TD-M15）。**
 
 **测试专用出口（批次 3 第 1 组）：** 入口导出 31 个名字，其中 **2 个是 seam**（`resetMonotonicClockForTest`、
 `resolveMemoryConfigForTest`）；另有 **5 个模块级 seam** 由测试直接从 `lib/` 引入

@@ -43,14 +43,29 @@ const HELPER_PATTERN = '[ \\t]*'
 /**
  * The forbidden shape, matched against SOURCE TEXT (not against a frontmatter field).
  *
- * Every copy of this bug reads `:<something>:\s*(` in the source — the regex literal or the template that
- * builds one. So the check is for the two-character sequence `:\s*(` as it appears in code. A `\s*`
- * elsewhere (JSON formatting, indentation, a `.replace`) is not a frontmatter read and must not be
- * flagged: a rule that is noisy about things it does not mean gets switched off.
+ * Every copy of this bug reads `:<something>:<backslash>s*(` in the source — the regex literal or the
+ * template that builds one. So the check is for that sequence as it appears in code. A `\s*` elsewhere
+ * (JSON formatting, indentation, a `.replace`) is not a frontmatter read and must not be flagged: a
+ * rule that is noisy about things it does not mean gets switched off.
  *
- * The literal is `: \ s * (` with the backslash doubled, i.e. in source text it is `:\s*(`.
+ * ── W5-2: THE SAME BUG HAS TWO SPELLINGS, AND THE FIRST VERSION ONLY MATCHED ONE ──────────────
+ *
+ * Measured 2026-11-21 (B4-0b-2 W5-2, the week this gate shipped): `FORBIDDEN` was `/:\\s\*\(/u` —
+ * exactly one backslash — because the copies that had been fixed were regex LITERALS:
+ *
+ *     /^aliases:\s*(.+)$/mu                     ← source text has ONE backslash
+ *
+ * A copy written as a TEMPLATE LITERAL spells the same regex with TWO:
+ *
+ *     new RegExp(`^${key}:\\s*(.+)$`, 'mu')     ← source text has TWO
+ *
+ * The gate was GREEN over three files that carried the bug (`src/archive.ts` , `src/store.ts`,
+ * `src/store/skill.ts` — the interpolated-key helper is the most natural way to write a new copy).
+ * This is the same family as `v284 ④`: a check whose dimension cannot tell the right answer from the
+ * wrong one. `[\\]+` accepts both spellings; the self-test below pins the two-backslash case, which is
+ * the one that was invisible.
  */
-const FORBIDDEN = /:\\s\*\(/u
+const FORBIDDEN = /:[\\]+s\*\(/u
 
 /**
  * A COMMENT that quotes the bug is not the bug.
@@ -206,10 +221,18 @@ if (process.argv.includes('--list')) {
  */
 if (process.argv.includes('--self-test')) {
   const cases = [
-    { name: 'the exact bug (merge.ts as written)', line: 'const line = new RegExp(`^${key}:\\s*(.*)$`, \'mu\')', expect: true },
-    { name: 'a literal key read', line: "const v = text.match(/^aliases:\\s*(.+)$/mu)?.[1]", expect: true },
+    { name: 'a regex LITERAL (one backslash in source)', line: "const v = text.match(/^aliases:\\s*(.+)$/mu)?.[1]", expect: true },
+    /**
+     * ── THE CASE THAT WAS MISSING, AND THE THREE FILES IT HID ──────────────────────────────────
+     *
+     * A template literal spells `\s` with TWO backslashes in the source text. The first version of
+     * this gate matched one, so it was green over `archive.ts`, `store.ts` and `store/skill.ts`.
+     * Written here with four because this string literal needs two to produce two.
+     */
+    { name: 'a template literal (TWO backslashes in source, the ignored spelling)', line: "const field = (key) => (text.match(new RegExp(`^${key}:\\\\s*(.+)$`, 'mu'))?.[1] ?? '').trim()", expect: true },
     { name: 'a numeric field', line: "const n = text.match(/^sources:\\s*(\\d+)$/mu)?.[1]", expect: true },
-    { name: 'THE FIX', line: "const v = text.match(/^aliases:[ \\t]*(.+)$/mu)?.[1]", expect: false },
+    { name: 'THE FIX, regex literal', line: "const v = text.match(/^aliases:[ \\t]*(.+)$/mu)?.[1]", expect: false },
+    { name: 'THE FIX, template literal', line: "const field = (key) => readFrontmatterField(text, key)", expect: false },
     { name: 'helper call', line: "const v = readFrontmatterField(text, 'aliases')", expect: false },
     { name: 'indentation (not a frontmatter read)', line: '  \\s* const x = 1', expect: false },
     { name: 'JSON formatting', line: "JSON.stringify(value, null, 2).replace(/\\s*/gu, '')", expect: false },

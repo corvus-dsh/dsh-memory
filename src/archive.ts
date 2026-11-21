@@ -39,6 +39,7 @@ export { MERGE_SIMILARITY }
  * plan actionable — and `store.js` does not import this file, so the direction stays acyclic.
  */
 import { mergeSkills } from './store.js'
+import { readFrontmatterField } from './store/skill.js'
 
 /** Default threshold: past this many ACTIVE skills, one pass runs. */
 export const DEFAULT_SKILL_LIMIT = 100
@@ -67,8 +68,21 @@ export interface ArchivePlan {
   underLimit: boolean
 }
 
+/**
+ * ── W5-2: THE FOURTH COPY IS GONE, AND THE REASON IT SURVIVED IS THE POINT ────────────────────
+ *
+ * This file used to hold its own `field(text, key)` building `new RegExp(`^${key}:\\s*(.+)$`)`.
+ * A10 and W1-9 fixed four copies of that shape; this one stayed because
+ * `scripts/check-frontmatter-reads.mjs` matched the regex-LITERAL spelling (`:\s*(`) and a
+ * template literal spells the same regex with TWO backslashes (`:\\s*`). The gate was green over
+ * a file that had the bug, which is the shape this batch keeps recording: the check looked at a
+ * dimension where the right and the wrong answer are identical.
+ *
+ * The read now goes through `readFrontmatterField`, which uses `[ \t]*` — an empty `when_to_use:`
+ * returns '' and never the next line.
+ */
 function field(text: string, key: string): string {
-  return (text.match(new RegExp(`^${key}:\\s*(.+)$`, 'mu'))?.[1] ?? '').trim()
+  return readFrontmatterField(text, key)
 }
 
 export function listSkillSummaries(skillsDir: string): SkillSummary[] {

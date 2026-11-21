@@ -234,6 +234,19 @@ jobs:
       - name: Documentation counts match the code
         run: node scripts/check-readme-counts.mjs
 
+      # ── TEST NUMBERS ARE UNIQUE WITHIN A REPOSITORY ──────────────────────────────────────────────
+      #
+      # Measured 2026-11-21 (B4-0b-2 W5-1): this repository already shares 9 numbers between files
+      # (`v091` four times, `v102` three, `v032` three, …). Renaming them would be a mass rename of
+      # filenames that commit messages cite, so the gate BASELINES what exists and refuses any NEW
+      # collision — the same shape as the count gate above: the stock is recorded, the growth is
+      # refused. A baseline LARGER than reality is refused too: it is headroom for the next file.
+      #
+      # Scope is per repository, not across the workspace: `v283` is a memory number and graft's
+      # numbering is independent, so a report citing a number must name its repository.
+      - name: Test numbers unique within this repository (no NEW collision)
+        run: node scripts/check-test-numbers.mjs
+
       # ── THE TYPE BUDGET, WHICH THIS REPO'S CI NEVER RAN AT ALL ──────────────────────────────────
       #
       # Measured 2026-11-16: `npm run check` called `node scripts/type-budget.mjs` BARE, and ci.yml

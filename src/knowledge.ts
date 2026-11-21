@@ -81,9 +81,10 @@ const VOCAB_RULE = '1-32 chars, first [a-z0-9], rest [a-z0-9+#._-]'
  * the entries are valid and were simply not kept — and folding the two into one array would make
  * "invalid" and "over quota" indistinguishable to whoever reads it.
  */
-export function normalizeVocabList(value: unknown, max = 8, dropped?: string[]): string[] {
+export function normalizeVocabList(value: unknown, max = 8, dropped?: string[], overCap?: string[]): string[] {
   const raw = Array.isArray(value) ? value : typeof value === 'string' ? value.split(/[,\s]+/u) : []
   const out: string[] = []
+  const kept = new Set<string>()
   for (const item of raw) {
     if (typeof item !== 'string') continue
     const tag = item.trim().toLowerCase().replace(/\s+/gu, '-')
@@ -96,9 +97,27 @@ export function normalizeVocabList(value: unknown, max = 8, dropped?: string[]):
       dropped?.push(`${tag || '(empty)'} (${tag.length} chars): tag must be ${VOCAB_RULE}`)
       continue
     }
-    if (out.includes(tag)) continue
+    if (kept.has(tag)) continue
+    /**
+     * ── W5-6: OVER QUOTA IS REPORTED, AND THE LOOP NO LONGER STOPS AT THE CAP ─────────────────
+     *
+     * This used to `break` the moment `out.length >= max`, which had two effects: the entry was
+     * silently SHORT, and — because nothing counted what came after — nobody could say how short.
+     * The second is what made it unfixable from the result: 「4 tags were dropped」 and 「0 tags were
+     * dropped」 produced the same output.
+     *
+     * Now the scan continues over the remaining items and records every VALID tag that did not fit.
+     * The cap is unchanged (8) and the kept set is identical — only the silence is gone. The names go
+     * into `overCap`, which is a DIFFERENT array from `dropped` on purpose: 「this tag is malformed」
+     * and 「this tag is valid but there was no room」 are two different facts and one array would make
+     * them indistinguishable.
+     */
+    if (out.length >= max) {
+      overCap?.push(tag)
+      continue
+    }
+    kept.add(tag)
     out.push(tag)
-    if (out.length >= max) break
   }
   return out
 }
@@ -177,8 +196,20 @@ function asEntry(raw: Record<string, unknown>): KnowledgeEntry | undefined {
     title: typeof raw.title === 'string' ? raw.title : id,
     when: typeof raw.when === 'string' ? raw.when : '',
     body: typeof raw.body === 'string' ? raw.body : '',
-    tags: normalizeVocabList(raw.tags),
-    applicableNodeTypes: normalizeVocabList(raw.applicable_node_types ?? raw.applicableNodeTypes ?? raw.nodeTypes),
+    /**
+   * ── W5-6: THE READ PATH MUST NOT RE-APPLY A WRITE-TIME CAP ────────────────────────────────────
+   *
+   * These two calls used the DEFAULT `max = 8`, so a row that legitimately holds 12 tags (a merge is
+   * allowed 12) was read back as 8 — the loss happened on the way OUT, long after anyone could report
+   * it, and the caller had no field that could have told them. 「Reading」 is not the place for a quota:
+   * the quota belongs to what this writer agrees to store, and once a row exists it should be read as
+   * it is. A hand-edited file with 40 tags also reads as 40 — which is honest, because it IS 40.
+   */
+  tags: normalizeVocabList(raw.tags, Number.POSITIVE_INFINITY),
+  applicableNodeTypes: normalizeVocabList(
+    raw.applicable_node_types ?? raw.applicableNodeTypes ?? raw.nodeTypes,
+    Number.POSITIVE_INFINITY,
+  ),
     workspace: normalizeWorkspace(raw.workspace),
     provenance,
     confidence: Number.isFinite(Number(raw.confidence)) ? Math.min(1, Math.max(0.2, Number(raw.confidence))) : 1,
@@ -256,6 +287,14 @@ export interface KnowledgeWriteResult {
    * written — the tag is what was denied, not the skill.
    */
   droppedTags: string[]
+  /**
+   * W5-6: VALID vocabulary this write did NOT keep because of a cap (8 on write, 12 on merge).
+   *
+   * Separate from `droppedTags` on purpose: that array means 「this tag is malformed」, this one means
+   * 「this tag is fine, there was no room」. Folding them together would make the two indistinguishable
+   * — the same reason `refused` and `droppedTags` are separate. ALWAYS an array.
+   */
+  truncatedTags: string[]
   /** The entries as stored (after normalisation), so a caller can report exact ids. */
   entries: KnowledgeEntry[]
 }
@@ -279,6 +318,12 @@ export function writeKnowledge(
   const refused: string[] = []
   /** TD-M18: denied vocabularies are REPORTED, not swallowed (see `normalizeVocabList`). */
   const droppedTags: string[] = []
+  /**
+   * W5-6: VALID vocabulary that did not fit under the cap is reported in its own list. Malformed and
+   * over-quota are different facts (one is a refusal, one is a quota) and merging them would leave the
+   * reader unable to tell 「fix your tag」 from 「split the entry」.
+   */
+  const truncatedTags: string[] = []
   const accepted: KnowledgeEntry[] = []
   const at = options.at ?? new Date().toISOString()
   const workspace = normalizeWorkspace(options.workspace)
@@ -314,10 +359,24 @@ export function writeKnowledge(
      */
     const tagDrops: string[] = []
     const nodeDrops: string[] = []
-    const tags = normalizeVocabList(input.tags, 8, tagDrops)
-    const applicableNodeTypes = normalizeVocabList(input.applicableNodeTypes, 8, nodeDrops)
+    const tagOverCap: string[] = []
+    const nodeOverCap: string[] = []
+    const tags = normalizeVocabList(input.tags, 8, tagDrops, tagOverCap)
+    const applicableNodeTypes = normalizeVocabList(input.applicableNodeTypes, 8, nodeDrops, nodeOverCap)
     droppedTags.push(...tagDrops.map((line) => `tags: ${line}`))
     droppedTags.push(...nodeDrops.map((line) => `applicable_node_types: ${line}`))
+    /**
+     * The cap-overflow line names every tag that was valid and did not fit. `8` is quoted from the
+     * call above rather than recomputed, so the message can only say what this call actually did.
+     */
+    if (tagOverCap.length > 0) {
+      truncatedTags.push(`tags: kept 8, did NOT keep ${tagOverCap.length}: ${tagOverCap.join(', ')}`)
+    }
+    if (nodeOverCap.length > 0) {
+      truncatedTags.push(
+        `applicable_node_types: kept 8, did NOT keep ${nodeOverCap.length}: ${nodeOverCap.join(', ')}`,
+      )
+    }
     accepted.push({
       id,
       kind: input.kind === 'negative' ? 'negative' : 'skill',
@@ -338,7 +397,7 @@ export function writeKnowledge(
       updatedAt: at,
     })
   }
-  if (accepted.length === 0) return { written: 0, merged: 0, refused, droppedTags, entries: [] }
+  if (accepted.length === 0) return { written: 0, merged: 0, refused, droppedTags, truncatedTags, entries: [] }
 
   mkdirSync(dir, { recursive: true })
   const stored = withFileLock(`${knowledgePath(dir)}.lock`, () => {
@@ -353,6 +412,29 @@ export function writeKnowledge(
         written += 1
         continue
       }
+      /**
+       * ── W5-6: THE MERGE HAD A SECOND, SILENT CAP ───────────────────────────────────────────
+       *
+       * The union was truncated with `.slice(0, 12)` — no count, no names. So two entries whose
+       * vocabulary together exceeded 12 produced a stored row that looked exactly like an entry that
+       * legitimately had 12, and the tags that fell off were gone from both the store AND the report.
+       *
+       * The cap stays 12 (a merge must not grow without bound); what changes is that the names of the
+       * tags that did not fit are now reported, per id, in `truncatedTags`.
+       */
+      const mergedTags = [...new Set([...previous.tags, ...entry.tags])]
+      const mergedNodeTypes = [...new Set([...previous.applicableNodeTypes, ...entry.applicableNodeTypes])]
+      if (mergedTags.length > 12) {
+        truncatedTags.push(
+          `tags (merge into ${entry.id}): kept 12, did NOT keep ${mergedTags.length - 12}: ${mergedTags.slice(12).join(', ')}`,
+        )
+      }
+      if (mergedNodeTypes.length > 12) {
+        truncatedTags.push(
+          `applicable_node_types (merge into ${entry.id}): kept 12, did NOT keep ` +
+            `${mergedNodeTypes.length - 12}: ${mergedNodeTypes.slice(12).join(', ')}`,
+        )
+      }
       // Union the vocabularies; keep the newest text; count the confirmation.
       existing.set(entry.id, {
         ...previous,
@@ -360,8 +442,8 @@ export function writeKnowledge(
         title: entry.title.length > 0 ? entry.title : previous.title,
         when: entry.when.length > 0 ? entry.when : previous.when,
         body: entry.body.length > 0 ? entry.body : previous.body,
-        tags: [...new Set([...previous.tags, ...entry.tags])].slice(0, 12),
-        applicableNodeTypes: [...new Set([...previous.applicableNodeTypes, ...entry.applicableNodeTypes])].slice(0, 12),
+        tags: mergedTags.slice(0, 12),
+        applicableNodeTypes: mergedNodeTypes.slice(0, 12),
         workspace: previous.workspace.length > 0 ? previous.workspace : entry.workspace,
         evidence: [...new Set([...previous.evidence, ...entry.evidence])],
         sources: previous.sources + 1,
@@ -381,6 +463,7 @@ export function writeKnowledge(
     merged: stored.merged,
     refused,
     droppedTags,
+    truncatedTags,
     entries: accepted.map((entry) => stored.rows.find((row) => row.id === entry.id) ?? entry),
   }
 }

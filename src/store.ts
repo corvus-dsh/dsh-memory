@@ -246,7 +246,11 @@ export function listSkillRecords(skillsDir: string): SkillRecord[] {
       continue
     }
     const validity = readSkillValidity(text)
-    const field = (key: string): string => (text.match(new RegExp(`^${key}:\\s*(.+)$`, 'mu'))?.[1] ?? '').trim()
+    /**
+     * W5-2: the same read as `readFrontmatterField`, not a second copy of it. The closure survives
+     * because it carries `text`; the REGEX does not, which is what the gate forbids.
+     */
+    const field = (key: string): string => readFrontmatterField(text, key)
     const scene = field('scene').toLowerCase()
     out.push({
       name,
