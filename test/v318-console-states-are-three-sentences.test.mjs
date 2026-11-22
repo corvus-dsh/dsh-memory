@@ -97,7 +97,27 @@ function loadPanel() {
     clear: async () => ({ ok: true, via: 'test', text: '{"ok":true}' }),
   })
 
+  /**
+   * ── 19.4-E 同族: A BRIDGE WHOSE ANSWER CAN CHANGE ─────────────────────────────────────────────
+   *
+   * `answering` and `failing` are fixed: each can produce exactly ONE state, so 「it worked, then it did
+   * not」 is unreachable by construction — and that is the timeline where graft's badge was most wrong
+   * (green badge, red card). v318 ⑤ needs a drawer that can be swapped between calls.
+   */
+  let reply = { ok: true, via: 'test', text: '{}' }
+  const mutable = {
+    attach() {},
+    state: async () => reply,
+    set: async () => ({ ok: true, via: 'test', text: '{"ok":true}' }),
+    clear: async () => ({ ok: true, via: 'test', text: '{"ok":true}' }),
+  }
+
   return {
+    setReply: (next) => { reply = next },
+    drawMutable: () => {
+      React.__beginRender()
+      return mod.__panelForTest({ bridge: mutable })
+    },
     draw: (payload) => {
       React.__beginRender()
       return mod.__panelForTest({ bridge: answering(payload) })
@@ -251,6 +271,71 @@ test('v318 ③: the footer 「开关是默认值」 appears ONLY when the switch
   const failedCard = cardText(textOf(drawFailing('桥接超时（探针）')).join(' '))
   assert.match(failedCard, /以上开关显示的是插件默认值/u,
     `读不到时开关必然是默认值，警告不得消失；实测：${failedCard.slice(0, 500)}`)
+})
+
+test('v318 ⑤ (19.4-E 同族): the same THREE TIMELINES that killed the graft badge — memory must pass all', async () => {
+  /**
+   * The lead measured this defect on graft only. The `setState((prev) => prev ?? fallbackState(reason))`
+   * shape exists in BOTH clients, so 「memory is fine」 is a claim that needs evidence, not an assumption.
+   * Measured (probe-memory-reachability.mjs): memory's `health` already tests `error` first, so all four
+   * timelines are correct. These assertions PIN that, so a future edit that reorders the branches — the
+   * exact edit that broke graft — turns red here instead of shipping.
+   *
+   * The three timelines, in the order the lead measured them:
+   *   C. first render, effect not run   ⇒ a fetch is in flight; no verdict yet
+   *   A. first fetch fails              ⇒ 「未连通」
+   *   B. succeeded once, then fails     ⇒ 「未连通」, NOT the green 「正常」
+   */
+  const { setReply, drawMutable, runEffects } = loadPanel()
+  const FAILURE = { ok: false, via: 'test', text: '桥接超时（3000ms 内宿主没有响应）' }
+  const badgeOf = (text) =>
+    ['宿主通道未连通', '宿主通道降级', '已连通 · 部分数据缺失', '宿主通道正常', '正在读取…']
+      .find((name) => text.includes(name)) ?? '(none)'
+
+  /* C — before anything was attempted, no verdict. */
+  setReply({ ok: true, via: 'test', text: JSON.stringify(payloadHealthy()) })
+  assert.equal(badgeOf(panelBody(textOf(drawMutable()).join(' '))), '正在读取…',
+    '尚未尝试时不得断言「未连通」—— 一个在尝试之前到达的判决不是判决')
+
+  /* A — first fetch fails. */
+  setReply(FAILURE)
+  await runEffects()
+  assert.equal(badgeOf(panelBody(textOf(drawMutable()).join(' '))), '宿主通道未连通',
+    '首次就失败必须说「未连通」，不许说「降级」（桥接没了 ≠ 数值不可信）')
+
+  /* B — succeeded once, then fails. The most objectionable timeline: green badge beside a red card. */
+  const second = loadPanel()
+  second.setReply({ ok: true, via: 'test', text: JSON.stringify(payloadHealthy()) })
+  second.drawMutable()
+  await second.runEffects()
+  assert.equal(badgeOf(panelBody(textOf(second.drawMutable()).join(' '))), '宿主通道正常',
+    '前提确认：先成功的这一帧徽章应当是绿的')
+  second.setReply(FAILURE)
+  await second.runEffects()
+  const afterFail = panelBody(textOf(second.drawMutable()).join(' '))
+  assert.equal(badgeOf(afterFail), '宿主通道未连通',
+    `成功后失败必须翻成「未连通」；实测=${badgeOf(afterFail)}`)
+  assert.match(afterFail, /读取失败/u, '前提确认：红卡此时在说「读取失败」（两句必须一致）')
+})
+
+test('v318 ⑥ (19.4-E 同族): this file now has a DRAWER whose answer can change between calls', async () => {
+  /**
+   * §〇 26 corollary, on the fixture rather than the assertion: a fixed failing bridge cannot express
+   * 「it worked, then it did not」, and timeline B is exactly that. `setReply` is why ⑤ can be written at
+   * all — the earlier fixture could only ever produce one of the states, so the other was unreachable
+   * by construction.
+   */
+  const { setReply, drawMutable, runEffects } = loadPanel()
+  setReply({ ok: false, via: 'test', text: '桥接超时（探针）' })
+  drawMutable()
+  await runEffects()
+  const failed = panelBody(textOf(drawMutable()).join(' '))
+  setReply({ ok: true, via: 'test', text: JSON.stringify(payloadHealthy()) })
+  await runEffects()
+  const recovered = panelBody(textOf(drawMutable()).join(' '))
+  assert.equal(failed.includes('宿主通道未连通'), true, '失败时「未连通」')
+  assert.equal(recovered.includes('宿主通道正常'), true,
+    `恢复后必须能回到正常（否则夹具只有一个状态，②③ 都测的是它）；实测：${recovered.slice(0, 300)}`)
 })
 
 test('v318 ④: badge, title and footer agree ON THE SAME SCREEN', async () => {
