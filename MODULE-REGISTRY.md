@@ -121,6 +121,7 @@ filter.ts -> retrieve.ts : type-only   （import type { MemoryHit }，运行时�
 | `src/store/clock.ts` | 单调时钟接缝：`monotonicTimestamp` 与它的测试重置钩子。第 0 步的产物。 | `monotonicTimestamp`, `resetMonotonicClockForTest` …（共 3） | — |
 | `src/thresholds.ts` | 六个决定「召回什么」的数的唯一出处：零 import 的叶子（TD-M6）。 | `FLOOR`, `THRESHOLD`, `MERGE_SIMILARITY`, `TASK_TERM_LIMIT`, `FILTER_MAX_CANDIDATES`, `NEGATIVE_STALE_DAYS` | — |
 | `src/console-scope.ts` | 用户报的 P0：「四层（技能/负知识/任务图/飞轮）未按工作区隔离」。技能靠 `memoryAllowsWorkspace` 过滤（与检索同一谓词），其余三层报出各自目录 —— 因为它们**没有** workspace 字段，只能靠目录说明 | `ScopableSkillRecord`, `ConsoleScoping`, `scopeConsoleLayers` | `workspace.ts` |
+| `src/console-degradation.ts` | §〇 24 同族：面板在三处读 `state.degraded`，而产品从不发出该字段。三条真实降级（任务图读不出 / 台账被拒读 / `configEditor` 不可用）聚合为「布尔 + 理由」 | `DegradationInputs`, `DegradationReport`, `safeFlag`, `describeDegradation` | — |
 | `src/generation.ts` | b3-f8：跨代降级的判据（「一代」「被引用」两个定义）与当前代读取。 | `DEFAULT_GENERATION_MODE`, `GENERATION_DOWNGRADE_WEIGHT`, `GenerationMode`, `generationDowngradeFor`, `isReferenced`, `readCurrentGeneration` | — |
 | `src/retrieve/interning.ts` | 检索层的共享原语：分词、标题裁剪、证据提取、陈旧负判定、Document 构造。 | `INCIDENT_MARKERS`, `NEGATIVE_STALE_DAYS`, `NEGATIVE_STALE_WEIGHT`, `ageDaysOf`, `clipTitle`, `documentCache` …（共 14） | extract.ts (type-only), skill-cache.ts, workspace.ts |
 | `src/retrieve/storage-tier.ts` | 存储选路：json 默认、sqlite 可选；三个模块级 let 与它们的唯一写者同处一模块。 | `currentIndex`, `getStorageTier`, `setStorageTier` …（共 3） | sqlite-index.ts |

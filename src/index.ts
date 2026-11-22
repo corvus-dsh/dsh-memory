@@ -27,6 +27,7 @@ import { applySkillArchive, listSkillSummaries, planSkillArchive, DEFAULT_SKILL_
 /** TD-M6: the recall floor's value — imported from its ONE home, never declared here. */
 import { FLOOR } from './thresholds.js'
 import { scopeConsoleLayers } from './console-scope.js'
+import { describeDegradation, safeFlag, graphIsUnreadable } from './console-degradation.js'
 import { currentWorkspaceOf, memoryAllowsWorkspace, sameWorkspace, workspaceOfSession } from './workspace.js'
 import { appendMemoryAudit, applySupersede, assertSafeSkillName, listSkillRecords, quarantineWorkspaceMemory, readSkillBody } from './store.js'
 import { installLedgerExitFlush, startLedgerFlushTimer } from './ledger-cache.js'
@@ -2546,6 +2547,21 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
       skillsDir: resolved.skillsDir,
       /** USER-REQUESTED: the four layers, each with the scoping that actually applies to it. */
       scoped,
+      /** §〇 24: the panel reads `state.degraded` in 3 places; the rule is in `console-degradation.ts`. */
+      ...describeDegradation({
+        graphUnreadable: safeFlag(() =>
+          graphIsUnreadable(
+            () => readFileSync(graphPath(resolved.memoryDir), 'utf8'),
+            (error) => String((error as any)?.code ?? '') === 'ENOENT',
+            (text) => JSON.parse(text),
+          ),
+        ),
+        ledgerDeferred: safeFlag(() => readLedgers(resolved.graftDataDir).deferred === true),
+        editorAvailable: safeFlag(() => {
+          const editor = (ctx as any).get?.('configEditor')
+          return typeof editor === 'object' && editor !== null && typeof (editor as any)?.edit === 'function'
+        }, false),
+      }),
       // v0.20: how many memories the task gate refused on the last turn.
       ...(lastTaskBlocks.get(agentId) === undefined ? {} : { blockedByTask: lastTaskBlocks.get(agentId) }),
       ...(visibility.note === '' ? {} : { visibilityNote: visibility.note }),

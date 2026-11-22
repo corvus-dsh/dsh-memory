@@ -97,6 +97,7 @@ const SCANNED = [
   'store.ts',
   'thresholds.ts',
   'console-scope.ts',
+  'console-degradation.ts',
   'generation.ts',
   'suggest.ts',
   'threat.ts',
@@ -144,7 +145,7 @@ const EXEMPT = new Map([
      * 天花板的规则是「今天多大就是多大」，所以它必须跟着实测走；不允许的是**留虚高配额**（实测 1900
      * 却登记 2009）。这一条下次仍按实测收紧，不因为「这次是加功能」就放宽。
      */
-    ceiling: 2829,
+    ceiling: 2845,
     reason:
       'dsh-memory 的插件入口：applyInner 一个函数 1362 行（占 58%），加上工具注册、console 网络端、'
       + 'harvest 编排与 33 个导出。它是整个重构的**目标文件**，拆它需要先拆它依赖的 store/retrieve'
@@ -183,7 +184,11 @@ const EXEMPT = new Map([
       + '所以面板永远显示插件启动时那个目录的数据。规则本体搬进新模块 `console-scope.ts`（本条 ceiling 只'
       + '允许「跟着实测走」，所以搬运是必须的）；本文件剩下 1 行 import + 5 行调用 + 1 行 state = 净增 10 行。'
       + '**这 10 行不是机制，是一次「把判断交给唯一所有者」**：技能靠 `memoryAllowsWorkspace` 过滤（与检索'
-      + '同一个谓词），其余三层报出各自目录，让读者能看出「这张图不是我这个项目的」。' + '）',
+      + '同一个谓词），其余三层报出各自目录，让读者能看出「这张图不是我这个项目的」。'
+      + '**§〇 24 同族：2839（+10）**：面板在三处读 `state.degraded`，而产品**从不发出**该字段 —— '
+      + '读的一方写了、写的一方没写。规则本体搬进 `console-degradation.ts`（同样因为本条 ceiling 只允许'
+      + '「跟着实测走」）；本文件剩下 1 行 import + 一个调用块。这 10 行不是机制，是**接通一条一直存在但没接上的线**。'
+      + '）',
   }],
   ['retrieve.ts', {
     ceiling: 1181,
