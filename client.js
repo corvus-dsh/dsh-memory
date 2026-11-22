@@ -1102,7 +1102,29 @@ window.__ModuleLoader__.load({
       // section, never the panel.
       const num0 = (value) => (typeof value === 'number' && Number.isFinite(value) ? value : 0)
       const config = state === null || state === undefined ? null : state.config || null
-      const skillsRaw = state !== null && state !== undefined && Array.isArray(state.skills) ? state.skills : []
+      /**
+       * ── 17.4-B (P0, lead-measured): THE TABLE LISTED THE WHOLE STORE ──────────────────────────────
+       *
+       * MEASURED: `memoryConsoleState` returned BOTH halves — `skills` (the store) and
+       * `scoped.skills` (what THIS workspace can use) — but this line read `state.skills`, and
+       * `scoped.skills` was used ONLY to compute the count on the line above the table. So the panel
+       * gained a sentence saying 「本工作区可用 N / 库中 M」 while the table below it kept listing every
+       * other workspace's skills. The user's 「未按工作区隔离」 was exactly right, and it was about the
+       * TABLE, not the count.
+       *
+       * The filtered list is now the table's source. `state.skills` remains the FALLBACK — an older
+       * payload, or a host that has not restarted — and the fallback is ANNOUNCED in the card title
+       * (`skillsUnfiltered`), because a silent fallback would recreate the original confusion in the one
+       * case where it matters: the reader cannot tell a filtered table from an unfiltered one.
+       */
+      const scopedSkills =
+        state !== null && state !== undefined && state.scoped && Array.isArray(state.scoped.skills)
+          ? state.scoped.skills
+          : null
+      const skillsUnfiltered = scopedSkills === null
+      const skillsRaw = skillsUnfiltered
+        ? (state !== null && state !== undefined && Array.isArray(state.skills) ? state.skills : [])
+        : scopedSkills
       const skills = skillsRaw.filter((skill) => skill !== null && typeof skill === 'object')
       const scenes = state !== null && state !== undefined && Array.isArray(state.scenes) ? state.scenes : []
       const counts = state !== null && state !== undefined && state.counts ? state.counts : {}
@@ -1455,7 +1477,16 @@ window.__ModuleLoader__.load({
             h('h3', { key: 't', className: 'mc-h', style: { margin: 0 } },
               state === null || state === undefined
                 ? '记忆库'
-                : `技能库（可注入）· ${num0(counts.skills)} 条（生效 ${num0(counts.active)} / 失效 ${num0(counts.superseded)}）· 待审 ${num0(counts.queued)}`),
+                : `技能库（可注入）· ${num0(counts.skills)} 条（生效 ${num0(counts.active)} / 失效 ${num0(counts.superseded)}）· 待审 ${num0(counts.queued)}` +
+                  /**
+                   * 17.4-B 判据④: a DEGRADED table must look degraded. When the payload has no `scoped`
+                   * (an older host, or one that has not restarted), the table falls back to the whole store
+                   * — and says so in the title. Without this label the reader cannot distinguish 「your
+                   * project's skills」 from 「every workspace's skills」, which is the confusion being fixed.
+                   */
+                  (skillsUnfiltered && (state === null || state === undefined ? false : Array.isArray(state.skills) && state.skills.length > 0)
+                    ? ' · ⚠ 未按工作区过滤（宿主未提供 scoped 数据）'
+                    : '')),
             h('button', { key: 'b', type: 'button', className: 'mc-btn', disabled: busy, onClick: refresh }, busy ? '读取中…' : '刷新'),
           ]),
           h('p', { key: 's', className: 'mc-sub' }, via ? `桥接通道：${via}` : '按 scene 过滤；human 来源带绿色标记，其余需要核实'),
