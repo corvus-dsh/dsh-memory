@@ -26,6 +26,7 @@ import { readCurrentGeneration } from './generation.js'
 import { applySkillArchive, listSkillSummaries, planSkillArchive, DEFAULT_SKILL_LIMIT } from './archive.js'
 /** TD-M6: the recall floor's value — imported from its ONE home, never declared here. */
 import { FLOOR } from './thresholds.js'
+import { scopeConsoleLayers } from './console-scope.js'
 import { currentWorkspaceOf, memoryAllowsWorkspace, sameWorkspace, workspaceOfSession } from './workspace.js'
 import { appendMemoryAudit, applySupersede, assertSafeSkillName, listSkillRecords, quarantineWorkspaceMemory, readSkillBody } from './store.js'
 import { installLedgerExitFlush, startLedgerFlushTimer } from './ledger-cache.js'
@@ -2521,6 +2522,13 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
      * cannot tell different stories.
      */
     const visibility = skillVisibilityFor(workspace)
+    /** USER-REPORTED: 「四层、任务图、飞轮未按工作区隔离」 —— the rule is in `console-scope.ts`. */
+    const scoped = scopeConsoleLayers({
+      skills,
+      workspace,
+      memoryDir: resolved.memoryDir,
+      knowledgeDir: resolved.knowledgeDir,
+    })
     return {
       config: {
         retrieval: resolved.retrieval,
@@ -2536,6 +2544,8 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
       workspace,
       memoryDir: resolved.memoryDir,
       skillsDir: resolved.skillsDir,
+      /** USER-REQUESTED: the four layers, each with the scoping that actually applies to it. */
+      scoped,
       // v0.20: how many memories the task gate refused on the last turn.
       ...(lastTaskBlocks.get(agentId) === undefined ? {} : { blockedByTask: lastTaskBlocks.get(agentId) }),
       ...(visibility.note === '' ? {} : { visibilityNote: visibility.note }),

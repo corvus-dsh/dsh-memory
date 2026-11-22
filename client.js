@@ -1460,6 +1460,33 @@ window.__ModuleLoader__.load({
           ]),
           h('p', { key: 's', className: 'mc-sub' }, via ? `桥接通道：${via}` : '按 scene 过滤；human 来源带绿色标记，其余需要核实'),
           /**
+           * ── USER-REPORTED (P0): 「四层、任务图、飞轮未按工作区隔离」 ──────────────────────────────
+           *
+           * The four cards below all read directories derived ONCE at `apply()` from `paths.data` — a
+           * PROCESS directory. Showing which workspace (and which directories) each card describes is
+           * the fix that is actually possible without orphaning existing records: the skill store is
+           * global with a per-record `workspace`, while memory/knowledge/graph are per-directory stores
+           * whose records carry no workspace field at all.
+           *
+           * So this line answers 「what am I looking at」 for each layer, and the skill count is
+           * additionally filtered to what THIS workspace can use. A reader who sees a task graph that
+           * does not match their project now has the evidence instead of a suspicion.
+           */
+          (() => {
+            const scoped = state !== null && state !== undefined && state.scoped ? state.scoped : null
+            if (scoped === null) return null
+            const scopedCount = Array.isArray(scoped.skills) ? scoped.skills.length : null
+            return [
+              h('p', { key: 'sc', className: 'mc-hint', style: { margin: '0 0 4px' } },
+                `当前工作区：${state.workspace || '(未绑定会话；按 fail-closed 处理，不显示他处技能)'}` +
+                  (scopedCount === null ? '' : ` · 本工作区可用技能 ${scopedCount} / 库中 ${num0(counts.skills)}`)),
+              h('p', { key: 'scdir', className: 'mc-hint', style: { margin: '0 0 8px' } },
+                `口径：${scoped.skillsScope}；记忆 ${scoped.memoryScope}；知识 ${scoped.knowledgeScope}；` +
+                  `任务图 ${scoped.graphScope}。后三者没有 workspace 字段，因此靠目录区分 —— 若与你的项目不符，` +
+                  '说明该目录属于另一个工作区。'),
+            ]
+          })(),
+          /**
            * ── v8.x TD-M20 (P2): THE SNAPSHOT'S AGE, SAID WHERE THE COUNT IS ──────────────────────────
            *
            * The skill document cache is keyed on 「directory mtime + the current DAY」, so adding or
