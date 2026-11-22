@@ -1462,10 +1462,13 @@ window.__ModuleLoader__.load({
                * 会话」 — and the SECOND sentence was the false one. Those switches are real and writable.
                *
                * Only an unavailable `configEditor` makes the claim true, and the producer states that as
-               * its own bit (`configWritable`, from `console-degradation.ts`). Read through `=== false` so
-               * the FALLBACK payload — which carries no such field because the bridge never answered —
-               * keeps the warning it needs. Defaulting an unknown bit to 「switches are real」 would drop
-               * a warning precisely in the case that always needed it.
+               * its own bit (`configWritable`, from `console-degradation.ts`, emitted in BOTH branches).
+               *
+               * Read through `=== false`: the warning prints only when the producer SAID so. An absent field
+               * therefore means 「an older producer I cannot ask」, and this branch chooses to say only
+               * 「点击「刷新」重试」 rather than assert a fact it does not have. The one path that must never
+               * lose the warning — the bridge never answered — cannot reach it: `fallbackState` emits
+               * `configWritable: false` explicitly.
                */
               state !== null && state !== undefined && state.configWritable === false
                 ? h('div', { key: 'h', style: { marginTop: '8px', opacity: 0.8 } },
