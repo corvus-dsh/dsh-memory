@@ -1455,7 +1455,7 @@ window.__ModuleLoader__.load({
             h('h3', { key: 't', className: 'mc-h', style: { margin: 0 } },
               state === null || state === undefined
                 ? '记忆库'
-                : `记忆库 · ${num0(counts.skills)} 条（生效 ${num0(counts.active)} / 失效 ${num0(counts.superseded)}）· 待审 ${num0(counts.queued)}`),
+                : `技能库（可注入）· ${num0(counts.skills)} 条（生效 ${num0(counts.active)} / 失效 ${num0(counts.superseded)}）· 待审 ${num0(counts.queued)}`),
             h('button', { key: 'b', type: 'button', className: 'mc-btn', disabled: busy, onClick: refresh }, busy ? '读取中…' : '刷新'),
           ]),
           h('p', { key: 's', className: 'mc-sub' }, via ? `桥接通道：${via}` : '按 scene 过滤；human 来源带绿色标记，其余需要核实'),
@@ -1492,7 +1492,7 @@ window.__ModuleLoader__.load({
         h('div', { key: 'flywheel', className: 'mc-card' }, [
           h('h3', { key: 'h', className: 'mc-h' }, '飞轮（知识回流）'),
           state === null || state === undefined || state.flywheel === undefined
-            ? h('p', { key: 's', className: 'mc-sub' }, '正在读取…')
+            ? h('p', { key: 's', className: 'mc-sub' }, phase === 'loading' ? '正在读取…' : '宿主通道未送达飞轮数据（原因见上方红卡）')
             : (() => {
                 const fly = state.flywheel || {}
                 const kind = fly.byKind || {}
@@ -1500,8 +1500,27 @@ window.__ModuleLoader__.load({
                 const pending = num0(fly.pendingNodes)
                 return [
                   h('p', { key: 'c', className: 'mc-sub', style: { margin: '0 0 6px' } },
-                    `已贡献 ${num0(fly.contributed)} 条（技能 ${num0(kind.skill)} / 负知识 ${num0(kind.negative)}）` +
+                    `知识库（含负知识）· 已贡献 ${num0(fly.contributed)} 条（技能 ${num0(kind.skill)} / 负知识 ${num0(kind.negative)}）` +
                       ` · 已完成节点 ${finished}（已提炼 ${num0(fly.harvestedNodes)}，待提炼 ${pending}）`),
+                  /**
+                   * ── v8.x TD-29 (P2): TWO COUNTERS ON ONE SCREEN, WITH DIFFERENT DENOMINATORS ────────
+                   *
+                   * The card above counts `counts.skills` — the SKILL STORE, the things that can be
+                   * injected into a prompt. This card counts `flywheel.contributed` —
+                   * `readKnowledge(knowledgeDir).length`, the KNOWLEDGE ENTRIES, which include negative
+                   * knowledge and are not a superset of skills (they are written by different producers
+                   * into different directories).
+                   *
+                   * Nothing on the page said so. Two numbers with different denominators, side by side,
+                   * with no sentence relating them, is how a reader concludes one of them is wrong — or
+                   * worse, that the flywheel is losing data. The line below is the relation; `v308 ④`
+                   * makes DELETING it a gate failure, so it cannot be tidied away as redundant.
+                   */
+                  h('p', { key: 'rel', className: 'mc-hint', style: { margin: '0 0 6px' } },
+                    '说明：上述两个数字口径不同 —— 技能库是「可注入的技能」，知识库是「已写入的知识条目（含负知识）」，' +
+                      '二者不是同一集合，不要相减也不要用一个去核对另一个。'),
+                  h('p', { key: 'src', className: 'mc-hint', style: { margin: '0 0 6px' } },
+                    '来源：技能数 ← counts.skills（技能存储）；知识条目数 ← flywheel.contributed（知识库目录）。两处均由插件计算，本面板只显示。'),
                   pending > 0
                     ? h('p', { key: 'p', className: 'mc-sub', style: { color: '#b45309', margin: 0 } },
                         `有 ${pending} 个已完成节点还没有贡献过知识 —— 这是「飞轮空转」的唯一读数，` +
@@ -1526,7 +1545,16 @@ window.__ModuleLoader__.load({
         h('div', { key: 'graph', className: 'mc-card' }, [
           h('h3', { key: 'h', className: 'mc-h' }, '任务图（DAG）'),
           state === null || state === undefined || state.graph === undefined
-            ? h('p', { key: 's', className: 'mc-sub' }, '正在读取…')
+            /**
+             * v8.x TD-30: 「正在读取」 is a state with an EXIT, not a permanent label.
+             *
+             * The graph card already had three states (`loading` / 未送达 / 读不出来); this branch and
+             * the two others said 「正在读取…」 unconditionally, so a Host that never delivered the
+             * field kept the card spinning forever with no way to tell it from a slow fetch. The
+             * lesson TD-30 states is not 「fix that one card」 but 「loading must have an exit」, so all
+             * three read the SAME `phase` the rest of the panel uses.
+             */
+            ? h('p', { key: 's', className: 'mc-sub' }, phase === 'loading' ? '正在读取…' : '宿主通道未送达任务图（原因见上方红卡）')
             : (() => {
                 const graph = state.graph || {}
                 if (graph.unreadable !== undefined) {
@@ -1584,7 +1612,7 @@ window.__ModuleLoader__.load({
           // exist only after being checked — the old code read `.epoch.retired`
           // straight off the payload and blanked the panel when the Host omitted it.
           ledger === undefined
-            ? h('p', { key: 's', className: 'mc-sub' }, '正在读取…')
+            ? h('p', { key: 's', className: 'mc-sub' }, phase === 'loading' ? '正在读取…' : '宿主通道未送达台账（原因见上方红卡）')
             : [
                 h('p', { key: 'e', className: 'mc-sub', style: { margin: '0 0 6px' } },
                   `epoch retired ${num0(ledger.epoch && ledger.epoch.retired)} / transferred ${num0(ledger.epoch && ledger.epoch.transferred)}` +
