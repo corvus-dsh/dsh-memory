@@ -1459,6 +1459,20 @@ window.__ModuleLoader__.load({
             h('button', { key: 'b', type: 'button', className: 'mc-btn', disabled: busy, onClick: refresh }, busy ? '读取中…' : '刷新'),
           ]),
           h('p', { key: 's', className: 'mc-sub' }, via ? `桥接通道：${via}` : '按 scene 过滤；human 来源带绿色标记，其余需要核实'),
+          /**
+           * ── v8.x TD-M20 (P2): THE SNAPSHOT'S AGE, SAID WHERE THE COUNT IS ──────────────────────────
+           *
+           * The skill document cache is keyed on 「directory mtime + the current DAY」, so adding or
+           * deleting a file is seen immediately while an IN-PLACE EDIT to an existing file waits for the
+           * day to turn. `v293 ④` pins the behaviour; nothing told the reader.
+           *
+           * It must NOT say 「实时」: the one time this matters is exactly when someone edits a skill and
+           * the count keeps citing the old set. 「可能落后至多 1 天」 is the honest formulation, and it is
+           * what makes the number actionable — a reader who knows the window can re-check; a reader told
+           * 「current」 cannot.
+           */
+          h('p', { key: 'fresh', className: 'mc-hint', style: { margin: '0 0 8px' } },
+            '本快照可能落后至多 1 天（非实时）：新增/删除技能立即生效，原地修改同一文件要等到次日。'),
           h('div', { key: 'chips', className: 'mc-chips' }, [
             h('button', { key: '*', type: 'button', className: 'mc-chip', 'aria-pressed': scene === '*' ? 'true' : 'false', onClick: () => setScene('*') }, `全部 ${skills.length}`),
             ...(scenes.map((name) => h('button', {

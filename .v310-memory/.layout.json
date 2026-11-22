@@ -1,0 +1,11 @@
+{
+  "layout": 1,
+  "producer": "dsh-memory",
+  "files": [
+    "negatives.jsonl",
+    "facts.jsonl",
+    "experiences.jsonl",
+    "suggestions.jsonl",
+    "task-graph.json"
+  ]
+}

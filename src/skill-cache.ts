@@ -58,6 +58,26 @@ const cache = new Map<string, CachedDocuments<unknown>>()
 /** One cache day. Longer than an hour on purpose — see the measurement above. */
 const DAY_MS = 86_400_000
 
+/**
+ * ── TD-M20 (P2): THE SNAPSHOT'S OWN BOUNDARY, stated by the module that owns the cache ─────────────
+ *
+ * Lives HERE rather than in `index.ts` because this file is where the rule is implemented — and because
+ * `index.ts` is under a ratchet ceiling that explicitly refuses 「加功能就放宽」. A declaration that needs
+ * a bigger ceiling is a declaration in the wrong file.
+ *
+ * The window is real, not theoretical: the key is 「directory mtime + the current DAY」, so adding or
+ * deleting a file invalidates immediately while an in-place EDIT to an existing file waits for the day to
+ * turn. `v293 ④` pins the behaviour; this constant is what lets the reader be TOLD. The wording must
+ * never become 「live」 — the one time it matters is when someone edits a skill and the tool keeps citing
+ * the old text.
+ */
+export const SKILL_SNAPSHOT_BOUNDARY = {
+  skillDocuments: 'at most 1 day old',
+  reason:
+    '技能文档缓存以「目录 mtime + 当天日期」为键：新增/删除文件立即生效，原地修改同一文件要等到次日；' +
+    '因此本快照可能落后至多 1 天（非实时快照）。',
+} as const
+
 export function skillDocsKey(dirMtimeMs: number, now: number): string {
   return `${dirMtimeMs}|${Math.floor(now / DAY_MS)}`
 }
@@ -78,6 +98,12 @@ export function invalidateSkillDocs(skillsDir?: string): void {
   else cache.delete(skillsDir)
 }
 
-export function skillDocsCacheStats(): { entries: number } {
-  return { entries: cache.size }
+export function skillDocsCacheStats(): { entries: number; boundary: typeof SKILL_SNAPSHOT_BOUNDARY } {
+  /**
+   * TD-M20: the boundary travels WITH the cache's own stats, so a caller reading this number also learns
+   * how old it can be. Put here rather than in `index.ts` because that file is under a ratchet ceiling
+   * that explicitly refuses 「加功能就放宽」 — a declaration that needs a bigger ceiling is a declaration
+   * in the wrong file.
+   */
+  return { entries: cache.size, boundary: SKILL_SNAPSHOT_BOUNDARY }
 }
