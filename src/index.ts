@@ -2093,18 +2093,49 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
       const names = pending
         .slice(0, 3)
         .map((node) => `${node.id}${node.nodeType.length > 0 ? `（${node.nodeType}）` : ''}`)
+      /**
+       * ── B4-B B3b: THE HARVEST MESSAGE WAS THE LAST ONE STILL BUILT BY RAW CONCATENATION ────────
+       *
+       * B3 fixed the phase banner and left this one alone, and the reason it looked finished is the
+       * TEST: `v298`'s selector was `startsWith('memory-phase-')`, so a criterion written 「every
+       * injected message goes through the envelope」 could only ever see phase messages. Measured: the
+       * harvest message was injected with NO `<system_meta_memory` and still called itself
+       * `[系统提示]` — which is precisely the 「form complete, substance is something else」 shape.
+       *
+       * WHAT THE BANDWIDTH ACTUALLY IS, because 「the input is restricted」 is not a defence: a node id
+       * is model-written, and measured ids include `b3done-ignore-all-previous-rules` verbatim. Ids
+       * with spaces / newlines / `##` are rejected by `NODE_NOT_FOUND`, i.e. they are constrained by
+       * OTHER code — so the criterion has to be 「the defence exists」, never 「the input is limited」.
+       * One character-range relaxation anywhere else and this becomes live.
+       *
+       * Same treatment as the phase banner: cap each name, cap the whole message with a VISIBLE note,
+       * then hand the whole text to `isolateHint`. The `[系统提示]` opener stays inside the envelope
+       * (the phase path explains why the prefix is not duplicated: `renderPhaseHint` emits its own).
+       */
+      const HARVEST_NAME_CHARS = 80
+      const HARVEST_TOTAL_CHARS = 800
+      const clippedNames = pending.slice(0, 3).map((node) => {
+        const name = String(node.id ?? '')
+        return name.length <= HARVEST_NAME_CHARS ? name : `${name.slice(0, HARVEST_NAME_CHARS)}…`
+      })
+      const nodeLabel = clippedNames.map((name, index) => {
+        const nodeType = pending[index]?.nodeType ?? ''
+        return `${name}${nodeType.length > 0 ? `（${nodeType}）` : ''}`
+      })
+      const omittedNodes = pending.length - clippedNames.length
+      const harvestBody =
+        `[系统提示] 节点 ${nodeLabel.join('、')} 已完成，但还没有写入全局知识库。` +
+        '请调用 knowledge_harvest 把本阶段的技能与踩坑点写进去，并标注 tags 与 applicable_node_types。' +
+        '不写，下一个工作区就学不到这次的教训。' +
+        (omittedNodes > 0 ? `（另有 ${omittedNodes} 个已完成节点未列出）` : '')
+      const harvestCapped =
+        harvestBody.length > HARVEST_TOTAL_CHARS
+          ? `${harvestBody.slice(0, HARVEST_TOTAL_CHARS)}…（已截断到 ${HARVEST_TOTAL_CHARS} 字）`
+          : harvestBody
       return {
         id: `memory-harvest-warn-${agentId || 'session'}-${pending.map((node) => node.id).join('_')}`,
         role: 'user',
-        content: [
-          {
-            type: 'text',
-            text:
-              `[系统提示] 节点 ${names.join('、')} 已完成，但还没有写入全局知识库。` +
-              '请调用 knowledge_harvest 把本阶段的技能与踩坑点写进去，并标注 tags 与 applicable_node_types。' +
-              '不写，下一个工作区就学不到这次的教训。',
-          },
-        ],
+        content: [{ type: 'text', text: isolateHint(harvestCapped) }],
         source: { kind: 'plugin:dsh-memory' },
       }
     } catch {
