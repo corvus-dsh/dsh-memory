@@ -130,3 +130,47 @@ test('v317 ⑤: a THROWING probe fails CLOSED (degraded), not silently healthy',
   assert.equal(safeFlag(() => { throw new Error('boom') }), true, '抛错的探针必须 fail-closed 到 degraded')
   assert.equal(safeFlag(() => { throw new Error('boom') }, false), false, '调用方可以显式选择另一侧')
 })
+
+/* ── 18.6-D ③: `configWritable` — WHICH kind of degradation, as one bit ───────────────────────────── */
+
+test('v317 ⑥: `configWritable` says whether a switch press can actually persist', async () => {
+  /**
+   * The renderer's footer claims 「以上开关显示的是插件默认值」. That is TRUE only when `configEditor` is
+   * unavailable; the graph/ledger cases leave the switches real and writable. Deciding this by matching a
+   * phrase inside `degradedReason` would be the 「锚在名字上」 failure this batch keeps removing, so it is
+   * a fact the producer states.
+   */
+  const { describeDegradation } = await load()
+
+  const editorGone = describeDegradation({ graphUnreadable: false, ledgerDeferred: false, editorAvailable: false })
+  assert.equal(editorGone.degraded, true, '前提确认：editor 不可用是降级')
+  assert.equal(editorGone.configWritable, false,
+    'configEditor 不可用 ⇒ 开关不是真实配置 ⇒ configWritable 必须为 false')
+
+  const graphGone = describeDegradation({ graphUnreadable: true, ledgerDeferred: false, editorAvailable: true })
+  assert.equal(graphGone.degraded, true, '前提确认：图读不出是降级')
+  assert.equal(graphGone.configWritable, true,
+    '图读不出不影响写开关 ⇒ configWritable 必须为 true（否则页脚会说一句假话）')
+
+  /** Negative half — a HEALTHY host: not degraded, and the switches ARE writable. */
+  const healthy = describeDegradation({ graphUnreadable: false, ledgerDeferred: false, editorAvailable: true })
+  assert.equal(healthy.degraded, false)
+  assert.equal(healthy.configWritable, true, '健康时开关当然可写')
+})
+
+test('v317 ⑥b (negative half): a HEALTHY payload still carries the bit, so 「false」 is not the default', async () => {
+  /**
+   * `degradedReason` is deliberately absent when healthy, but `configWritable` must NOT be: the renderer
+   * reads `state.configWritable === false`, so an ABSENT field would silently mean 「writable」 — and the
+   * one case that needs the warning most (the fallback payload) is exactly the one that has no producer.
+   * Stating it in both branches keeps 「healthy」 distinguishable from 「producer forgot」.
+   */
+  const { describeDegradation } = await load()
+  for (const editorAvailable of [true, false]) {
+    for (const graphUnreadable of [true, false]) {
+      const report = describeDegradation({ graphUnreadable, ledgerDeferred: false, editorAvailable })
+      assert.equal(typeof report.configWritable, 'boolean',
+        `configWritable 必须始终是显式布尔（editorAvailable=${editorAvailable}, graphUnreadable=${graphUnreadable}）`)
+    }
+  }
+})

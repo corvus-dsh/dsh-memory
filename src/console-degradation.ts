@@ -37,6 +37,20 @@ export interface DegradationInputs {
 export interface DegradationReport {
   degraded: boolean
   degradedReason?: string
+  /**
+   * ── 18.6-D ③: CAN A SWITCH PRESS ACTUALLY PERSIST? ───────────────────────────────────────────────
+   *
+   * The renderer's footer says 「以上开关显示的是插件默认值，不是宿主的真实配置」. That sentence is TRUE
+   * only when `configEditor` is unavailable — the other two degradations leave the switches real and
+   * writable, and printing the claim there puts a false line inside the same card that says
+   * 「当前没有可测量的活动会话」.
+   *
+   * This is a BOOLEAN, not a 「degradation kind」. The lead's stop condition forbids inventing a kind
+   * concept (it would restructure `degradedReason`, a contract the panel already reads); the renderer's
+   * question is one bit, and `editorAvailable` is exactly that bit. Emitted from HERE so `index.ts`
+   * grows by zero lines — the module that knows the fact is the module that states it.
+   */
+  configWritable: boolean
 }
 
 /**
@@ -95,6 +109,6 @@ export function describeDegradation(input: DegradationInputs): DegradationReport
   if (!input.editorAvailable) {
     reasons.push('configEditor 服务不可用：下面的开关显示的是插件默认值，点击不会落盘')
   }
-  if (reasons.length === 0) return { degraded: false }
-  return { degraded: true, degradedReason: reasons.join('；') }
+  if (reasons.length === 0) return { degraded: false, configWritable: input.editorAvailable }
+  return { degraded: true, degradedReason: reasons.join('；'), configWritable: input.editorAvailable }
 }

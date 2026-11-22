@@ -777,6 +777,13 @@ window.__ModuleLoader__.load({
       return {
         degraded: true,
         degradedReason: reason,
+        /**
+         * 18.6-D ③: the bridge never answered, so the switches below ARE the plugin defaults and the
+         * footer's warning is TRUE here. Stated as an explicit `false` rather than left absent: this is
+         * the one path where the claim must never be dropped, and an absent field is indistinguishable
+         * from 「producer forgot」.
+         */
+        configWritable: false,
         config: {
           retrieval: true,
           workspaceIsolation: true,
@@ -1228,16 +1235,42 @@ window.__ModuleLoader__.load({
        * same: plausible numbers that never move. Red = no Host data (or the Host said it
        * degraded); amber = data without the auxiliary reads; green = real Host state.
        */
+      /**
+       * ── 18.6-D ② (P1, lead-measured): 「通」 WAS REPORTED AS 「未连通」 ─────────────────────────────
+       *
+       * The condition was `phase === 'ready' && state.degraded !== true`, so EVERY degraded payload fell
+       * into the else and was labelled 「宿主通道未连通」 — while the payload that carried that very
+       * label had just ARRIVED over the channel. graft has a separate branch for this (`:1418`); memory
+       * did not, which is how the two panels came to describe one state two different ways.
+       *
+       * FOUR branches now, and each says something different:
+       *   loading                ⇒ 正在读取…          a fetch is genuinely in flight
+       *   error                  ⇒ 宿主通道未连通      we could not get an answer
+       *   degraded               ⇒ 宿主通道降级        we got an answer and it says 「do not trust these
+       *                                                numbers as configuration」
+       *   ready, partial / full  ⇒ amber / green
+       *
+       * The ORDER matters: `error` is checked before `degraded`, because a bridge failure can coexist with
+       * a stale `degraded` flag in a fallback payload, and 「we could not reach it」 is the stronger fact.
+       */
       const health =
-        phase === 'ready' && state.degraded !== true
-          ? state.ledger === undefined && state.sessions === undefined
-            ? { level: 'amber', text: '已连通 · 部分数据缺失', hint: '宿主返回了状态，但台账/会话列表为空，请点「刷新」。' }
-            : { level: 'green', text: '宿主通道正常', hint: `桥接通道：${via || '（未知）'}` }
-          : {
-              level: 'red',
-              text: phase === 'loading' ? '正在读取…' : '宿主通道未连通',
-              hint: `${String(error || state?.degradedReason || '尚未拿到宿主状态').slice(0, 300)}`,
-            }
+        phase === 'loading'
+          ? { level: 'red', text: '正在读取…', hint: '正在向宿主读取状态。' }
+          : error.length > 0 || state === null || state === undefined
+            ? {
+                level: 'red',
+                text: '宿主通道未连通',
+                hint: `${String(error || state?.degradedReason || '尚未拿到宿主状态').slice(0, 300)}`,
+              }
+            : state.degraded === true
+              ? {
+                  level: 'red',
+                  text: '宿主通道降级',
+                  hint: String(state.degradedReason || '宿主返回了降级状态：上面的数值不是这台机器的真实配置。'),
+                }
+              : state.ledger === undefined && state.sessions === undefined
+                ? { level: 'amber', text: '已连通 · 部分数据缺失', hint: '宿主返回了状态，但台账/会话列表为空，请点「刷新」。' }
+                : { level: 'green', text: '宿主通道正常', hint: `桥接通道：${via || '（未知）'}` }
       const healthColor = health.level === 'green' ? '#16a34a' : health.level === 'amber' ? '#b45309' : '#b91c1c'
 
       return h('div', { className: 'mc-root' }, [
@@ -1397,7 +1430,22 @@ window.__ModuleLoader__.load({
                 wordBreak: 'break-word',
               },
             }, [
-              h('div', { key: 't', style: { fontWeight: 600, marginBottom: '6px' } }, '读取失败'),
+              /**
+               * ── 18.6-D ① (P1, lead-measured): THE TITLE IS A CONDITION, NOT A LITERAL ───────────────
+               *
+               * It was the string `'读取失败'` for BOTH branches. graft's card had the same literal, and
+               * the lead's field test showed what it costs: a console degraded because there was NO
+               * MEASURABLE SESSION announced itself as a READ FAILURE, while nothing had failed — the
+               * payload had just arrived. The panel's own rule, asserted by `v314 ③`, is 「『没有这个
+               * 后端』不是『读取失败』，两者不许压成一句」; this path was outside that criterion's reach.
+               *
+               * Three states, three sentences:
+               *   error present           ⇒ 「读取失败」        we could not get an answer
+               *   error absent + degraded ⇒ 「宿主通道降级」    we got an answer that says 「do not trust
+               *                                                these numbers as configuration」
+               */
+              h('div', { key: 't', style: { fontWeight: 600, marginBottom: '6px' } },
+                error ? '读取失败' : '宿主通道降级'),
               h('div', { key: 'm' }, String(error || (state && state.degradedReason) || '(宿主没有返回可识别的错误信息)')),
               h('div', { key: 'raw', style: { marginTop: '8px', fontFamily: 'ui-monospace,Consolas,monospace', fontSize: '11.5px', opacity: 0.85 } },
                 '错误详情：' + JSON.stringify({
@@ -1405,8 +1453,25 @@ window.__ModuleLoader__.load({
                   degradedReason: state && state.degradedReason ? String(state.degradedReason) : undefined,
                   via: via || undefined,
                 })),
-              h('div', { key: 'h', style: { marginTop: '8px', opacity: 0.8 } },
-                '以上开关显示的是插件默认值，不是宿主的真实配置。点击「刷新」重试。'),
+              /**
+               * ── 18.6-D ③ (P1, lead-measured): 「开关是默认值」 IS NOT ALWAYS TRUE ────────────────────
+               *
+               * The card was printing this sentence unconditionally, on every degraded payload. The
+               * lead's field test caught the contradiction: a console degraded because there was NO
+               * MEASURABLE SESSION said 「以上开关显示的是插件默认值」 directly beside 「当前没有可测量的活动
+               * 会话」 — and the SECOND sentence was the false one. Those switches are real and writable.
+               *
+               * Only an unavailable `configEditor` makes the claim true, and the producer states that as
+               * its own bit (`configWritable`, from `console-degradation.ts`). Read through `=== false` so
+               * the FALLBACK payload — which carries no such field because the bridge never answered —
+               * keeps the warning it needs. Defaulting an unknown bit to 「switches are real」 would drop
+               * a warning precisely in the case that always needed it.
+               */
+              state !== null && state !== undefined && state.configWritable === false
+                ? h('div', { key: 'h', style: { marginTop: '8px', opacity: 0.8 } },
+                    '以上开关显示的是插件默认值，不是宿主的真实配置（configEditor 不可用，点击不会落盘）。点击「刷新」重试。')
+                : h('div', { key: 'h', style: { marginTop: '8px', opacity: 0.8 } },
+                    '点击「刷新」重试。'),
             ])
           : null,
         notice ? h('div', { key: 'n', className: 'mc-card mc-ok' }, notice) : null,
