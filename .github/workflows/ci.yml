@@ -62,14 +62,42 @@ jobs:
           repository: corvus-dsh/dsh-paradise
           path: .siblings/dsh-paradise
 
+      - name: Check out the sibling whose transaction store the txn criteria read
+        # `v096` reads `dsh-graft-slice/src/core/txn.ts` and `v287` reads its directory. The subject of
+        # those criteria is 「the two plugins agree about one on-disk transaction format」 — a skip would
+        # not test a weaker version of that contract, it would delete the contract.
+        #
+        # `repository:` without `ref:` means the sibling's DEFAULT BRANCH HEAD, not this machine's
+        # state: 「本地全绿 ⇒ CI 绿」 no longer holds (recorded in README).
+        uses: actions/checkout@v4
+        with:
+          repository: corvus-dsh/dsh-graft-slice
+          path: .siblings/dsh-graft-slice
+
       - name: Place the layer where the lease probes expect it
         # The probes look for the DIRECTORY NAME `dsh-paradise` beside this repo, not the scoped
         # package name: `@corvus-dsh/dsh-paradise` is a module specifier, the folder is `dsh-paradise`.
         run: |
           set -e
           mv .siblings/dsh-paradise ../dsh-paradise
+          mv .siblings/dsh-graft-slice ../dsh-graft-slice
           rm -rf .siblings
           node -e "console.log('lease layer at', require('node:fs').realpathSync('../dsh-paradise/index.js'))"
+          node -e "console.log('graft at', require('node:fs').realpathSync('../dsh-graft-slice/src/core/txn.ts'))"
+
+      - name: Record which sibling revisions these criteria ran against
+        # lead §三十四: a cross-repo criterion that does not name the revision it compared is
+        # unauditable — the same commit could pass today and fail tomorrow because a SIBLING moved.
+        run: |
+          set -e
+          for sibling in dsh-paradise dsh-graft-slice; do
+            echo "sibling $sibling@$(git -C "../$sibling" rev-parse --short HEAD)"
+          done
+
+      - name: Runtime dependencies are empty and dev tooling is allowlisted
+        # B4-A 的「依赖为空门禁」。dependencies 会被装进用户的运行时，必须永远为空；
+        # typescript 只能是精确锁版本的 devDependency（干净克隆里缺它的代价已实测）。
+        run: node scripts/check-runtime-deps.mjs
 
       - name: Install (no dependencies expected)
         run: npm install --no-audit --no-fund
