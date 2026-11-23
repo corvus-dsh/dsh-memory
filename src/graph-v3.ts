@@ -61,6 +61,9 @@ export {
   declareConstraint,
   relaxConstraint,
   retireEphemeral,
+  refusesStatusOp,
+  fixedNodeStatusRefusal,
+  goalLockVerdict,
 } from './graph-goal-lock.js'
 
 /** AUTHOR AND THE v3 FIELD SHAPES ─────────────────────────────────────────────────────────────── */

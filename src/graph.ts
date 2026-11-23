@@ -43,6 +43,9 @@ import {
   relaxConstraint,
   resolveNodeV3,
   retireEphemeral,
+  refusesStatusOp,
+  fixedNodeStatusRefusal,
+  goalLockVerdict,
   unknownKeyWarning,
   VANISHED_FIELDS_HINT,
   vanishedFields,
@@ -597,34 +600,19 @@ export function updateGraph(memoryDir: string, input: GraphUpdateInput): GraphUp
     const current = graph.nodes[index]
 
     /**
-     * THE LOCK PROTECTS THE DESTINATION, NOT THE JOURNEY. The classification lives in
-     * `graph-goal-lock.ts` with both field sets; an unlisted field is refused so a future field cannot
-     * silently bypass the lock. (The old guard refused EVERY update while its comment claimed otherwise.)
+     * THE LOCK PROTECTS THE DESTINATION, NOT THE JOURNEY — and the classification lives in
+     * `graph-goal-lock.ts`. Both the lock decision and the fixed-node status rule are asked there, so
+     * `graph.ts` holds no copy of the rule. (The old guard refused EVERY update while its comment said
+     * otherwise.)
      */
-    if (graph.goalLockedAt.length > 0 && targetId === GOAL_NODE_ID && (op === 'update' || op === 'deprecate')) {
-      if (op === 'deprecate') {
-        return fail(
-          'GOAL_LOCKED',
-          `最终目标已在 ${graph.goalLockedAt} 锁定，deprecate 被拒绝：废弃终点等于换一个目标。` +
-            '确需修改请先 unlock-goal 并说明理由。',
-        )
-      }
-      const touched = Object.entries(input.node ?? {})
-        .filter(([, value]) => value !== undefined)
-        .map(([key]) => key)
-      /**
-       * The classification lives in `graph-v3.ts` with both field sets, so there is one definition of
-       * what the lock covers rather than a rule here and a list there (⑪).
-       */
-      const verdict = classifyGoalUpdate(touched)
-      if (verdict.allowed === false) {
-        return fail('GOAL_LOCKED', goalLockedReason(graph.goalLockedAt, verdict))
-      }
-      // Every touched field is a journey field: the update proceeds.
-    }
+    const lockedGoal = goalLockVerdict(graph.goalLockedAt, targetId, op, input.node)
+    if (lockedGoal !== undefined) return fail('GOAL_LOCKED', lockedGoal)
+    if (current.fixed === true && refusesStatusOp(op)) return fail('RESERVED', fixedNodeStatusRefusal(targetId))
     if (current.fixed === true && op === 'deprecate' && targetId !== GOAL_NODE_ID) {
       return fail('RESERVED', `${targetId} 是固定节点，不能废弃`)
     }
+    /** 19.4-G G-6 (P0): a fixed node is not work — rule in `graph-goal-lock.ts`; RESERVED reused. */
+    if (current.fixed === true && refusesStatusOp(op)) return fail('RESERVED', fixedNodeStatusRefusal(targetId))
 
     let updated: GraphNode = current
     const changed: string[] = []
@@ -793,5 +781,5 @@ export function describeGraph(memoryDir: string, knowledge: KnowledgeEntry[] | u
   return { graph, ...describeNodes(graph, knowledge) }
 }
 
-export { isBlankGraph, renderNodeBanner, STRUCTURAL_NODE_IDS, isStructuralNodeId } from './graph-view.js'
+export { isBlankGraph, renderNodeBanner, STRUCTURAL_NODE_IDS, isStructuralNodeId, isWorkNodeId, workNodes } from './graph-view.js'
 export type { GraphNodeView } from './graph-view.js'

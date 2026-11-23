@@ -87,6 +87,64 @@ export function goalLockedReason(
 }
 
 /**
+ * ── THE WHOLE LOCK DECISION, FOR ONE UPDATE (19.4-G: moved here from `graph.ts`) ─────────────────
+ *
+ * Returns the refusal SENTENCE, or `undefined` when the update may proceed. `graph.ts` used to inline
+ * both the guard condition and the deprecate message, so 「what a locked goal refuses」 was stated in two
+ * files — and the inlined version covered `update`/`deprecate` only, which is how `activate`/`complete`
+ * on the goal came to be accepted. The rule belongs here, next to the field sets it talks about.
+ *
+ * A goal that is not locked is not this function's business: `undefined` means "not refused HERE",
+ * never "allowed" in general.
+ */
+export function goalLockVerdict(
+  lockedAt: string,
+  targetId: string,
+  op: string,
+  patch: Record<string, unknown> | undefined,
+): string | undefined {
+  if (lockedAt.length === 0) return undefined
+  if (targetId !== 'goal') return undefined
+  if (op === 'deprecate') {
+    return (
+      `最终目标已在 ${lockedAt} 锁定，deprecate 被拒绝：废弃终点等于换一个目标。` +
+      '确需修改请先 unlock-goal 并说明理由。'
+    )
+  }
+  if (op !== 'update') return undefined
+  const touched = Object.entries(patch ?? {})
+    .filter(([, value]) => value !== undefined)
+    .map(([key]) => key)
+  const verdict = classifyGoalUpdate(touched)
+  if (verdict.allowed === false) return goalLockedReason(lockedAt, verdict)
+  // Every touched field is a journey field: the update proceeds.
+  return undefined
+}
+
+/**
+ * ── WHICH STATUS OPS A FIXED NODE REFUSES (19.4-G G-6, P0) ──────────────────────────────────────
+ *
+ * `start` and `goal` are structural: the origin is done by definition, the destination is where the work
+ * is going and is written as `pending` by `lock-goal`. NEITHER IS A UNIT OF WORK, so neither can be
+ * activated, completed or deprecated — the very idea is a category error, and the graph will hold the
+ * resulting contradiction without complaint.
+ *
+ * THE MEASURED ORIGIN: `graph.ts` refused `deprecate` on a fixed node and nothing else, and the status
+ * branches test only the op — so `memory_graph_update(op:'activate', nodeId:'goal')` returned `ok:true`
+ * and wrote `goal.status = "active"`. That is exactly the live graph's shape, and the reason 19.4-F had
+ * to teach every reader to skip the goal. `complete` on `goal` additionally returned `harvestRequired`.
+ *
+ * ONE RULE, NOT TWO SPECIAL CASES: stated once, asked from one place.
+ */
+export const refusesStatusOp = (op: string): boolean =>
+  op === 'activate' || op === 'complete' || op === 'deprecate'
+
+/** The one sentence a fixed node gets back, so the refusal reads the same wherever it is raised. */
+export const fixedNodeStatusRefusal = (nodeId: string): string =>
+  `${nodeId} 是固定节点（起点/终点），不是一段工作：不能 activate / complete / deprecate。` +
+  '终点由 lock-goal 建立、状态恒为 pending；要报告进度请更新真正的阶段节点。'
+
+/**
  * ── TOP-LEVEL CONSTRAINTS (`constrain` / `relax`) ───────────────────────────────────────────────
  *
  * `relax` RETIRES, never deletes: a constraint that vanished would leave the next generation unable to

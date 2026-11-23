@@ -40,15 +40,15 @@ import {
   writeKnowledge,
 } from './knowledge.js'
 import {
-  GOAL_NODE_ID,
-  START_NODE_ID,
   describeGraph,
   graphPath,
   harvestingPrompt,
+  isWorkNodeId,
   markHarvested,
   readGraph,
   renderNodeBanner,
   updateGraph,
+  workNodes,
 } from './graph.js'
 import { graphUpdateTool } from './graph-tool.js'
 /**
@@ -999,7 +999,7 @@ export function forgetSkill(
  */
 function flywheelStatsOf(memoryDir: string, knowledgeDir: string): Record<string, unknown> {
   const graph = readGraph(memoryDir)
-  const finished = graph.nodes.filter((node) => node.status === 'done' && node.id !== START_NODE_ID)
+  const finished = workNodes(graph.nodes).filter((node) => node.status === 'done')
   const harvestedNodes = finished.filter((node) => node.harvestedAt.length > 0).length
   const pendingNodes = finished.filter((node) => node.harvestedAt.length === 0).length
   const knowledge = readKnowledge(knowledgeDir)
@@ -1131,8 +1131,13 @@ export function apply(ctx: ContextLike, config: MemoryConfig = {}): void {
 function activeNodeIdsForHarvest(memoryDir: string): string[] {
   try {
     const graph = readGraph(memoryDir)
-    return graph.nodes
-      .filter((node) => node.status === 'done' && node.harvestedAt.length === 0 && node.id !== START_NODE_ID)
+    /**
+     * 19.4-G G-3 (P0, WRITE PATH): this list is `markHarvested`'s argument — the filter decides what is
+     * WRITTEN. Measured: with `goal` done, one real harvest wrote `harvestedAt` onto the destination and
+     * every later reader believed it. `workNodes` is the one predicate. See `graph-view.ts`.
+     */
+    return workNodes(graph.nodes)
+      .filter((node) => node.status === 'done' && node.harvestedAt.length === 0)
       .map((node) => node.id)
   } catch {
     return []
@@ -1835,8 +1840,8 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
          * recording anything. A DAG that keeps growing while this number keeps growing is a project
          * learning nothing, and that is invisible from either number alone.
          */
-        unharvested: counts.nodes.filter(
-          (node) => node.status === 'done' && node.harvestedAt.length === 0 && node.id !== START_NODE_ID,
+        unharvested: workNodes(counts.nodes).filter(
+          (node) => node.status === 'done' && node.harvestedAt.length === 0,
         ).length,
       }
     },
@@ -2085,8 +2090,8 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
     if (!resolved.phaseNudge) return undefined
     try {
       const graph = readGraph(resolved.memoryDir)
-      const pending = graph.nodes.filter(
-        (node) => node.status === 'done' && node.harvestedAt.length === 0 && node.id !== START_NODE_ID,
+      const pending = workNodes(graph.nodes).filter(
+        (node) => node.status === 'done' && node.harvestedAt.length === 0,
       )
       if (pending.length === 0) return undefined
       const key = `${graph.id}:${pending.map((node) => node.id).join(',')}`
@@ -2149,7 +2154,13 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
     if (!resolved.phaseNudge) return undefined
     try {
       const graph = readGraph(resolved.memoryDir)
-      const active = graph.nodes.find((node) => node.status === 'active' && node.id !== START_NODE_ID)
+      /**
+       * 19.4-G G-1 (P1, THE USER'S FIRST COMPLAINT): the banner said 「你正在进入 [当前] 阶段 … 本阶段要求：
+       * 四合持久层能力全部生产就绪」 — the DESTINATION as the current phase. `id !== START_NODE_ID` forgot
+       * the goal, and the live graph keeps `goal` at `active`. 19.4-F fixed the panel; this is the
+       * INJECTION, read by the next generation. `isWorkNodeId` is the one predicate.
+       */
+      const active = graph.nodes.find((node) => node.status === 'active' && isWorkNodeId(node.id))
       if (active === undefined) return undefined
       const key = `${graph.id}:${active.id}`
       if (lastPhaseKey.get(agentId) === key) return undefined

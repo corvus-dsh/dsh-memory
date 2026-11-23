@@ -195,7 +195,33 @@ test('dag: a locked goal still lets you ADD nodes and change PATHS', () => {
   assert.equal(updateGraph(memory, { op: 'add', nodeId: 'detour', node: { title: '改走另一条路' } }).ok, true)
   assert.equal(updateGraph(memory, { op: 'add', nodeId: 'step-2', node: { dependsOn: ['detour'] } }).ok, true)
   assert.equal(updateGraph(memory, { op: 'update', nodeId: 'detour', node: { nodeType: 'debugging' } }).ok, true)
-  assert.equal(updateGraph(memory, { op: 'activate', nodeId: GOAL_NODE_ID }).ok, true, 'working on the goal is allowed')
+  /**
+   * ── 19.4-G G-6 (user ruling 2026-11-23): THE OLD ASSERTION HERE WAS THE DEFECT ─────────────────
+   *
+   * The line was
+   *
+   *     assert.equal(updateGraph(memory, { op: 'activate', nodeId: GOAL_NODE_ID }).ok, true,
+   *       'working on the goal is allowed')
+   *
+   * — dated 2026-11-04, and it demanded that the destination be activatable. It is where the live
+   * graph's `goal: 'active'` comes from: nothing refused `activate`/`complete` on a fixed node, so one
+   * call moved the destination into 「进行中」 and every reader downstream had to learn to skip it
+   * (19.4-F taught exactly that, and the lead then found FIVE readers that still did not).
+   *
+   * 「Working on the goal」 is not a thing: the goal is where the work is GOING. Progress is reported on
+   * the phase nodes. So the assertion is inverted rather than deleted — the refusal is now the rule,
+   * and the sentence below is the reason a future reader can check against.
+   */
+  const activateGoal = updateGraph(memory, { op: 'activate', nodeId: GOAL_NODE_ID })
+  assert.equal(activateGoal.ok, false, '终点不是一段工作：activate 必须被拒')
+  assert.equal(activateGoal.code, 'RESERVED')
+  assert.match(activateGoal.reason ?? '', /固定节点/u, '拒绝要说清是「固定节点」，而不是「已锁定」')
+  assert.equal(updateGraph(memory, { op: 'complete', nodeId: GOAL_NODE_ID }).ok, false,
+    'complete 更要拒：它还会返回 harvestRequired，请模型去提炼「终点」')
+
+  /** Negative half: ordinary phases are untouched by the rule — this is not 「refuse everywhere」。 */
+  assert.equal(updateGraph(memory, { op: 'activate', nodeId: 'detour' }).ok, true,
+    '真实阶段必须照常可以 activate')
 })
 
 test('dag: unlock-goal REQUIRES a reason and records it', () => {
