@@ -61,6 +61,10 @@ export {
   declareConstraint,
   relaxConstraint,
   retireEphemeral,
+  completeNodeTransition,
+  abandonNodeTransition,
+  acceptanceNeedsEvidence,
+  activateNodeTransition,
   refusesStatusOp,
   fixedNodeStatusRefusal,
   goalLockVerdict,
@@ -191,6 +195,10 @@ export interface NodeV3Fields {
   estimate?: ComplexityBlock
   actual?: ComplexityBlock
   progress?: number
+  /** G-9: the work was produced — NOT the same claim as `status: 'done'`. */
+  executionStatus?: ExecutionStatus
+  /** G-9: nobody has accepted it until an evidence-carrying call says so. */
+  acceptanceStatus?: AcceptanceStatus
   standing?: string
   evidence?: string[]
   logPointers?: LogPointer[]
@@ -435,6 +443,27 @@ export function asProgress(raw: unknown): number | undefined {
   return typeof raw === 'number' && Number.isInteger(raw) && raw >= 0 && raw <= 100 ? raw : undefined
 }
 
+/**
+ * ── G-9 (MEMORY-04): DID THE WORK EXIST, AND WAS IT ACCEPTED? ────────────────────────────────────
+ *
+ * `status: 'done'` answers 「no longer in flight」. It does NOT answer 「the work was produced」 or
+ * 「somebody accepted it」, and treating one as all three is how a model's self-declared 「做完了」 became
+ * finished work with no evidence (measured: `acceptance` had ZERO occurrences in `src/`).
+ *
+ * The vocabulary is closed on purpose: an unlisted value reads back as `undefined` rather than being
+ * carried as free text, so a typo becomes 「unknown」 instead of a fifth state nobody checks.
+ */
+export type ExecutionStatus = 'produced' | 'failed' | 'not-started'
+export type AcceptanceStatus = 'pending' | 'accepted' | 'rejected'
+
+export function asExecutionStatus(raw: unknown): ExecutionStatus | undefined {
+  return raw === 'produced' || raw === 'failed' || raw === 'not-started' ? raw : undefined
+}
+
+export function asAcceptanceStatus(raw: unknown): AcceptanceStatus | undefined {
+  return raw === 'pending' || raw === 'accepted' || raw === 'rejected' ? raw : undefined
+}
+
 export function asOrigin(raw: unknown, now: () => string): NodeV3Fields['origin'] | undefined {
   if (raw === null || typeof raw !== 'object') return undefined
   const r = raw as Record<string, unknown>
@@ -501,6 +530,16 @@ export function resolveNodeV3(record: Record<string, unknown>, now: () => string
   const estimate = asComplexityBlock(record.estimate, false)
   const actual = asComplexityBlock(record.actual, true)
   const progress = asProgress(record.progress)
+  /**
+   * ── G-9 (MEMORY-04): THE TWO AXES, READ BACK ────────────────────────────────────────────────────
+   *
+   * 「produced」 and 「accepted」 are different claims, and a phase that was merely produced is not
+   * finished work. These are read through the same whitelist as every other v3 field — a field that is
+   * written but not listed here is silently dropped on the next read, which is the 「生产者多产出、
+   * 投递时少给」 shape this batch keeps removing.
+   */
+  const executionStatus = asExecutionStatus(record.executionStatus)
+  const acceptanceStatus = asAcceptanceStatus(record.acceptanceStatus)
   const standing = text(record.standing)
   const evidence = asEvidence(record.evidence)
   const logPointers = asLogPointers(record.logPointers)
@@ -515,6 +554,8 @@ export function resolveNodeV3(record: Record<string, unknown>, now: () => string
     ...(estimate === undefined ? {} : { estimate }),
     ...(actual === undefined ? {} : { actual }),
     ...(progress === undefined ? {} : { progress }),
+    ...(executionStatus === undefined ? {} : { executionStatus }),
+    ...(acceptanceStatus === undefined ? {} : { acceptanceStatus }),
     ...(standing.length === 0 ? {} : { standing }),
     ...(evidence === undefined ? {} : { evidence }),
     ...(logPointers === undefined ? {} : { logPointers }),

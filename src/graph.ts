@@ -46,7 +46,9 @@ import {
   pickV3,
   relaxConstraint,
   resolveNodeV3,
-  retireEphemeral,
+  completeNodeTransition,
+  abandonNodeTransition,
+  acceptanceNeedsEvidence,
   refusesStatusOp,
   fixedNodeStatusRefusal,
   goalLockVerdict,
@@ -107,6 +109,9 @@ export interface GraphNode {
   estimate?: { complexity: 1 | 2 | 3 | 4 | 5; note?: string }
   actual?: { complexity: 1 | 2 | 3 | 4 | 5; note?: string; closedAt?: string }
   progress?: number
+  /** G-9: 「产出了」≠「完成了」≠「验收过了」—— 三个独立的断言，三个字段。 */
+  executionStatus?: 'produced' | 'failed' | 'not-started'
+  acceptanceStatus?: 'pending' | 'accepted' | 'rejected'
   standing?: string
   evidence?: string[]
   logPointers?: LogPointer[]
@@ -630,18 +635,11 @@ export function updateGraph(memoryDir: string, input: GraphUpdateInput): GraphUp
     let updated: GraphNode = current
     const changed: string[] = []
     if (op === 'activate') {
-      updated = { ...current, status: 'active', updatedAt: at }
-      changed.push('status')
+      updated = { ...current, status: 'active', updatedAt: at }; changed.push('status')
     } else if (op === 'complete') {
-      const retired = retireEphemeral(current.ephemeralConstraints, at, '节点完成')
-      updated = { ...current, status: 'done', updatedAt: at, ...(retired === undefined ? {} : { ephemeralConstraints: retired }) }
-      changed.push('status')
-      if (retired !== undefined) changed.push('ephemeralConstraints')
+      const r = completeNodeTransition(current, at); updated = r.node; changed.push(...r.changed)
     } else if (op === 'deprecate') {
-      const retired = retireEphemeral(current.ephemeralConstraints, at, '节点被废弃')
-      updated = { ...current, status: 'abandoned', updatedAt: at, ...(retired === undefined ? {} : { ephemeralConstraints: retired }) }
-      changed.push('status')
-      if (retired !== undefined) changed.push('ephemeralConstraints')
+      const r = abandonNodeTransition(current, at); updated = r.node; changed.push(...r.changed)
     } else {      const patch = input.node ?? {}
       const nextNode: GraphNode = { ...current, updatedAt: at }
       if (typeof patch.title === 'string' && patch.title.trim().length > 0) {
@@ -683,6 +681,8 @@ export function updateGraph(memoryDir: string, input: GraphUpdateInput): GraphUp
       /* v3 fields, update side: same normaliser as the reader; a supplied field that vanishes is refused. */
       const v3Patch = applyV3Patch({ ...patch } as Record<string, unknown>, current as unknown as Record<string, unknown>, () => at)
       if (v3Patch.ok === false) return fail('INVALID_FIELD', `节点 ${targetId}：${v3Patch.reason}`)
+      /** G-9: an acceptance is a verdict and needs evidence (rule in `graph-goal-lock.ts`). */
+      const verdict = acceptanceNeedsEvidence(v3Patch.fields as never, current); if (verdict.ok === false) return fail(verdict.code, verdict.reason)
       for (const key of v3Patch.changed) changed.push(key)
       Object.assign(nextNode, v3Patch.fields as Partial<GraphNode>)
       updated = nextNode
