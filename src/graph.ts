@@ -401,6 +401,8 @@ export interface GraphUpdateResult {
     | 'MISSING_REASON'
     /** `constrain`/`relax` need an Author; without one there is no audit chain. */
     | 'MISSING_AUTHOR'
+    /** G-9: `acceptanceStatus: 'accepted'` with nothing behind it — a verdict needs evidence. */
+    | 'MISSING_EVIDENCE'
     /** A constraint with this id already exists (declaring twice is not "update"). */
     | 'CONSTRAINT_EXISTS'
     /** A supplied v3 field did not survive normalisation — see `vanishedFields`. */
