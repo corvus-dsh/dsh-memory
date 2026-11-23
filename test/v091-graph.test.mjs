@@ -295,9 +295,22 @@ test('dag: describeGraph counts statuses so the console can colour the DAG', () 
    * `start` is `done`, not `pending`: the origin is behind the work by definition. That is also
    * why the totals add up — every node has exactly one status and the start node is not a
    * permanently "waiting" hole in the console.
+   *
+   * 19.4-F: `counts` now ALSO carries the phase-only tally (`work`) and how many nodes are structural.
+   * The five original fields keep their meaning — this is the store's size — so an old reader is
+   * unaffected; the new fields answer 「几个阶段里有几个在跑」, which is what 进行中 was asking.
    */
-  assert.deepEqual(counts, { total: 4, pending: 0, active: 1, done: 2, abandoned: 1 }, JSON.stringify(counts))
+  assert.deepEqual(counts, {
+    total: 4,
+    pending: 0,
+    active: 1,
+    done: 2,
+    abandoned: 1,
+    work: { total: 3, pending: 0, active: 1, done: 1, abandoned: 1 },
+    structural: 1,
+  }, JSON.stringify(counts))
   assert.equal(counts.pending + counts.active + counts.done + counts.abandoned, counts.total)
+  assert.equal(counts.work.pending + counts.work.active + counts.work.done + counts.work.abandoned, counts.work.total)
 })
 
 test('dag: updatedAt and history survive a restart', () => {

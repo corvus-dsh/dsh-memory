@@ -783,16 +783,15 @@ export function hasGraph(memoryDir: string): boolean {
   return existsSync(graphPath(memoryDir))
 }
 
-/** Store-keyed wrapper around `describeNodes`; most callers have a memoryDir, not a graph. */
+/** Store-keyed wrapper around `describeNodes`; most callers have a memoryDir, not a graph.
+ * `...view`, NOT a hand-written field list: rebuilding `{ graph, nodes, counts }` field-by-field silently
+ * DROPS whatever `describeNodes` later adds (measured: `work`/`structural`/`activeWorkNodes`). */
 export function describeGraph(memoryDir: string, knowledge: KnowledgeEntry[] | undefined, id = 'default'): {
   graph: TaskGraph
-  nodes: GraphNodeView[]
-  counts: { total: number; pending: number; active: number; done: number; abandoned: number }
-} {
+} & ReturnType<typeof describeNodes> {
   const graph = readGraph(memoryDir, id)
-  const view = describeNodes(graph, knowledge)
-  return { graph, nodes: view.nodes, counts: view.counts }
+  return { graph, ...describeNodes(graph, knowledge) }
 }
 
-export { isBlankGraph, renderNodeBanner } from './graph-view.js'
+export { isBlankGraph, renderNodeBanner, STRUCTURAL_NODE_IDS, isStructuralNodeId } from './graph-view.js'
 export type { GraphNodeView } from './graph-view.js'

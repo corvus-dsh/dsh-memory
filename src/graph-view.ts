@@ -20,6 +20,30 @@
 import type { GraphNode, TaskGraph } from './graph.js'
 import type { KnowledgeEntry } from './knowledge.js'
 
+/**
+ * ── THE TWO NODES THAT ARE NOT PHASES (measured defect, 2026-11-23) ──────────────────────────────
+ *
+ * `start` is the origin and `goal` is the destination. Neither is a step, and a reader that treats
+ * them as steps answers 「我在哪」 with the destination.
+ *
+ * MEASURED ON A LIVE 23-NODE GRAPH (the user's screen): `goal` is stored with `status: 'active'`, so
+ * `memory_graph_read` — which took `nodes.find(status === 'active')` — returned
+ *
+ *     activeNodeId = "goal"
+ *     activeBanner = "节点 goal（active） · 要求：四合持久层能力全部生产就绪"
+ *
+ * while graft's `task-position`, reading the SAME file, picked the real phase (`phase-b4`). Two readers,
+ * one graph, two different answers — and the one the model sees is the wrong one.
+ *
+ * So the structural set is named here, in the module that owns the VIEW, and both the counts and the
+ * 「current node」 selection go through it. Sharing the definition is the point: a copy in each caller
+ * is how the two readers drifted in the first place.
+ */
+export const STRUCTURAL_NODE_IDS: ReadonlySet<string> = new Set(['start', 'goal'])
+
+/** Is this id structural (an origin/destination) rather than a phase? */
+export const isStructuralNodeId = (id: string): boolean => STRUCTURAL_NODE_IDS.has(id)
+
 export interface GraphNodeView extends GraphNode {
   /** The knowledge entries this node points at, resolved (empty when no knowledge dir was given). */
   knowledge: KnowledgeEntry[]
@@ -33,10 +57,39 @@ export interface GraphNodeView extends GraphNode {
  * The reverse edges are NOT stored on the node on purpose: `unlocks` is derivable from everyone else's
  * `dependsOn`, and a stored copy would be a second source of truth that goes wrong the moment one side
  * is edited without the other (⑪).
+ *
+ * ── `counts` KEEPS ITS MEANING; `work` IS THE NEW ONE ────────────────────────────────────────────
+ *
+ * `counts` still counts EVERY node, because it is the store's size and existing callers read it that
+ * way. `work` counts only the phases, which is what 「进行中 N」 was always meant to answer. Keeping
+ * both means the panel can say 「23 个节点，其中 2 个是 start/goal；21 个阶段里 1 个进行中」 instead of
+ * picking one of the two facts and letting the reader guess which.
  */
+export interface GraphCounts {
+  /** Every node in the store, including the two structural ones. This is the store's size. */
+  total: number
+  pending: number
+  active: number
+  done: number
+  abandoned: number
+  /**
+   * ── THE PHASE-ONLY TALLY, NESTED SO THERE IS EXACTLY ONE SHAPE ──────────────────────────────────
+   *
+   * 「共 23 个节点」 and 「21 个阶段里 1 个在跑」 are different facts and both are true. Before this,
+   * the panel and `memory_graph_read` were about to report them in DIFFERENT shapes (one nested, one
+   * top-level) — the same drift this batch keeps removing, one layer down. So both live here, and both
+   * readers get one object.
+   */
+  work: { total: number; pending: number; active: number; done: number; abandoned: number }
+  /** How many of `total` are `start` + `goal`. 0 means the graph has no structural nodes. */
+  structural: number
+}
+
 export function describeNodes(graph: TaskGraph, knowledge: KnowledgeEntry[] | undefined): {
   nodes: GraphNodeView[]
-  counts: { total: number; pending: number; active: number; done: number; abandoned: number }
+  counts: GraphCounts
+  /** Active nodes that are PHASES. `goal` being `active` is normal and is not 「进行中」. */
+  activeWorkNodes: GraphNodeView[]
 } {
   const byId = new Map((knowledge ?? []).map((entry) => [entry.id, entry]))
   const nodes: GraphNodeView[] = graph.nodes.map((node) => ({
@@ -46,9 +99,19 @@ export function describeNodes(graph: TaskGraph, knowledge: KnowledgeEntry[] | un
       .filter((entry): entry is KnowledgeEntry => entry !== undefined),
     unlocks: graph.nodes.filter((other) => other.dependsOn.includes(node.id)).map((other) => other.id),
   }))
-  const counts = { total: nodes.length, pending: 0, active: 0, done: 0, abandoned: 0 }
+  const tally = () => ({ total: 0, pending: 0, active: 0, done: 0, abandoned: 0 })
+  const counts: GraphCounts = { ...tally(), work: tally(), structural: 0 }
   for (const node of nodes) counts[node.status] += 1
-  return { nodes, counts }
+  counts.total = nodes.length
+  const phases = nodes.filter((node) => !STRUCTURAL_NODE_IDS.has(node.id))
+  for (const node of phases) counts.work[node.status] += 1
+  counts.work.total = phases.length
+  counts.structural = nodes.length - phases.length
+  return {
+    nodes,
+    counts,
+    activeWorkNodes: phases.filter((node) => node.status === 'active'),
+  }
 }
 
 /** One-line readiness answer, used by the phase hint and the console. */

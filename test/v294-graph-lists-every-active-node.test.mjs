@@ -40,13 +40,24 @@ test('v294 ①: 宿主必须发出 ALL active 节点的列表，而不是只发�
   /**
    * The defect was literally `nodes.find(...)`. Asserting the ABSENCE of that call site is what makes
    * this test able to fail: a future edit that reverts to `find` reintroduces the exact symptom.
+   *
+   * ── 19.4-F: THE POPULATION IS NOW 「active PHASES」, NOT 「active NODES」 ─────────────────────────
+   *
+   * The list still ships EVERY item of its population (that is what this criterion is for), but that
+   * population excludes `start` / `goal`: the live graph keeps `goal` at `status: 'active'`, and naming
+   * a DESTINATION as the current step is the defect `v319` measured. So the invariant is unchanged —
+   * 「列出的 + 未列出的 = 该总体的计数」 — and `counts.work.active` is now the count on the other side.
    */
-  assert.match(server, /const activeNodes = described\.nodes\.filter\(\(node\) => node\.status === 'active'\)/u,
-    '宿主必须用 filter 取全部 active 节点；用 find 只取第一个，就会出现「说 2 个、列 1 个」')
+  assert.match(server, /const activeNodes = described\.activeWorkNodes/u,
+    '宿主必须用 activeWorkNodes（全部 active 阶段）；用 find 只取第一个，就会出现「说 2 个、列 1 个」')
+  assert.equal(server.includes("described.nodes.find((node) => node.status === 'active')"), false,
+    '不许再对全节点做 find —— 那会返回 goal')
 
   assert.match(server, /activeNodes: activeNodes\.slice\(0, 8\)/u, '必须发出 activeNodes 列表（上限 8）')
   assert.match(server, /activeNotShown: Math\.max\(0, activeNodes\.length - 8\)/u,
     '必须发出未列出的数量，否则「列出的 + 未列出的 = 计数」这个恒等式无法成立')
+  assert.match(server, /counts: described\.counts,/u,
+    '与列表同源：计数也来自同一个 describeGraph 结果，不许另算一份')
 })
 
 test('v294 ②: 「列出的 + 未列出的 = 计数」是恒等式 —— 用一个假图直接算', () => {

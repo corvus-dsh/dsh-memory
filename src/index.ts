@@ -1861,7 +1861,7 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
       const id = typeof args.graphId === 'string' && args.graphId.length > 0 ? args.graphId : 'default'
       const entries = readKnowledge(resolved.knowledgeDir)
       const described = describeGraph(resolved.memoryDir, entries, id)
-      const active = described.nodes.find((node) => node.status === 'active')
+      const active = described.activeWorkNodes[0]
       return {
         ...described,
         graphId: described.graph.id,
@@ -2619,7 +2619,7 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
            * graph with 40 active nodes would otherwise push everything else off the panel, and the
            * 「还有 N 个」 tail keeps the total honest.
            */
-          const activeNodes = described.nodes.filter((node) => node.status === 'active')
+          const activeNodes = described.activeWorkNodes
           return {
             graphId: described.graph.id,
             goalLocked: described.graph.goalLockedAt.length > 0,

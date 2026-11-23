@@ -1702,8 +1702,22 @@ window.__ModuleLoader__.load({
                     `任务图读不出来：${String(graph.unreadable)} —— 这是读取失败，不是「没有任务图」。`)
                 }
                 const gc = graph.counts || {}
+                /**
+                 * ── 19.4-F (P1, measured on the user's live graph): 「进行中 2」 NAMED THE GOAL ───────
+                 *
+                 * `start` and `goal` are stored as nodes, and the live graph keeps `goal` at
+                 * `status: 'active'` (a destination, not a step). So the count said 2 in progress and
+                 * one of the two banners read 「节点 goal（active） · 要求：四合…全部生产就绪」 — the
+                 * DESTINATION presented as the current phase. graft, reading the same file, picked the
+                 * real phase. Two readers, one graph, two answers.
+                 *
+                 * `counts.work` is the phase-only tally the Host now ships. An OLDER host has no such
+                 * field, so the fallback keeps the previous numbers rather than inventing a zero.
+                 */
+                const work = gc.work !== null && typeof gc.work === 'object' ? gc.work : gc
+                const structural = num0(gc.structural)
                 const total = num0(gc.total)
-                if (total <= 1) {
+                if (total <= 1 || num0(work.total) === 0) {
                   /**
                    * `START_NODE_ID` is fixed and always exists, so total <= 1 means "no phase nodes
                    * were ever added" — not "the graph is broken". Saying which one it is matters:
@@ -1728,8 +1742,9 @@ window.__ModuleLoader__.load({
                 const notShown = num0(graph.activeNotShown)
                 return [
                   h('p', { key: 'c', className: 'mc-sub', style: { margin: '0 0 6px' } },
-                    `共 ${total} 个节点（进行中 ${num0(gc.active)} / 待开始 ${num0(gc.pending)}` +
-                      ` / 已完成 ${num0(gc.done)} / 已放弃 ${num0(gc.abandoned)}）` +
+                    `共 ${total} 个节点${structural > 0 ? `（其中 ${structural} 个是固定节点 start/goal，不是阶段）` : ''}` +
+                      ` · 阶段 ${num0(work.total)} 个：进行中 ${num0(work.active)} / 待开始 ${num0(work.pending)}` +
+                      ` / 已完成 ${num0(work.done)} / 已放弃 ${num0(work.abandoned)}` +
                       ` · 目标${graph.goalLocked === true ? '已锁定' : '未锁定'}`),
                   activeNodes.length === 0
                     ? h('p', { key: 'a', className: 'mc-sub', style: { margin: 0 } },
