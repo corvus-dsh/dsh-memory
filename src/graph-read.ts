@@ -133,3 +133,49 @@ export function readGraphStateOf<TGraph>(
   }
   return { status: 'ok', graph: normalise(parsed.record, id) }
 }
+
+/**
+ * ── A VIEW THAT REFUSES TO ANSWER FROM A FAILED MEASUREMENT (G-8b, P0) ──────────────────────────
+ *
+ * G-8 taught the READER to say 「unreadable」; this teaches the VIEW not to hand over data anyway.
+ *
+ * Measured (lead, §24.3): the回执 carried `readStatus: "unreadable"` **beside** `nodes: ["start"]`,
+ * `counts: { total: 1, done: 1 }`, `activeNodeId: ""` — verbatim the shape of a healthy project that never
+ * made a plan. A model that decides 「bootstrap or not」 from `nodes`/`counts` would then write a new plan
+ * over one it merely could not read.
+ *
+ * THE ASYMMETRY IS THE POINT:
+ *
+ *   absent      「no plan yet」 IS a fact. Hand over the empty graph — the caller needs `start` to build on.
+ *   unreadable  NOT a measurement. Return NO nodes and NO counts; a zero is a claim, and this read has
+ *               nothing to claim. `activeWorkNodes: []` stays because it is the ABSENCE of a claim.
+ */
+export function describeWithReadState<TView extends Record<string, unknown>>(
+  read: GraphReadState<unknown>,
+  describe: () => TView,
+): TView & { readStatus: GraphReadStatus; readDetail?: string } {
+  if (read.status === 'unreadable') {
+    return {
+      /**
+       * `graph` IS returned — it is the normalised EMPTY graph, and that is honest: it carries `id`/`version`
+       * (identity facts a caller needs to build a payload) and NO nodes. What is withheld is the DATA that
+       * would answer 「what is my plan」 — `nodes` / `counts` — because a zero count from a failed read is
+       * a claim this function has no basis for.
+       *
+       * (Measured while writing this: omitting `graph` entirely crashed the tool at `described.graph.id`.
+       * The line between 「identity」 and 「measurement」 is the one that matters here.)
+       */
+      graph: read.graph,
+      nodes: [],
+      counts: {
+        total: 0, pending: 0, active: 0, done: 0, abandoned: 0,
+        work: { total: 0, pending: 0, active: 0, done: 0, abandoned: 0 },
+        structural: 0,
+      },
+      activeWorkNodes: [],
+      readStatus: 'unreadable' as const,
+      ...(read.detail === undefined ? {} : { readDetail: read.detail }),
+    } as never
+  }
+  return { graph: read.graph, ...describe(), readStatus: read.status }
+}

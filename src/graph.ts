@@ -26,8 +26,8 @@ import { describeNodes } from './graph-view.js'
 import type { GraphNodeView } from './graph-view.js'
 import { buildBootstrapRecord, harvestingPrompt, makeEmptyGraph, planBootstrap, stampHarvested } from './graph-bootstrap.js'
 /** G-8: the IO half lives here so `graph.ts` (inside its 800-line cap) holds only what a graph MEANS. */
-import { readGraphStateOf } from './graph-read.js'
-import type { GraphReadState } from './graph-read.js'
+import { readGraphStateOf, describeWithReadState } from './graph-read.js'
+import type { GraphReadState, GraphReadStatus } from './graph-read.js'
 export type { GraphReadState, GraphReadStatus } from './graph-read.js'
 /** `graph.ts` owns the GRAPH; `graph-v3.ts` owns how a v3 field is JUDGED; `graph-goal-lock.ts` owns
  * LIFECYCLE (what a lock covers, when a constraint retires). Each is a separate file because this one has
@@ -259,26 +259,16 @@ export function emptyGraph(id: string, at?: string): TaskGraph {
   return makeEmptyGraph({ id, stamp: nowIso(at), startNodeId: START_NODE_ID }) as unknown as TaskGraph
 }
 
-/**
- * Read the graph. A missing or unreadable file is an EMPTY graph, never a throw at call time.
- *
- * ── G-8: THIS WRAPPER IS FOR RENDERERS, NOT FOR DECISIONS ──────────────────────────────────────
- *
- * It collapses `absent` / `unreadable` / `ok` into one value — right for a caller that must draw
- * something, wrong for one that acts on it. Measured: a corrupt graph made the harvest reminder report
- * 「nothing to harvest」 and handed an EMPTY LIST TO THE WRITER. Decide with `readGraphState`.
- */
+/** Read the graph. A missing or unreadable file is an EMPTY graph, never a throw.
+ * G-8: this wrapper is for RENDERERS. It collapses absent/unreadable/ok into one value, which is wrong
+ * for a caller that acts on it (measured: a corrupt graph made the harvest reminder report 「nothing to
+ * harvest」 and handed an EMPTY LIST TO THE WRITER). Decide with `readGraphState`. */
 export function readGraph(memoryDir: string, id = 'default'): TaskGraph {
   return readGraphState(memoryDir, id).graph
 }
 
-/**
- * The decision-oriented read, bound to THIS module's path/empty/normalise functions.
- *
- * Re-exported under its own name from `graph-read.ts` would be a DUPLICATE export (measured: `v290 ①`
- * refuses two modules defining one name), so the generic lives there as `readGraphStateOf` and this is
- * the one public `readGraphState`.
- */
+/** The decision-oriented read, bound to THIS module's path/empty/normalise. The generic lives in
+ * `graph-read.ts` as `readGraphStateOf` (two modules exporting one name fails `v290 ①`). */
 export function readGraphState(memoryDir: string, id = 'default'): GraphReadState<TaskGraph> {
   return readGraphStateOf<TaskGraph>(memoryDir, id, graphPath, emptyGraph, graphFromRecord)
 }
@@ -786,14 +776,16 @@ export function hasGraph(memoryDir: string): boolean {
   return existsSync(graphPath(memoryDir))
 }
 
-/** Store-keyed wrapper around `describeNodes`; most callers have a memoryDir, not a graph.
- * `...view`, NOT a hand-written field list: rebuilding `{ graph, nodes, counts }` field-by-field silently
- * DROPS whatever `describeNodes` later adds (measured: `work`/`structural`/`activeWorkNodes`). */
+/** G-8b: an `unreadable` read REFUSES to hand over nodes/counts — a healthy-looking empty graph is
+ * indistinguishable from 「no plan yet」, and a model would bootstrap over a plan it cannot read.
+ * Rule in `describeWithReadState` (`graph-read.ts`). */
 export function describeGraph(memoryDir: string, knowledge: KnowledgeEntry[] | undefined, id = 'default'): {
   graph: TaskGraph
+  readStatus: GraphReadStatus
+  readDetail?: string
 } & ReturnType<typeof describeNodes> {
-  const graph = readGraph(memoryDir, id)
-  return { graph, ...describeNodes(graph, knowledge) }
+  const read = readGraphState(memoryDir, id)
+  return describeWithReadState(read, () => describeNodes(read.graph, knowledge)) as never
 }
 
 export { isBlankGraph, renderNodeBanner, STRUCTURAL_NODE_IDS, isStructuralNodeId, isWorkNodeId, workNodes, stampTargetsForHarvest } from './graph-view.js'

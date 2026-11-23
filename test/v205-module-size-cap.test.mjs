@@ -146,7 +146,7 @@ const EXEMPT = new Map([
      * 天花板的规则是「今天多大就是多大」，所以它必须跟着实测走；不允许的是**留虚高配额**（实测 1900
      * 却登记 2009）。这一条下次仍按实测收紧，不因为「这次是加功能」就放宽。
      */
-    ceiling: 2861,
+    ceiling: 2867,
     reason:
       'dsh-memory 的插件入口：applyInner 一个函数 1362 行（占 58%），加上工具注册、console 网络端、'
       + 'harvest 编排与 33 个导出。它是整个重构的**目标文件**，拆它需要先拆它依赖的 store/retrieve'
@@ -196,6 +196,10 @@ const EXEMPT = new Map([
       + '1 行 import + 5 处调用改写成同一个谓词 + 两段压缩到最小的说明。**这 11 行不是机制，是把五份拷贝换成一份。**'
       + '（`graph.ts` 那边同步 **815 → 786**：`goalLockVerdict` 搬进 `graph-goal-lock.ts`，因为「锁覆盖哪些 op」'
       + '本来就归它所有；`graph-goal-lock.ts` 180 → 238 是那条规则的唯一住处，不是新判断。）'
+      + '**G-8b：2867（+6）**：`describeGraph` 的三态化本身搬进了 `graph-read.ts`（`describeWithReadState`），'
+      + '本文件只剩 1 个映射（面板原来靠 `catch` 判断 `unreadable`，而 `describeGraph` 改成返回值之后不再抛，'
+      + '所以那个 catch 永远不会触发——**一个靠异常判断的状态，在异常消失之后必须显式映射，否则损坏的图'
+      + '会渲染成「共 0 个节点」，同一句话往下错一层**）。6 行是那条映射 + 它的理由。'
       + '）',
   }],
   ['retrieve.ts', {

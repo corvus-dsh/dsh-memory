@@ -49,6 +49,25 @@ const V3_FORWARD: ReadonlyArray<readonly [tool: string, storage: string]> = [
   ['estimate', 'estimate'],
   ['actual', 'actual'],
   ['progress', 'progress'],
+  /**
+   * ── G-9b (P0, lead-measured): TWO MISSING LINES MADE THE GATE UNREACHABLE ──────────────────────
+   *
+   * `graph-goal-lock.ts` has a correct `acceptanceNeedsEvidence`, and `graph.ts` calls it. But the patch
+   * is assembled HERE, field by field, and these two were not on the list — so
+   * `acceptanceStatus: 'accepted'` was dropped before the gate ever saw it. Measured through the real
+   * `memory_graph_update` tool:
+   *
+   *     node:{ acceptanceStatus:'accepted' }                 → ok:true, node still pending
+   *     node:{ acceptanceStatus:'accepted', evidence:[...] } → ok:true, node still pending
+   *
+   * BOTH succeeded and NOTHING changed. The storage-layer rule was right; the field never arrived.
+   * `v322` was green because it called `updateGraph()` directly — four criteria, zero of them through the
+   * tool a model actually uses (see the file header: §〇 30).
+   *
+   * `graph-v3.ts`'s `resolveNodeV3` already READS and RETURNS both fields; only the delivery was missing.
+   */
+  ['execution_status', 'executionStatus'],
+  ['acceptance_status', 'acceptanceStatus'],
   ['standing', 'standing'],
   ['evidence', 'evidence'],
   ['log_pointers', 'logPointers'],
@@ -152,6 +171,10 @@ export function graphUpdateTool(deps: GraphToolDeps): Record<string, unknown> {
             estimate: { type: 'object', description: '{ complexity: 1..5, note? }' },
             actual: { type: 'object', description: '{ complexity: 1..5, note?, closedAt? }' },
             progress: { type: 'integer', minimum: 0, maximum: 100 },
+            /** G-9b: declared here too — `additionalProperties: false` means an undeclared field is
+             * rejected by the schema before the handler runs, so a `V3_FORWARD` row alone is not enough. */
+            execution_status: { type: 'string', enum: ['produced', 'failed', 'not-started'] },
+            acceptance_status: { type: 'string', enum: ['pending', 'accepted', 'rejected'] },
             standing: { type: 'string' },
             evidence: { type: 'array', items: { type: 'string' } },
             log_pointers: {
@@ -220,6 +243,9 @@ export function graphUpdateTool(deps: GraphToolDeps): Record<string, unknown> {
               estimate: { type: 'object' },
               actual: { type: 'object' },
               progress: { type: 'integer', minimum: 0, maximum: 100 },
+              /** G-9b: the bootstrap entries accept the same v3 fields as `add` — one schema, one set. */
+              execution_status: { type: 'string', enum: ['produced', 'failed', 'not-started'] },
+              acceptance_status: { type: 'string', enum: ['pending', 'accepted', 'rejected'] },
               standing: { type: 'string' },
               evidence: { type: 'array', items: { type: 'string' } },
               log_pointers: { type: 'array' },

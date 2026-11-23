@@ -2636,6 +2636,12 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
            * 「还有 N 个」 tail keeps the total honest.
            */
           const activeNodes = described.activeWorkNodes
+          /**
+           * G-8b: this branch used to learn `unreadable` from a THROW — but `describeGraph` fail-opened to
+           * an empty graph and nothing raised. The read state is a VALUE now, so map it explicitly;
+           * otherwise a corrupt graph renders as 「共 0 个节点」, the same lie one layer down.
+           */
+          if (described.readStatus === 'unreadable') return { unreadable: described.readDetail ?? '任务图存在但读不出来' }
           return {
             graphId: described.graph.id,
             goalLocked: described.graph.goalLockedAt.length > 0,
