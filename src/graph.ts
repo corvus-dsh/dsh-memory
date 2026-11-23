@@ -25,6 +25,9 @@ import type { KnowledgeEntry, KnowledgeQueryResult, KnowledgeRef } from './knowl
 import { describeNodes } from './graph-view.js'
 import type { GraphNodeView } from './graph-view.js'
 import { buildBootstrapRecord, harvestingPrompt, makeEmptyGraph, planBootstrap, stampHarvested } from './graph-bootstrap.js'
+/** G-8: the IO half lives here so `graph.ts` (inside its 800-line cap) holds only what a graph MEANS. */
+import { readGraphStateOf } from './graph-read.js'
+export type { GraphReadState, GraphReadStatus } from './graph-read.js'
 /** `graph.ts` owns the GRAPH; `graph-v3.ts` owns how a v3 field is JUDGED; `graph-goal-lock.ts` owns
  * LIFECYCLE (what a lock covers, when a constraint retires). Each is a separate file because this one has
  * a hard 800-line cap and a registered ceiling may only go DOWN. */
@@ -250,23 +253,32 @@ export function emptyGraph(id: string, at?: string): TaskGraph {
   return makeEmptyGraph({ id, stamp: nowIso(at), startNodeId: START_NODE_ID }) as unknown as TaskGraph
 }
 
-/** Read the graph. A missing or unreadable file is an EMPTY graph, never a throw at call time. */
+/**
+ * Read the graph. A missing or unreadable file is an EMPTY graph, never a throw at call time.
+ *
+ * ── G-8: THIS WRAPPER IS FOR RENDERERS, NOT FOR DECISIONS ──────────────────────────────────────
+ *
+ * It collapses `absent` / `unreadable` / `ok` into one value — right for a caller that must draw
+ * something, wrong for one that acts on it. Measured: a corrupt graph made the harvest reminder report
+ * 「nothing to harvest」 and handed an EMPTY LIST TO THE WRITER. Decide with `readGraphState`.
+ */
 export function readGraph(memoryDir: string, id = 'default'): TaskGraph {
-  const path = graphPath(memoryDir)
-  let text: string
-  try {
-    text = readFileSync(path, 'utf8')
-  } catch {
-    return emptyGraph(id)
-  }
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(text)
-  } catch {
-    return emptyGraph(id)
-  }
-  if (parsed === null || typeof parsed !== 'object') return emptyGraph(id)
-  const record = parsed as Record<string, unknown>
+  return readGraphState(memoryDir, id).graph
+}
+
+/**
+ * The decision-oriented read, bound to THIS module's path/empty/normalise functions.
+ *
+ * Re-exported under its own name from `graph-read.ts` would be a DUPLICATE export (measured: `v290 ①`
+ * refuses two modules defining one name), so the generic lives there as `readGraphStateOf` and this is
+ * the one public `readGraphState`.
+ */
+export function readGraphState(memoryDir: string, id = 'default'): GraphReadState {
+  return readGraphStateOf<TaskGraph>(memoryDir, id, graphPath, emptyGraph, graphFromRecord)
+}
+
+/** The parse-and-normalise half, shared so there is one reader of one file format. */
+function graphFromRecord(record: Record<string, unknown>, id: string): TaskGraph {
   const stamp = nowIso()
   const nodes: GraphNode[] = []
   for (const raw of Array.isArray(record.nodes) ? record.nodes : []) {
@@ -781,5 +793,5 @@ export function describeGraph(memoryDir: string, knowledge: KnowledgeEntry[] | u
   return { graph, ...describeNodes(graph, knowledge) }
 }
 
-export { isBlankGraph, renderNodeBanner, STRUCTURAL_NODE_IDS, isStructuralNodeId, isWorkNodeId, workNodes } from './graph-view.js'
+export { isBlankGraph, renderNodeBanner, STRUCTURAL_NODE_IDS, isStructuralNodeId, isWorkNodeId, workNodes, stampTargetsForHarvest } from './graph-view.js'
 export type { GraphNodeView } from './graph-view.js'

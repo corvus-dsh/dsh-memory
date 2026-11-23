@@ -46,9 +46,12 @@ import {
   isWorkNodeId,
   markHarvested,
   readGraph,
+  /** G-8: the decision-oriented read. `readGraph` stays for renderers that must draw something. */
+  readGraphState,
   renderNodeBanner,
   updateGraph,
   workNodes,
+  stampTargetsForHarvest,
 } from './graph.js'
 import { graphUpdateTool } from './graph-tool.js'
 /**
@@ -1128,20 +1131,9 @@ export function apply(ctx: ContextLike, config: MemoryConfig = {}): void {
  * `harvestedAt` — the exact set the warning is about — which is also what keeps the reminder honest
  * across a restart. `markHarvested` is idempotent, so an over-broad list costs nothing.
  */
-function activeNodeIdsForHarvest(memoryDir: string): string[] {
-  try {
-    const graph = readGraph(memoryDir)
-    /**
-     * 19.4-G G-3 (P0, WRITE PATH): this list is `markHarvested`'s argument — the filter decides what is
-     * WRITTEN. Measured: with `goal` done, one real harvest wrote `harvestedAt` onto the destination and
-     * every later reader believed it. `workNodes` is the one predicate. See `graph-view.ts`.
-     */
-    return workNodes(graph.nodes)
-      .filter((node) => node.status === 'done' && node.harvestedAt.length === 0)
-      .map((node) => node.id)
-  } catch {
-    return []
-  }
+function activeNodeIdsForHarvest(memoryDir: string): { ids: string[]; unreadable?: string } {
+  /** G-3 (P0, WRITE PATH) + G-8 (P0, FAIL-CLOSED): see `stampTargetsForHarvest` in `graph-view.ts`. */
+  return stampTargetsForHarvest(readGraphState(memoryDir))
 }
 
 function applyInner(ctx: ContextLike, config: MemoryConfig): void {
@@ -1647,12 +1639,17 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
        * stamped, which is the node the warning was about.
        */
       const recorded = result.written + result.merged
-      const harvested = recorded === 0 ? [] : markHarvested(resolved.memoryDir, activeNodeIdsForHarvest(resolved.memoryDir))
+      /** G-8: 图不可读时不写不猜，把「读不出来」报出去（否则一次成功的学习会被说成「无需盖章」）。 */
+      const stampTarget = recorded === 0 ? { ids: [] as string[] } : activeNodeIdsForHarvest(resolved.memoryDir)
+      const harvested = stampTarget.ids.length === 0 && stampTarget.unreadable === undefined
+        ? []
+        : markHarvested(resolved.memoryDir, stampTarget.ids)
       return {
         ...result,
         knowledgeDir: resolved.knowledgeDir,
         workspace,
         ...(harvested.length === 0 ? {} : { harvestedNodes: harvested }),
+        ...(stampTarget.unreadable === undefined ? {} : { harvestSkipped: stampTarget.unreadable }),
       }
     },
   })
@@ -1864,6 +1861,12 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
     output: textOutput(),
     execute: async (args: { graphId?: string } = {}) => {
       const id = typeof args.graphId === 'string' && args.graphId.length > 0 ? args.graphId : 'default'
+      /**
+       * G-8 (P0): the read state is part of the answer. A CORRUPT graph used to answer
+       * 「nodes: [start], activeNodeId: ''」 — the shape of a healthy project that never made a plan — so
+       * the model believed 「尚未建计划」 and called bootstrap over a plan it simply could not read.
+       */
+      const read = readGraphState(resolved.memoryDir, id)
       const entries = readKnowledge(resolved.knowledgeDir)
       const described = describeGraph(resolved.memoryDir, entries, id)
       const active = described.activeWorkNodes[0]
@@ -1873,6 +1876,8 @@ function applyInner(ctx: ContextLike, config: MemoryConfig): void {
         goalLocked: described.graph.goalLockedAt.length > 0,
         activeNodeId: active?.id ?? '',
         activeBanner: renderNodeBanner(active) ?? '',
+        readStatus: read.status,
+        ...(read.detail === undefined ? {} : { readDetail: read.detail }),
         path: join(resolved.memoryDir, 'task-graph.json'),
       }
     },

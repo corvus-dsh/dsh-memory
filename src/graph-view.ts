@@ -70,6 +70,31 @@ export function workNodes<T extends { id: string }>(nodes: readonly T[]): T[] {
   return nodes.filter((node) => isWorkNodeId(node.id))
 }
 
+/**
+ * ── WHICH NODES A HARVEST SHOULD STAMP (G-3 + G-8, BOTH P0) ─────────────────────────────────────
+ *
+ * This list is the ARGUMENT to `markHarvested`, so it decides what gets WRITTEN, not what gets displayed.
+ *
+ * G-3: the filter must be `workNodes` — the hand-written `id !== 'start'` forgot `goal`, and the live
+ * graph keeps `goal` at `active`, so one real harvest stamped the DESTINATION as 「已提炼」.
+ *
+ * G-8: an EMPTY list claims 「nothing needs stamping」, and that claim must not be invented from a failed
+ * read. `readGraph` returned an empty graph for a CORRUPT file as well, so a damaged `task-graph.json`
+ * made the writer silently do nothing while the caller was told everything succeeded. So `absent`
+ * (nothing to stamp, correctly) and `unreadable` (cannot know) return DIFFERENT things.
+ */
+export function stampTargetsForHarvest(
+  read: { status: 'absent' | 'unreadable' | 'ok'; graph: { nodes: readonly (GraphNode | { id: string; status: string; harvestedAt: string })[] }; detail?: string },
+): { ids: string[]; unreadable?: string } {
+  if (read.status === 'unreadable') return { ids: [], unreadable: read.detail ?? '任务图存在但读不出来' }
+  if (read.status === 'absent') return { ids: [] }
+  return {
+    ids: read.graph.nodes
+      .filter((node) => isWorkNodeId(node.id) && node.status === 'done' && node.harvestedAt.length === 0)
+      .map((node) => node.id),
+  }
+}
+
 export interface GraphNodeView extends GraphNode {
   /** The knowledge entries this node points at, resolved (empty when no knowledge dir was given). */
   knowledge: KnowledgeEntry[]

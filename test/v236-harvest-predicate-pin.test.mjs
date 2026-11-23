@@ -45,8 +45,22 @@ test('v236 ①: 「未提炼」判据在四处读取面都还在（completion �
    *
    * If this number changes again because a surface was REMOVED on purpose, update it and say why in
    * the commit; do not delete the assertion.
+   *
+   * ── 19.4-G: THREE HERE, FOUR SURFACES STILL EXIST ───────────────────────────────────────────────
+   *
+   * The number went 4 → 3 because ONE of the copies MOVED, not because a surface was removed. The
+   * write-path copy now lives in `graph-view.ts` as `stampTargetsForHarvest`, which is the whole point
+   * of 19.4-G: five hand-written filters each forgot `goal`, so 「is this a unit of work」 became one
+   * predicate asked from one place.
+   *
+   * That is also why this file now counts BOTH files. A count restricted to `index.ts` would have
+   * reported a surface REMOVED when it was actually re-homed — and the next reader would have had to
+   * re-derive that. **A denominator that silently changes shape is the same disease as a number without
+   * one.**
    */
-  assert.equal(occurrences, 4, `判据必须仍在四处，实测 ${occurrences} 处`)
+  const VIEW = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'graph-view.ts'), 'utf8')
+  const total = occurrences + (VIEW.split(PREDICATE).length - 1)
+  assert.equal(total, 4, `判据必须仍在四处（index.ts ${occurrences} + graph-view.ts ${total - occurrences}），实测 ${total} 处`)
 })
 
 test('v236 ②: 判据没有被换成字面 false（can-red 的形状）', () => {

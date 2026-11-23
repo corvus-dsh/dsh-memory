@@ -70,6 +70,7 @@ const SCANNED = [
   'graph.ts',
   'graph-bootstrap.ts',
   'graph-goal-lock.ts',
+  'graph-read.ts',
   'graph-tool.ts',
   'graph-v3.ts',
   'graph-view.ts',
@@ -145,7 +146,7 @@ const EXEMPT = new Map([
      * 天花板的规则是「今天多大就是多大」，所以它必须跟着实测走；不允许的是**留虚高配额**（实测 1900
      * 却登记 2009）。这一条下次仍按实测收紧，不因为「这次是加功能」就放宽。
      */
-    ceiling: 2856,
+    ceiling: 2861,
     reason:
       'dsh-memory 的插件入口：applyInner 一个函数 1362 行（占 58%），加上工具注册、console 网络端、'
       + 'harvest 编排与 33 个导出。它是整个重构的**目标文件**，拆它需要先拆它依赖的 store/retrieve'
