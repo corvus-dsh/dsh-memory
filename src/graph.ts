@@ -27,6 +27,7 @@ import type { GraphNodeView } from './graph-view.js'
 import { buildBootstrapRecord, harvestingPrompt, makeEmptyGraph, planBootstrap, stampHarvested } from './graph-bootstrap.js'
 /** G-8: the IO half lives here so `graph.ts` (inside its 800-line cap) holds only what a graph MEANS. */
 import { readGraphStateOf } from './graph-read.js'
+import type { GraphReadState } from './graph-read.js'
 export type { GraphReadState, GraphReadStatus } from './graph-read.js'
 /** `graph.ts` owns the GRAPH; `graph-v3.ts` owns how a v3 field is JUDGED; `graph-goal-lock.ts` owns
  * LIFECYCLE (what a lock covers, when a constraint retires). Each is a separate file because this one has
@@ -273,7 +274,7 @@ export function readGraph(memoryDir: string, id = 'default'): TaskGraph {
  * refuses two modules defining one name), so the generic lives there as `readGraphStateOf` and this is
  * the one public `readGraphState`.
  */
-export function readGraphState(memoryDir: string, id = 'default'): GraphReadState {
+export function readGraphState(memoryDir: string, id = 'default'): GraphReadState<TaskGraph> {
   return readGraphStateOf<TaskGraph>(memoryDir, id, graphPath, emptyGraph, graphFromRecord)
 }
 
