@@ -99,6 +99,12 @@ jobs:
         # typescript 只能是精确锁版本的 devDependency（干净克隆里缺它的代价已实测）。
         run: node scripts/check-runtime-deps.mjs
 
+      - name: CI checkout layout matches what the mv steps assume
+        run: node scripts/check-ci-layout.mjs
+
+      - name: Comments do not claim what the manifest no longer says
+        run: node scripts/check-doc-claims.mjs
+
       - name: Install (no dependencies expected)
         run: npm install --no-audit --no-fund
 
