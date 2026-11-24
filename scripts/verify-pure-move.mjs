@@ -380,6 +380,19 @@ const registryOverride = (() => {
   if (raw === undefined || raw === '') return undefined
   const parsed = JSON.parse(raw)
   if (!Array.isArray(parsed)) throw new Error('PPM_CORRECTIONS_JSON must be a JSON array')
+  /**
+   * ── 注入点必须自述（lead §五十三.2 / §五十三.3）────────────────────────────────────────────
+   *
+   * 这个变量替换的是**门禁的例外清单本身**。它是本轮反复在杀的那个病的最纯粹形式：
+   * **例外清单可以被外部换掉，而日志里一个字都没有。**
+   *
+   * 打印的是条目数与「哪几个 name」，不是整张表——读者要判断的是「这次用的不是仓里那张表」，
+   * 而这需要知道换了几个、换了谁。走 stderr：它是关于产物怎么产生的说明，不是产物。
+   */
+  console.error(`verify-pure-move: format-correction registry replaced, ${parsed.length} entr${parsed.length === 1 ? 'y' : 'ies'} (injected via PPM_CORRECTIONS_JSON)`)
+  for (const entry of parsed) {
+    console.error(`  ${entry?.name ?? JSON.stringify(entry)}`)
+  }
   return parsed
 })()
 

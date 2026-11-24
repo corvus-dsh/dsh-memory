@@ -83,6 +83,13 @@ function resolveMemoryDir() {
   const explicit = process.argv.find((arg) => arg.startsWith('--memory-dir='))
   if (explicit !== undefined) return explicit.slice('--memory-dir='.length)
   if (typeof process.env.DSH_MEMORY_DIR === 'string' && process.env.DSH_MEMORY_DIR.length > 0) {
+    /**
+     * ── 注入点必须自述（lead §五十三.2）─────────────────────────────────────────────────────────
+     *
+     * 这个变量决定**恢复写进哪个 store**。一次「恢复进测试用的 store」与一次「恢复进活的 store」
+     * 打印出来的报告一模一样，而后者是不可撤销的。走 stderr。
+     */
+    console.error(`restore-graph-v3: store = ${process.env.DSH_MEMORY_DIR} (injected via DSH_MEMORY_DIR)`)
     return process.env.DSH_MEMORY_DIR
   }
   return join(homedir(), '.dsh', 'profiles', 'desktop', '.dsh-memory')

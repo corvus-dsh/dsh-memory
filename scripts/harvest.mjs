@@ -37,6 +37,16 @@ function arg(name, fallback) {
 
 const dryRun = process.argv.includes('--dry-run')
 const dataDir = arg('data-dir', process.env.DSH_GRAFT_DATA_DIR ?? '')
+/**
+ * ── 注入点必须自述（lead §五十三.2）─────────────────────────────────────────────────────────────
+ *
+ * `--data-dir` 是命令行，看得见；`DSH_GRAFT_DATA_DIR` 看不见。它决定**读哪个数据目录、写进哪个
+ * memory 目录**（`memoryDir` 由它派生），而原来日志里一个字都没有——一次「跑在别人的数据目录上」
+ * 与一次「跑在默认数据目录上」输出完全一样。走 stderr：关于产物怎么产生的说明。
+ */
+if (process.env.DSH_GRAFT_DATA_DIR !== undefined && process.env.DSH_GRAFT_DATA_DIR !== '') {
+  console.error(`harvest: data dir = ${dataDir} (injected via DSH_GRAFT_DATA_DIR)`)
+}
 const sessionsRoot = arg('sessions-root', join(process.env.DSH_HOME ?? '', 'sessions'))
 const memoryDir = arg('memory-dir', dataDir ? join(dataDir, '..', 'dsh-memory', '.dsh-memory') : '')
 const skillsDir = arg('skills-dir', defaultSkillsDir())
