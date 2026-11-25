@@ -145,8 +145,14 @@ const EXEMPT = new Map([
      *
      * 天花板的规则是「今天多大就是多大」，所以它必须跟着实测走；不允许的是**留虚高配额**（实测 1900
      * 却登记 2009）。这一条下次仍按实测收紧，不因为「这次是加功能」就放宽。
+     *
+     * ── 2026-11-25（S11 / M1）：2866 → **2890**（+24）─────────────────────────────────────────────
+     *
+     * `memory_taskgraph_read` 的 `activeWorkNodes[0]` 改成「两个以上 active ⇒ `AMBIGUOUS`」：
+     * +24 行 = 判定 + `activeNodeStatus` / `activeNodeCandidates` 两个字段 + 为什么不在多个候选里
+     * 挑一个。**这是修复，不是膨胀**，棘轮按实测收紧到 2890。
      */
-    ceiling: 2866,
+    ceiling: 2890,
     reason:
       'dsh-memory 的插件入口：applyInner 一个函数 1362 行（占 58%），加上工具注册、console 网络端、'
       + 'harvest 编排与 33 个导出。它是整个重构的**目标文件**，拆它需要先拆它依赖的 store/retrieve'
