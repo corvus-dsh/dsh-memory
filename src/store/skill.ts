@@ -997,12 +997,46 @@ function writeSkillLocked(skillsDir: string, skill: ExtractedSkill, input: Skill
     // older caller) inherits the workspace already recorded. Otherwise a merge
     // would silently launder a memory out of the workspace that produced it.
     const previousWorkspace = readSkillWorkspace(previousText)
+    /**
+     * ⚠️ `previousSkill` 必须**先于**下面的跨 workspace 判定声明：那一支要用它的 `title` 来填
+     * 冲突记录。第一版把它留在 `environmentDivergence` 那一行（判定之后），于是 `crossWorkspace`
+     * 为真时 `previousSkill` 还在 TDZ 里 —— 构建不报（本仓同样用类型擦除构建），只有走到那条
+     * 分支才抛 `ReferenceError`。按长期规则 29 整块上移。
+     */
+    const previousSkill = parseSkillFile(previousText, skill.name)
+    /**
+     * ── D2（S8）：A→B 覆盖必须**另存 + 冲突记录**，不许覆盖 ─────────────────────────────────────
+     *
+     * 旧行为有两个分支，都不是「跨 workspace 覆盖」该有的答案：
+     *
+     *   · 新 workspace 为空  ⇒ 沿用旧的（正确：一次重放不该把记忆洗出它出身的 workspace）；
+     *   · 新 workspace 非空  ⇒ **无条件取新的**。当它与旧的**不同**时，这行代码把 A 工作区的
+     *     那份记忆原地改写成了 B 的 —— A 的那一版从此不存在，也没有任何记录说它曾被改写。
+     *     对一个「按 workspace 隔离」的存储来说，这是**跨工作区覆写**，比丢一条记录更严重：
+     *     检索侧按 workspace 过滤，于是 A 会看到 B 写的规则，而 B 永远不会知道这条规则来自 A。
+     *
+     * 正确的处置是**并存 + 留痕**：B 的那一份另存为新名字，并在它的 frontmatter 里记一条
+     * `conflicts` 指回 A 的那一份（`linkConflictBack` 同时把 A 指向 B）。两侧都能读到「有一个
+     * 不同工作区写过同一个标题」，而不是其中一侧静默消失。
+     *
+     * 判定必须发生在**任何 atomicWrite 之前** —— 顺序反了就等于先覆盖再补记录（记录说「这是 A 的」，
+     * 文件已经是 B 的）。
+     */
+    const nextWorkspace = normalizeWorkspace(meta.workspace)
+    const crossWorkspace = nextWorkspace.length > 0 && previousWorkspace.length > 0 && nextWorkspace !== previousWorkspace
+    if (crossWorkspace) {
+      const altName = uniqueSkillName(skillsDir, skill.name)
+      const conflict: SkillConflict = { name: skill.name, title: previousSkill.title }
+      const alternative: ExtractedSkill = { ...withSession, name: altName, confidence: 1 }
+      atomicWrite(skillPath(skillsDir, altName), renderSkill(alternative, meta, undefined, [conflict]))
+      linkConflictBack(skillsDir, conflict, alternative)
+      return `workspace-conflict:${previousWorkspace} vs ${nextWorkspace}`
+    }
     const writeMeta: SkillMeta =
-      normalizeWorkspace(meta.workspace).length > 0 || previousWorkspace.length === 0
+      nextWorkspace.length > 0 || previousWorkspace.length === 0
         ? meta
         : { ...meta, workspace: previousWorkspace }
     // v0.7.1: a version/environment difference is a CONFLICT, never a merge.
-    const previousSkill = parseSkillFile(previousText, skill.name)
     const divergence = environmentDivergence(previousSkill, skill)
     if (divergence !== undefined) {
       const altName = uniqueSkillName(skillsDir, skill.name)
